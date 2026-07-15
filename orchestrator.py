@@ -439,13 +439,13 @@ def main() -> None:
 
     try:
         run_command(
-            [cm_binary, "init", "--yes"],
+            [cm_binary, "init"],
             cwd=repo_dir,
             env=scrubbed_env,
             check=True,
         )
         run_command(
-            [cm_binary, "init", "--verify", "--yes"],
+            [cm_binary, "init", "--verify"],
             cwd=repo_dir,
             env=scrubbed_env,
             check=True,
@@ -463,7 +463,7 @@ def main() -> None:
     logger.info("Scanning codebase for findings...")
     try:
         run_command(
-            [cm_binary, "find", ".", "--yes"],
+            [cm_binary, "find", "."],
             cwd=repo_dir,
             env=scrubbed_env,
             check=True,
