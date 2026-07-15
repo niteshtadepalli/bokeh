@@ -2,13 +2,23 @@
 """Unit tests for CodeMender Orchestrator."""
 
 import base64
+import io
 import json
 import os
+import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 import requests
+import yaml
 
 import orchestrator
+
+
+class MockFile(io.StringIO):
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
 
 class TestOrchestrator(unittest.TestCase):
@@ -234,6 +244,125 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(branch, "prod")
         self.assertEqual(mock_get.call_count, 3)
         self.assertEqual(mock_sleep.call_count, 2)
+
+    @patch("os.path.exists")
+    @patch("os.makedirs")
+    @patch("sys.stdin.isatty")
+    def test_inject_codemender_config_env_only(self, mock_isatty, mock_makedirs, mock_exists):
+        """Test configuration injection using only environment variables."""
+        mock_exists.side_effect = lambda path: (".codemender/config.yaml" in path or path.endswith(".codemender"))
+        mock_isatty.return_value = False
+
+        test_env = {
+            "CODEMENDER_BUILD_COMMAND": "npm test",
+            "CODEMENDER_VCS_TYPE": "git",
+        }
+
+        default_config = yaml.safe_dump({
+            "build": {"command": ""},
+            "vcs": {"type": "", "commands": {"reset": ""}},
+            "tools": {"confirm_commands": True, "confirm_writes": True}
+        })
+
+        written_data = MockFile()
+
+        def mock_open_fn(path, mode="r", *args, **kwargs):
+            if "w" in mode:
+                return written_data
+            return MockFile(default_config)
+
+        with patch.dict(os.environ, test_env, clear=True), \
+             patch("builtins.open", mock_open_fn):
+            
+            orchestrator.inject_codemender_config("/dummy/repo")
+
+        self.assertTrue(len(written_data.getvalue()) > 0)
+        merged_config = yaml.safe_load(written_data.getvalue())
+
+        self.assertEqual(merged_config["build"]["command"], "npm test")
+        self.assertEqual(merged_config["vcs"]["type"], "git")
+        self.assertEqual(merged_config["project_paths"], ["/dummy/repo"])
+        self.assertFalse(merged_config["tools"]["confirm_commands"])
+        self.assertFalse(merged_config["tools"]["confirm_writes"])
+
+    @patch("os.path.exists")
+    @patch("os.makedirs")
+    @patch("sys.stdin.isatty")
+    def test_inject_codemender_config_repo_precedence(self, mock_isatty, mock_makedirs, mock_exists):
+        """Verify repository-level .codemender.yaml overrides environment variables."""
+        mock_exists.side_effect = lambda path: ".codemender.yaml" in path or "config.yaml" in path or path.endswith(".codemender")
+        mock_isatty.return_value = False
+
+        test_env = {
+            "CODEMENDER_BUILD_COMMAND": "env_build_cmd",
+        }
+
+        local_config = yaml.safe_dump({
+            "build": {"command": "mvn clean test"},
+            "vcs": {"type": "custom", "commands": {"reset": "./reset.sh"}},
+            "project_paths": ["services/user"]
+        })
+
+        default_config = yaml.safe_dump({
+            "build": {"command": ""},
+            "vcs": {"type": "", "commands": {"reset": ""}},
+            "tools": {"confirm_commands": True, "confirm_writes": True}
+        })
+
+        written_data = MockFile()
+
+        def mock_open_fn(path, mode="r", *args, **kwargs):
+            if ".codemender.yaml" in path:
+                return MockFile(local_config)
+            if "w" in mode:
+                return written_data
+            return MockFile(default_config)
+
+        with patch.dict(os.environ, test_env, clear=True), \
+             patch("builtins.open", mock_open_fn):
+            
+            orchestrator.inject_codemender_config("/dummy/repo")
+
+        self.assertTrue(len(written_data.getvalue()) > 0)
+        merged_config = yaml.safe_load(written_data.getvalue())
+
+        self.assertEqual(merged_config["build"]["command"], "mvn clean test")
+        self.assertEqual(merged_config["vcs"]["type"], "custom")
+        self.assertEqual(merged_config["vcs"]["commands"]["reset"], "./reset.sh")
+        self.assertEqual(merged_config["project_paths"], ["services/user"])
+
+    @patch("os.path.exists")
+    @patch("os.makedirs")
+    @patch("sys.stdin.isatty")
+    @patch("builtins.input")
+    def test_inject_codemender_config_interactive_prompt(self, mock_input, mock_isatty, mock_makedirs, mock_exists):
+        """Verify manual interactive fallback prompt works when sys.stdin is a TTY."""
+        mock_exists.side_effect = lambda path: "config.yaml" in path or path.endswith(".codemender")
+        mock_isatty.return_value = True
+        mock_input.return_value = "interactive_npm_test"
+
+        default_config = yaml.safe_dump({
+            "build": {"command": ""},
+            "vcs": {"type": "", "commands": {"reset": ""}},
+            "tools": {"confirm_commands": True, "confirm_writes": True}
+        })
+
+        written_data = MockFile()
+
+        def mock_open_fn(path, mode="r", *args, **kwargs):
+            if "w" in mode:
+                return written_data
+            return MockFile(default_config)
+
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("builtins.open", mock_open_fn):
+            
+            orchestrator.inject_codemender_config("/dummy/repo")
+
+        self.assertTrue(len(written_data.getvalue()) > 0)
+        merged_config = yaml.safe_load(written_data.getvalue())
+
+        self.assertEqual(merged_config["build"]["command"], "interactive_npm_test")
 
 
 if __name__ == "__main__":
