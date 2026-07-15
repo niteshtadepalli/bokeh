@@ -172,6 +172,10 @@ def run_command(
     else:
       log_cmd_parts.append(arg)
 
+  cmd_str_short = " ".join(log_cmd_parts)
+  if len(cmd_str_short) > 80:
+    cmd_str_short = cmd_str_short[:77] + "..."
+
   logger.info("Executing command: %s", " ".join(log_cmd_parts))
 
   # Start the process with stderr redirected to stdout to stream both
@@ -186,6 +190,10 @@ def run_command(
       bufsize=1,  # Line-buffered
   )
 
+  # Write start delimiter
+  sys.stdout.write(f"\n>>> [SUBPROCESS START] {cmd_str_short} >>>\n")
+  sys.stdout.flush()
+
   stdout_lines = []
   # Stream output line-by-line in real-time
   assert process.stdout is not None
@@ -197,6 +205,12 @@ def run_command(
   process.stdout.close()
   return_code = process.wait()
   full_stdout = "".join(stdout_lines)
+
+  # Write end delimiter
+  sys.stdout.write(
+      f"<<< [SUBPROCESS END] {cmd_str_short} (EXIT: {return_code}) <<<\n\n"
+  )
+  sys.stdout.flush()
 
   if check and return_code != 0:
     logger.error("Command failed with code %d", return_code)
@@ -413,10 +427,11 @@ def inject_codemender_config(repo_dir: str) -> None:
   # 3. Read Environment Variable configurations (A: Env Overrides)
   env_build_cmd = os.environ.get("CODEMENDER_BUILD_COMMAND")
   if env_build_cmd:
+    clean_build_cmd = env_build_cmd.strip().strip("'\"")
     logger.info(
-        "Applying env override CODEMENDER_BUILD_COMMAND: %s", env_build_cmd
+        "Applying env override CODEMENDER_BUILD_COMMAND: %s", clean_build_cmd
     )
-    config_data["build"]["command"] = env_build_cmd
+    config_data["build"]["command"] = clean_build_cmd
 
   # 4. Read Repository-Level config (B: Config-as-Code - takes precedence)
   project_config = None

@@ -83,7 +83,7 @@ gcloud run jobs create codemender-nightly-scan \
     --ephemeral-storage=10Gi \
     --memory=4Gi \
     --cpu=2 \
-    --set-env-vars="GITHUB_REPO_URL=https://github.com/your-org/your-repo.git" \
+    --set-env-vars="GITHUB_REPO_URL=https://github.com/your-org/your-repo.git,CODEMENDER_BUILD_COMMAND='npm install && npm test'" \
     --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
 ```
 

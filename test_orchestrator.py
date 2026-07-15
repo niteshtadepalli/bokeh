@@ -293,7 +293,7 @@ class TestOrchestrator(unittest.TestCase):
 
     written_data = MockFile()
 
-    def mock_open_fn(path, mode="r", *args, **kwargs):
+    def mock_open_fn(_path, mode="r", *_args, **_kwargs):
       if "w" in mode:
         return written_data
       return MockFile(default_config)
@@ -305,14 +305,61 @@ class TestOrchestrator(unittest.TestCase):
 
       orchestrator.inject_codemender_config("/dummy/repo")
 
-    self.assertTrue(len(written_data.getvalue()) > 0)
+    self.assertGreater(len(written_data.getvalue()), 0)
     merged_config = yaml.safe_load(written_data.getvalue())
 
-    self.assertEqual(merged_config["build"]["command"], "npm test")
+    self.assertEqual(
+        merged_config["build"]["command"], "npm test"
+    )
     self.assertEqual(merged_config["vcs"]["type"], "git")
     self.assertEqual(merged_config["project_paths"], ["/dummy/repo"])
     self.assertFalse(merged_config["tools"]["confirm_commands"])
     self.assertFalse(merged_config["tools"]["confirm_writes"])
+    mock_makedirs.assert_called()
+
+  @patch("os.path.exists")
+  @patch("os.makedirs")
+  @patch("sys.stdin.isatty")
+  def test_inject_codemender_config_env_quotes_stripped(
+      self, mock_isatty, mock_makedirs, mock_exists
+  ):
+    """Verify surrounding single/double quotes in build command are stripped."""
+    mock_exists.side_effect = lambda path: (
+        ".codemender/config.yaml" in path or path.endswith(".codemender")
+    )
+    mock_isatty.return_value = False
+
+    test_env = {
+        "CODEMENDER_BUILD_COMMAND": "'npm install && npm test'",
+        "CODEMENDER_VCS_TYPE": "git",
+    }
+
+    default_config = yaml.safe_dump({
+        "build": {"command": ""},
+        "vcs": {"type": "", "commands": {"reset": ""}},
+        "tools": {"confirm_commands": True, "confirm_writes": True},
+    })
+
+    written_data = MockFile()
+
+    def mock_open_fn(_path, mode="r", *_args, **_kwargs):
+      if "w" in mode:
+        return written_data
+      return MockFile(default_config)
+
+    with (
+        patch.dict(os.environ, test_env, clear=True),
+        patch("builtins.open", mock_open_fn),
+    ):
+      orchestrator.inject_codemender_config("/dummy/repo")
+
+    self.assertGreater(len(written_data.getvalue()), 0)
+    merged_config = yaml.safe_load(written_data.getvalue())
+
+    self.assertEqual(
+        merged_config["build"]["command"], "npm install && npm test"
+    )
+    mock_makedirs.assert_called()
 
   @patch("os.path.exists")
   @patch("os.makedirs")
@@ -346,7 +393,7 @@ class TestOrchestrator(unittest.TestCase):
 
     written_data = MockFile()
 
-    def mock_open_fn(path, mode="r", *args, **kwargs):
+    def mock_open_fn(path, mode="r", *_args, **_kwargs):
       if ".codemender.yaml" in path:
         return MockFile(local_config)
       if "w" in mode:
@@ -360,13 +407,14 @@ class TestOrchestrator(unittest.TestCase):
 
       orchestrator.inject_codemender_config("/dummy/repo")
 
-    self.assertTrue(len(written_data.getvalue()) > 0)
+    self.assertGreater(len(written_data.getvalue()), 0)
     merged_config = yaml.safe_load(written_data.getvalue())
 
     self.assertEqual(merged_config["build"]["command"], "mvn clean test")
     self.assertEqual(merged_config["vcs"]["type"], "custom")
     self.assertEqual(merged_config["vcs"]["commands"]["reset"], "./reset.sh")
     self.assertEqual(merged_config["project_paths"], ["services/user"])
+    mock_makedirs.assert_called()
 
   @patch("os.path.exists")
   @patch("os.makedirs")
@@ -390,7 +438,7 @@ class TestOrchestrator(unittest.TestCase):
 
     written_data = MockFile()
 
-    def mock_open_fn(path, mode="r", *args, **kwargs):
+    def mock_open_fn(_path, mode="r", *_args, **_kwargs):
       if "w" in mode:
         return written_data
       return MockFile(default_config)
@@ -402,10 +450,11 @@ class TestOrchestrator(unittest.TestCase):
 
       orchestrator.inject_codemender_config("/dummy/repo")
 
-    self.assertTrue(len(written_data.getvalue()) > 0)
+    self.assertGreater(len(written_data.getvalue()), 0)
     merged_config = yaml.safe_load(written_data.getvalue())
 
     self.assertEqual(merged_config["build"]["command"], "interactive_npm_test")
+    mock_makedirs.assert_called()
 
 
 if __name__ == "__main__":
