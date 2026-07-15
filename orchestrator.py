@@ -161,7 +161,7 @@ def run_command(
     env: Optional[Dict[str, str]] = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess:
-  """Executes a subprocess command with logging, credential scrubbing, and disabled stdin."""
+  """Executes a subprocess command, streaming stdout/stderr in real-time."""
   # Scrub Authorization headers or token values from logs
   log_cmd_parts = []
   for arg in cmd:
@@ -173,26 +173,36 @@ def run_command(
       log_cmd_parts.append(arg)
 
   logger.info("Executing command: %s", " ".join(log_cmd_parts))
-  res = subprocess.run(
+
+  # Start the process with stderr redirected to stdout to stream both
+  process = subprocess.Popen(
       cmd,
       cwd=cwd,
       env=env,
-      stdin=subprocess.DEVNULL,  # Prevent interactive prompts from hanging container
-      capture_output=True,
+      stdin=subprocess.DEVNULL,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
       text=True,
-      check=False,
+      bufsize=1,  # Line-buffered
   )
-  if check and res.returncode != 0:
-    logger.error(
-        "Command failed with code %d:\nSTDOUT: %s\nSTDERR: %s",
-        res.returncode,
-        res.stdout,
-        res.stderr,
-    )
-    raise subprocess.CalledProcessError(
-        res.returncode, cmd, res.stdout, res.stderr
-    )
-  return res
+
+  stdout_lines = []
+  # Stream output line-by-line in real-time
+  assert process.stdout is not None
+  for line in iter(process.stdout.readline, ""):
+    sys.stdout.write(line)
+    sys.stdout.flush()
+    stdout_lines.append(line)
+
+  process.stdout.close()
+  return_code = process.wait()
+  full_stdout = "".join(stdout_lines)
+
+  if check and return_code != 0:
+    logger.error("Command failed with code %d", return_code)
+    raise subprocess.CalledProcessError(return_code, cmd, full_stdout, "")
+
+  return subprocess.CompletedProcess(cmd, return_code, full_stdout, "")
 
 
 @retry_on_exception(max_tries=3)
