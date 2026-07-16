@@ -334,11 +334,11 @@ def extract_session_id(find_stdout: str) -> Optional[str]:
   return None
 
 
-def is_finding_verified(db_path: str, finding_id: str) -> bool:
-  """Check if the finding's status is 'VERIFIED' in the state SQLite database."""
+def get_finding_status(db_path: str, finding_id: str) -> Optional[str]:
+  """Retrieves the status of a finding directly from the state SQLite database."""
   if not os.path.exists(db_path):
     logger.warning("State database does not exist at: %s", db_path)
-    return False
+    return None
   try:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -348,10 +348,15 @@ def is_finding_verified(db_path: str, finding_id: str) -> bool:
     row = cursor.fetchone()
     conn.close()
     if row:
-      return row[0] == "VERIFIED"
+      return row[0]
   except sqlite3.Error as e:
     logger.error("Failed to query state database: %s", e)
-  return False
+  return None
+
+
+def is_finding_verified(db_path: str, finding_id: str) -> bool:
+  """Check if the finding's status is 'VERIFIED' in the state SQLite database."""
+  return get_finding_status(db_path, finding_id) == "VERIFIED"
 
 
 def free_port(port: int):
@@ -659,7 +664,6 @@ def main() -> None:
 
   # Step 3: Run `cm find .` and generate report (Fail-fast with clear errors)
   logger.info("Scanning codebase for findings...")
-  session_id = None
   try:
     find_res = run_command(
         [cm_binary, "find", "."],
@@ -727,8 +731,9 @@ def main() -> None:
         branch_name,
     )
 
-    # PR Spam Prevention Check
-    if check_remote_branch_exists(
+    # PR Spam Prevention Check (Skip if remote branch exists, unless force_overwrite is set)
+    force_overwrite = os.environ.get("CODEMENDER_FORCE_OVERWRITE", "false").lower() == "true"
+    if not force_overwrite and check_remote_branch_exists(
         clean_repo_url, token, branch_name, cwd=repo_dir
     ):
       logger.info(
@@ -797,20 +802,31 @@ def main() -> None:
       )
       continue
 
-    # Fix finding
-    logger.info("Applying fix for finding %s...", finding_id)
+    # Fix finding directly on the default branch (master)
+    logger.info(
+        "Applying fix for finding %s on %s branch...",
+        finding_id,
+        default_branch,
+    )
     fix_res = run_command(
         [cm_binary, "fix", finding_id, "--yes"],
         cwd=repo_dir,
         env=scrubbed_env,
         check=False,
     )
-    if fix_res.returncode != 0:
+    
+    finding_status = get_finding_status(state_db_path, finding_id)
+    if fix_res.returncode != 0 or finding_status != "FIXED":
       logger.warning(
-          "Fix failed for finding %s (code %d). Skipping.",
+          "Fix failed to apply successfully for finding %s (code %d, status"
+          " %s). Skipping.",
           finding_id,
           fix_res.returncode,
+          finding_status,
       )
+      # Reset default branch to discard failed patches
+      run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
+      run_command(["git", "clean", "-fd"], cwd=repo_dir)
       continue
 
     # Check if changes were produced (Only stage modified tracked files to avoid build garbage)
@@ -825,23 +841,24 @@ def main() -> None:
 
     # Create branch, commit, push, and open PR
     try:
-      # Use checkout -B to force overwrite existing local branch names from dirty interrupts
+      # Switch to the feature branch (carries over the modifications from default branch)
       run_command(["git", "checkout", "-B", branch_name], cwd=repo_dir)
-      # Use 'git add -u' to only stage changes to existing tracked files, preventing log pollution
+      # Stage changes to tracked files only, avoiding untracked build logs
       run_command(["git", "add", "-u"], cwd=repo_dir)
       commit_msg = f"fix(security): resolve {vuln_type} in {file_path}"
       run_command(["git", "commit", "-m", commit_msg], cwd=repo_dir)
 
       logger.info("Pushing branch %s to remote...", branch_name)
-      # TODO: Avoid passing token in process arguments to prevent exposure in /proc/cmdline
       push_cmd = [
           "git",
           "-c",
           get_git_auth_header(token),
           "push",
-          "origin",
-          branch_name,
       ]
+      if force_overwrite:
+        push_cmd.append("-f")  # Force push to overwrite remote branch
+      push_cmd.extend(["origin", branch_name])
+      
       run_command(push_cmd, cwd=repo_dir)
 
       pr_title = (
@@ -872,7 +889,7 @@ def main() -> None:
     except Exception as e:
       logger.error("Error creating branch/PR for finding %s: %s", finding_id, e)
     finally:
-      # Workspace Reset Rule: switch back to default branch
+      # Reset workspace and switch back to default branch for next iteration
       run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
       run_command(["git", "clean", "-fd"], cwd=repo_dir)
 

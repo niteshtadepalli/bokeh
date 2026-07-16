@@ -238,7 +238,7 @@ class TestOrchestrator(unittest.TestCase):
       conn.commit()
       conn.close()
 
-      # Run assertions
+      # Run assertions for is_finding_verified
       self.assertTrue(
           orchestrator.is_finding_verified(tmp_db_path, "finding-1")
       )
@@ -248,11 +248,23 @@ class TestOrchestrator(unittest.TestCase):
       self.assertFalse(
           orchestrator.is_finding_verified(tmp_db_path, "finding-3")
       )
-      self.assertFalse(
-          orchestrator.is_finding_verified(tmp_db_path, "non-existent")
+
+      # Run assertions for get_finding_status
+      self.assertEqual(
+          orchestrator.get_finding_status(tmp_db_path, "finding-1"), "VERIFIED"
       )
-      self.assertFalse(
-          orchestrator.is_finding_verified("missing_file.db", "finding-1")
+      self.assertEqual(
+          orchestrator.get_finding_status(tmp_db_path, "finding-2"),
+          "EXPLOIT_FAILED",
+      )
+      self.assertEqual(
+          orchestrator.get_finding_status(tmp_db_path, "finding-3"), "OPEN"
+      )
+      self.assertIsNone(
+          orchestrator.get_finding_status(tmp_db_path, "non-existent")
+      )
+      self.assertIsNone(
+          orchestrator.get_finding_status("missing_file.db", "finding-1")
       )
 
     finally:

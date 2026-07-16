@@ -13,6 +13,41 @@ To validate and fix code vulnerabilities, CodeMender must run your codebase's sp
 3. **Custom Container Environment ("The Workshop")**: Cloud Run Job container holding `orchestrator.py`, the `cm` binary, and your language toolchains (Node.js, Go, Java, Python, etc.).
 4. **Orchestrator Script (`orchestrator.py`) ("The Manager")**: Clones code, runs scans (`cm find`), verifies findings (`cm verify`), applies fixes (`cm fix`), and creates Pull Requests on GitHub.
 
+### Orchestration Flowchart
+
+```mermaid
+graph TD
+    Start[Start Orchestrator] --> Sync[1. Clone / Pull Repository]
+    Sync --> Init[2. Initialize CodeMender]
+    Init --> Scan[3. Scan Codebase<br/>'cm find .']
+    Scan --> Report[4. Get Findings Report<br/>'cm report']
+    Report --> LoopStart{5. Loop: Each Finding}
+    
+    LoopStart --> CheckBranch{Branch Exists on GitHub?}
+    CheckBranch -- Yes & --force not set --> Skip[Skip Finding]
+    CheckBranch -- No OR --force set --> Verify[6. Verify Finding<br/>'cm find verify']
+    
+    Verify --> IsVerified{Verified in DB?<br/>'VERIFIED'}
+    IsVerified -- No (after 3 tries) --> Skip
+    IsVerified -- Yes --> ApplyFix[7. Apply Fix on Default Branch<br/>'cm fix']
+    
+    ApplyFix --> IsFixed{Fix Succeeded?<br/>'FIXED'}
+    IsFixed -- No --> ResetDefault[Reset default branch]
+    ResetDefault --> Skip
+    
+    IsFixed -- Yes --> HasChanges{Uncommitted Changes?}
+    HasChanges -- No --> ResetDefault
+    HasChanges -- Yes --> SwitchBranch[8. Checkout Feature Branch]
+    
+    SwitchBranch --> Commit[9. Commit Changes]
+    Commit --> Push[10. Push Branch]
+    Push --> PR[11. Open Pull Request]
+    PR --> ResetDefault2[Reset default branch]
+    ResetDefault2 --> NextFinding[Next Finding]
+    Skip --> NextFinding
+    NextFinding --> LoopStart
+```
+
 ---
 
 ## Key Constraints & Operational Rules
