@@ -5,7 +5,9 @@ import base64
 import io
 import json
 import os
+import sqlite3
 import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock, mock_open, patch
 import orchestrator
@@ -193,11 +195,10 @@ class TestOrchestrator(unittest.TestCase):
   def test_extract_session_id_success(self):
     """Verify session UUID is correctly extracted from cm find stdout."""
     find_output = (
-        "🔍 Discovering files in /workspace/juice-shop...\n"
-        "🚀 Starting FIND session (mode: SCAN)...\n"
-        "   Server: codemender_prod\n"
-        "   Session: f7f7b492-3564-4dc0-bc8f-2020554ebe24\n"
-        "   Operation: sessions/f7f7b492-3564-4dc0-bc8f-2020554ebe24/operations/ad76b900\n"
+        "🔍 Discovering files in /workspace/juice-shop...\n🚀 Starting FIND"
+        " session (mode: SCAN)...\n   Server: codemender_prod\n   Session:"
+        " f7f7b492-3564-4dc0-bc8f-2020554ebe24\n   Operation:"
+        " sessions/f7f7b492-3564-4dc0-bc8f-2020554ebe24/operations/ad76b900\n"
     )
     session_id = orchestrator.extract_session_id(find_output)
     self.assertEqual(session_id, "f7f7b492-3564-4dc0-bc8f-2020554ebe24")
@@ -210,6 +211,53 @@ class TestOrchestrator(unittest.TestCase):
     )
     session_id = orchestrator.extract_session_id(find_output)
     self.assertIsNone(session_id)
+
+  def test_is_finding_verified(self):
+    """Test is_finding_verified helper with different database states."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+      tmp_db_path = tmp.name
+
+    try:
+      # Initialize schema and insert test rows
+      conn = sqlite3.connect(tmp_db_path)
+      cursor = conn.cursor()
+      cursor.execute("""
+        CREATE TABLE findings (
+          finding_id TEXT PRIMARY KEY,
+          status TEXT
+        )
+      """)
+      cursor.executemany(
+          "INSERT INTO findings (finding_id, status) VALUES (?, ?)",
+          [
+              ("finding-1", "VERIFIED"),
+              ("finding-2", "EXPLOIT_FAILED"),
+              ("finding-3", "OPEN"),
+          ],
+      )
+      conn.commit()
+      conn.close()
+
+      # Run assertions
+      self.assertTrue(
+          orchestrator.is_finding_verified(tmp_db_path, "finding-1")
+      )
+      self.assertFalse(
+          orchestrator.is_finding_verified(tmp_db_path, "finding-2")
+      )
+      self.assertFalse(
+          orchestrator.is_finding_verified(tmp_db_path, "finding-3")
+      )
+      self.assertFalse(
+          orchestrator.is_finding_verified(tmp_db_path, "non-existent")
+      )
+      self.assertFalse(
+          orchestrator.is_finding_verified("missing_file.db", "finding-1")
+      )
+
+    finally:
+      if os.path.exists(tmp_db_path):
+        os.remove(tmp_db_path)
 
   @patch("requests.get")
   def test_check_remote_branch_exists(self, mock_get):

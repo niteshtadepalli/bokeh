@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -331,6 +332,39 @@ def extract_session_id(find_stdout: str) -> Optional[str]:
   if match:
     return match.group(1)
   return None
+
+
+def is_finding_verified(db_path: str, finding_id: str) -> bool:
+  """Check if the finding's status is 'VERIFIED' in the state SQLite database."""
+  if not os.path.exists(db_path):
+    logger.warning("State database does not exist at: %s", db_path)
+    return False
+  try:
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT status FROM findings WHERE finding_id = ?", (finding_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+      return row[0] == "VERIFIED"
+  except sqlite3.Error as e:
+    logger.error("Failed to query state database: %s", e)
+  return False
+
+
+def free_port(port: int):
+  """Attempts to kill any process listening on the specified port."""
+  try:
+    subprocess.run(
+        ["fuser", "-k", f"{port}/tcp"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+  except FileNotFoundError:
+    logger.warning("fuser command not found. Skipping port %d cleanup.", port)
 
 
 @retry_on_exception(max_tries=3)
@@ -705,23 +739,61 @@ def main() -> None:
       )
       continue
 
-    # Force checkout default branch before verify/fix
-    run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
-    run_command(["git", "clean", "-fd"], cwd=repo_dir)
+    # Verify finding with retries (Up to 3 attempts total)
+    max_verify_attempts = 3
+    verified = False
+    state_db_path = os.path.expanduser("~/.codemender/state.db")
 
-    # Verify finding
-    logger.info("Verifying finding %s...", finding_id)
-    verify_res = run_command(
-        [cm_binary, "find", "verify", finding_id, "--yes"],
-        cwd=repo_dir,
-        env=scrubbed_env,
-        check=False,
-    )
-    if verify_res.returncode != 0:
-      logger.warning(
-          "Verification failed for finding %s (code %d). Skipping fix.",
+    for attempt in range(1, max_verify_attempts + 1):
+      logger.info(
+          "Verifying finding %s (Attempt %d/%d)...",
           finding_id,
-          verify_res.returncode,
+          attempt,
+          max_verify_attempts,
+      )
+
+      # Clean up port 3000 and 3001 before starting verification
+      free_port(3000)
+      free_port(3001)
+
+      # Force checkout default branch and clean workspace
+      run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
+      run_command(["git", "clean", "-fd"], cwd=repo_dir)
+
+      verify_res = run_command(
+          [cm_binary, "find", "verify", finding_id, "--yes"],
+          cwd=repo_dir,
+          env=scrubbed_env,
+          check=False,
+      )
+
+      # Double check status database to confirm verified state
+      if verify_res.returncode == 0 and is_finding_verified(
+          state_db_path, finding_id
+      ):
+        logger.info(
+            "Successfully verified finding %s on attempt %d.",
+            finding_id,
+            attempt,
+        )
+        verified = True
+        break
+      else:
+        logger.warning(
+            "Attempt %d/%d failed to verify finding %s.",
+            attempt,
+            max_verify_attempts,
+            finding_id,
+        )
+        if attempt < max_verify_attempts:
+          logger.info("Retrying verification in 5 seconds...")
+          time.sleep(5)
+
+    if not verified:
+      logger.error(
+          "Verification failed for finding %s after %d attempts. Skipping fix.",
+          finding_id,
+          max_verify_attempts,
       )
       continue
 
