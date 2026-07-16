@@ -160,6 +160,7 @@ def run_command(
     cwd: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
     check: bool = True,
+    capture_stderr: bool = True,
 ) -> subprocess.CompletedProcess:
   """Executes a subprocess command, streaming stdout/stderr in real-time."""
   # Scrub Authorization headers or token values from logs
@@ -185,7 +186,7 @@ def run_command(
       env=env,
       stdin=subprocess.DEVNULL,
       stdout=subprocess.PIPE,
-      stderr=subprocess.STDOUT,
+      stderr=subprocess.STDOUT if capture_stderr else sys.stderr,
       text=True,
       bufsize=1,  # Line-buffered
   )
@@ -273,18 +274,22 @@ def check_remote_branch_exists(
 
 def parse_findings_json(json_str: str) -> List[Dict[str, Any]]:
   """Parses `cm report --format json` output handling empty strings for optional fields."""
-  if not json_str.strip():
+  clean_str = json_str.strip()
+  if not clean_str:
     return []
 
-  # Robust JSON extraction looking specifically for JSON list arrays [...]
-  match = re.search(r"(\[.*\])", json_str, re.DOTALL)
-  if not match:
-    logger.error("No valid JSON findings array found in report.")
+  # Find the start of the JSON array or object
+  start_idx = clean_str.find("[")
+  if start_idx == -1:
+    start_idx = clean_str.find("{")
+
+  if start_idx == -1:
+    logger.error("No valid JSON array or object found in report.")
     return []
-  clean_json_str = match.group(1)
 
   try:
-    data = json.loads(clean_json_str)
+    decoder = json.JSONDecoder()
+    data, _ = decoder.raw_decode(clean_str, start_idx)
   except json.JSONDecodeError as e:
     logger.error(
         "Failed to parse JSON findings report: %s\nOriginal string: %s",
@@ -627,6 +632,7 @@ def main() -> None:
       cwd=repo_dir,
       env=scrubbed_env,
       check=True,
+      capture_stderr=False,
   )
   findings = parse_findings_json(report_res.stdout)
   logger.info("Found %d vulnerability finding(s).", len(findings))

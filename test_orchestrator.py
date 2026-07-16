@@ -170,6 +170,26 @@ class TestOrchestrator(unittest.TestCase):
     self.assertEqual(findings[0]["VulnType"], "SQLi")
     self.assertEqual(findings[0]["FilePath"], "a.py")
 
+  def test_parse_findings_json_polluted_brackets(self):
+    """Verify robust JSON extraction from stdout when trailing logs contain brackets."""
+    polluted_json = (
+        "[\n"
+        "  {\n"
+        '    "FindingID": "19855282-768a-42b6-b386-0057eb99940a",\n'
+        '    "VulnType": "XXE",\n'
+        '    "FilePath": "lib/xml.ts"\n'
+        "  }\n"
+        "]\n"
+        "2026-07-16T00:08:15Z [INFO]  📄 Session log: pending.log"
+    )
+    findings = orchestrator.parse_findings_json(polluted_json)
+    self.assertEqual(len(findings), 1)
+    self.assertEqual(
+        findings[0]["FindingID"], "19855282-768a-42b6-b386-0057eb99940a"
+    )
+    self.assertEqual(findings[0]["VulnType"], "XXE")
+    self.assertEqual(findings[0]["FilePath"], "lib/xml.ts")
+
   @patch("requests.get")
   def test_check_remote_branch_exists(self, mock_get):
     """Test branch existence check via GitHub API."""
@@ -308,9 +328,7 @@ class TestOrchestrator(unittest.TestCase):
     self.assertGreater(len(written_data.getvalue()), 0)
     merged_config = yaml.safe_load(written_data.getvalue())
 
-    self.assertEqual(
-        merged_config["build"]["command"], "npm test"
-    )
+    self.assertEqual(merged_config["build"]["command"], "npm test")
     self.assertEqual(merged_config["vcs"]["type"], "git")
     self.assertEqual(merged_config["project_paths"], ["/dummy/repo"])
     self.assertFalse(merged_config["tools"]["confirm_commands"])
