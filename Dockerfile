@@ -31,6 +31,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 # RUN apt-get update && apt-get install -y default-jdk maven && \
 #     rm -rf /var/lib/apt/lists/*
 
+# RUNTIME: PHP CLI (Uncomment to enable for PHP projects like DVWA)
+# RUN apt-get update && apt-get install -y --no-install-recommends php-cli && \
+#     rm -rf /var/lib/apt/lists/*
+
 # ==============================================================================
 
 # Set working directory
