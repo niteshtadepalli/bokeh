@@ -271,6 +271,42 @@ class TestOrchestrator(unittest.TestCase):
       if os.path.exists(tmp_db_path):
         os.remove(tmp_db_path)
 
+  @patch("orchestrator.storage.Client")
+  @patch("os.path.exists")
+  def test_upload_and_sign_report(self, mock_exists, mock_storage_client):
+    """Test GCS upload and signed URL generation."""
+    # Mock file existence
+    mock_exists.return_value = True
+
+    # Setup mocked client structure
+    mock_client_instance = MagicMock()
+    mock_storage_client.return_value = mock_client_instance
+
+    mock_bucket = MagicMock()
+    mock_client_instance.bucket.return_value = mock_bucket
+
+    mock_blob = MagicMock()
+    mock_bucket.blob.return_value = mock_blob
+
+    # Mock signed URL output
+    mock_blob.generate_signed_url.return_value = (
+        "https://signed-url.com/report.html"
+    )
+
+    # Call the helper
+    url = orchestrator.upload_and_sign_report(
+        "dummy_local_path.html", "dummy-bucket", "reports/repo/report_123.html"
+    )
+
+    # Assertions
+    self.assertEqual(url, "https://signed-url.com/report.html")
+    mock_client_instance.bucket.assert_called_once_with("dummy-bucket")
+    mock_bucket.blob.assert_called_once_with("reports/repo/report_123.html")
+    mock_blob.upload_from_filename.assert_called_once_with(
+        "dummy_local_path.html", content_type="text/html"
+    )
+    mock_blob.generate_signed_url.assert_called_once()
+
   @patch("requests.get")
   def test_check_remote_branch_exists(self, mock_get):
     """Test branch existence check via GitHub API."""

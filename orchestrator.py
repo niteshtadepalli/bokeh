@@ -19,6 +19,28 @@ import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
+try:
+  from google.cloud import storage
+except ImportError:
+  # Dummy fallback for local developer/unit testing environments
+  # pylint: disable=unused-argument
+  class DummyStorage:
+    class Blob:
+      def upload_from_filename(self, *args, **kwargs):
+        pass
+      def generate_signed_url(self, *args, **kwargs):
+        return ""
+    class Bucket:
+      def blob(self, *args, **kwargs):
+        return DummyStorage.Blob()
+    class Client:
+      def __init__(self, *args, **kwargs):
+        pass
+      def bucket(self, *args, **kwargs):
+        return DummyStorage.Bucket()
+  # pylint: enable=unused-argument
+  storage = DummyStorage
+
 import requests
 import yaml
 
@@ -357,6 +379,38 @@ def get_finding_status(db_path: str, finding_id: str) -> Optional[str]:
 def is_finding_verified(db_path: str, finding_id: str) -> bool:
   """Check if the finding's status is 'VERIFIED' in the state SQLite database."""
   return get_finding_status(db_path, finding_id) == "VERIFIED"
+
+
+def upload_and_sign_report(
+    local_file_path: str, bucket_name: str, dest_blob_name: str
+) -> Optional[str]:
+  """Uploads a local HTML report to GCS and returns a temporary Signed URL."""
+  if not os.path.exists(local_file_path):
+    logger.error("Local report file not found at: %s", local_file_path)
+    return None
+  try:
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(dest_blob_name)
+
+    logger.info(
+        "Uploading report %s to gs://%s/%s...",
+        local_file_path,
+        bucket_name,
+        dest_blob_name,
+    )
+    blob.upload_from_filename(local_file_path, content_type="text/html")
+
+    # Generate signed URL valid for 3 days
+    url = blob.generate_signed_url(
+        version="v4",
+        expiration=time.time() + (3 * 24 * 60 * 60),  # 3 days
+        method="GET",
+    )
+    return url
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.error("Failed to upload or generate signed URL for report: %s", e)
+  return None
 
 
 def free_port(port: int):
@@ -732,7 +786,9 @@ def main() -> None:
     )
 
     # PR Spam Prevention Check (Skip if remote branch exists, unless force_overwrite is set)
-    force_overwrite = os.environ.get("CODEMENDER_FORCE_OVERWRITE", "false").lower() == "true"
+    force_overwrite = (
+        os.environ.get("CODEMENDER_FORCE_OVERWRITE", "false").lower() == "true"
+    )
     if not force_overwrite and check_remote_branch_exists(
         clean_repo_url, token, branch_name, cwd=repo_dir
     ):
@@ -814,7 +870,7 @@ def main() -> None:
         env=scrubbed_env,
         check=False,
     )
-    
+
     finding_status = get_finding_status(state_db_path, finding_id)
     if fix_res.returncode != 0 or finding_status != "FIXED":
       logger.warning(
@@ -841,7 +897,7 @@ def main() -> None:
 
     # Create branch, commit, push, and open PR
     try:
-      # Switch to the feature branch (carries over the modifications from default branch)
+      # Switch to feature branch (carrying modifications from default branch)
       run_command(["git", "checkout", "-B", branch_name], cwd=repo_dir)
       # Stage changes to tracked files only, avoiding untracked build logs
       run_command(["git", "add", "-u"], cwd=repo_dir)
@@ -858,7 +914,7 @@ def main() -> None:
       if force_overwrite:
         push_cmd.append("-f")  # Force push to overwrite remote branch
       push_cmd.extend(["origin", branch_name])
-      
+
       run_command(push_cmd, cwd=repo_dir)
 
       pr_title = (
@@ -892,6 +948,46 @@ def main() -> None:
       # Reset workspace and switch back to default branch for next iteration
       run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
       run_command(["git", "clean", "-fd"], cwd=repo_dir)
+
+  # Generate final HTML report
+  logger.info("Generating final HTML summary report...")
+  report_res = run_command(
+      [cm_binary, "report", "-f", "html"],
+      cwd=repo_dir,
+      env=scrubbed_env,
+      check=False,
+  )
+  if report_res.returncode == 0:
+    local_report_path = os.path.expanduser("~/.codemender/reports/report.html")
+    report_bucket = os.environ.get("CODEMENDER_REPORT_BUCKET")
+    if report_bucket:
+      timestamp = time.strftime("%Y%m%d-%H%M%S")
+      dest_blob = f"reports/{owner}_{repo_name}/report_{timestamp}.html"
+      signed_url = upload_and_sign_report(
+          local_report_path, report_bucket, dest_blob
+      )
+      if signed_url:
+        logger.info(
+            "\n"
+            "======================================================================\n"
+            "📊 CODEMENDER SUMMARY REPORT GENERATED:\n"
+            "👉 %s\n"
+            "======================================================================\n",
+            signed_url,
+        )
+      else:
+        logger.error("Failed to generate signed URL for the GCS report.")
+    else:
+      logger.info(
+          "Local HTML report generated at %s (CODEMENDER_REPORT_BUCKET not set,"
+          " skipped GCS upload).",
+          local_report_path,
+      )
+  else:
+    logger.error(
+        "Failed to execute 'cm report -f html' (code %d).",
+        report_res.returncode,
+    )
 
   logger.info("CodeMender Orchestration completed successfully.")
 
