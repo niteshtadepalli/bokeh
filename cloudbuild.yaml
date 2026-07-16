@@ -16,3 +16,6 @@ steps:
 
 substitutions:
   _RELEASES_BUCKET: 'codemender-releases'
+
+images:
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/codemender-runner/orchestrator:latest'
