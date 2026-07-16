@@ -9,10 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
-# Install CodeMender CLI binary
-# If this download fails, the docker build fails immediately (no silent dummy fallback).
-RUN curl -fsSL https://storage.googleapis.com/codemender-releases/latest/cm -o /usr/local/bin/cm && \
-    chmod +x /usr/local/bin/cm
+# Copy CodeMender CLI binary (downloaded by Cloud Build step into workspace root)
+COPY cm /usr/local/bin/cm
+RUN chmod +x /usr/local/bin/cm
 
 # ==============================================================================
 # Language Runtimes (BYOP Toolchain Configurations)

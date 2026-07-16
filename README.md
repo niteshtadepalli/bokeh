@@ -131,8 +131,9 @@ gcloud artifacts repositories create codemender-runner \
     --repository-format=docker \
     --location=us-central1
 
-# Build and push container image
-gcloud builds submit --tag us-central1-docker.pkg.dev/$PROJECT_ID/codemender-runner/orchestrator:latest .
+# Build and push container image using the secure cloudbuild.yaml flow
+gcloud builds submit --config=cloudbuild.yaml \
+    --substitutions=_RELEASES_BUCKET="codemender-releases-${PROJECT_ID}" .
 ```
 
 ### 4. Deploy Cloud Run Job
@@ -154,6 +155,32 @@ gcloud run jobs create codemender-nightly-scan \
     --cpu=2 \
     --set-env-vars="GITHUB_REPO_URL=https://github.com/your-org/your-repo.git,CODEMENDER_BUILD_COMMAND='npm install && npm test',CODEMENDER_REPORT_BUCKET=my-gcs-reports-bucket" \
     --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
+```
+
+### 4.b Configure GCS Summary Report IAM Permissions (Optional)
+
+If you configure `CODEMENDER_REPORT_BUCKET` to upload summary reports to GCS,
+you must grant the Cloud Run Job's Service Account (e.g. the default Compute
+Engine service account) the required IAM permissions:
+
+1.  **GCS Write Access**: Grant the Service Account the **Storage Object
+    Creator** role (`roles/storage.objectCreator`) on the GCS bucket.
+2.  **Signed URL Generation**: Generating v4 Signed URLs dynamically in Cloud
+    Run requires the Service Account to have the **Service Account Token
+    Creator** role (`roles/iam.serviceAccountTokenCreator`) on **itself**
+    (allowing the client library to call the IAM SignBlob API on behalf of the
+    runtime identity).
+
+```bash
+# Grant GCS Write Access
+gcloud storage buckets add-iam-policy-binding gs://my-gcs-reports-bucket \
+    --member="serviceAccount:$PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+    --role="roles/storage.objectCreator"
+
+# Grant Service Account Token Creator role to itself (to support SignBlob API)
+gcloud iam service-accounts add-iam-policy-binding $PROJECT_NUMBER-compute@developer.gserviceaccount.com \
+    --member="serviceAccount:$PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+    --role="roles/iam.serviceAccountTokenCreator"
 ```
 
 ### 5. Schedule Nightly Batch Scans with Cloud Scheduler
@@ -186,3 +213,27 @@ export GITHUB_REPO_URL="https://github.com/your-org/your-repo.git"
 export GITHUB_TOKEN="ghp_your_token"
 python3 orchestrator.py
 ```
+
+--------------------------------------------------------------------------------
+
+## Future Work
+
+-   **Automatic PR Re-opening on Force-Push**: When running in overwrite mode
+    (`CODEMENDER_FORCE_OVERWRITE=true`), force-pushing new commits to a branch
+    with a closed/unmerged PR is successful, but creating a new PR fails on
+    GitHub API validation (HTTP 422). Future work should query existing pull
+    requests and, if one is closed, programmatically re-open it via `PATCH
+    /repos/{owner}/{repo}/pulls/{number}`.
+-   **State Database Checkpointing (Persistence)**: Since Cloud Run Job
+    execution is stateless, the SQLite state database (`~/.codemender/state.db`)
+    is destroyed at the end of the run. A GCS checkpoint sync step should be
+    introduced at startup and shutdown to pull/push the state database,
+    preserving historically verified finding statuses (e.g., preserving manually
+    flagged `FALSE_POSITIVE` or `RESOLVED` statuses).
+-   **Workstation/Runner Command Injection Sandboxing**: Verification
+    agent-generated exploit scripts (`exploit.sh`) are executed directly on the
+    host VM/runner shell. Since these scripts are generated entirely by LLMs,
+    malicious target project code could trigger command injections (exfiltrating
+    Git secrets or accessing metadata services). Future work should isolate
+    exploit verification executions inside an unprivileged Docker container or
+    gVisor sandbox container.
