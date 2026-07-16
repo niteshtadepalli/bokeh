@@ -190,6 +190,27 @@ class TestOrchestrator(unittest.TestCase):
     self.assertEqual(findings[0]["VulnType"], "XXE")
     self.assertEqual(findings[0]["FilePath"], "lib/xml.ts")
 
+  def test_extract_session_id_success(self):
+    """Verify session UUID is correctly extracted from cm find stdout."""
+    find_output = (
+        "🔍 Discovering files in /workspace/juice-shop...\n"
+        "🚀 Starting FIND session (mode: SCAN)...\n"
+        "   Server: codemender_prod\n"
+        "   Session: f7f7b492-3564-4dc0-bc8f-2020554ebe24\n"
+        "   Operation: sessions/f7f7b492-3564-4dc0-bc8f-2020554ebe24/operations/ad76b900\n"
+    )
+    session_id = orchestrator.extract_session_id(find_output)
+    self.assertEqual(session_id, "f7f7b492-3564-4dc0-bc8f-2020554ebe24")
+
+  def test_extract_session_id_missing(self):
+    """Verify None is returned when session UUID is not present in output."""
+    find_output = (
+        "🔍 Discovering files in /workspace/juice-shop...\n"
+        "No vulnerabilities found!\n"
+    )
+    session_id = orchestrator.extract_session_id(find_output)
+    self.assertIsNone(session_id)
+
   @patch("requests.get")
   def test_check_remote_branch_exists(self, mock_get):
     """Test branch existence check via GitHub API."""

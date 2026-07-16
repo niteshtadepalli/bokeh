@@ -320,6 +320,19 @@ def parse_findings_json(json_str: str) -> List[Dict[str, Any]]:
   return cleaned_findings
 
 
+def extract_session_id(find_stdout: str) -> Optional[str]:
+  """Extracts the CodeMender session ID from 'cm find' output."""
+  # Match UUID format session ID (e.g. Session: f7f7b492-3564-4dc0-bc8f-2020554ebe24)
+  match = re.search(
+      r"Session:\s*([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})",
+      find_stdout,
+      re.IGNORECASE,
+  )
+  if match:
+    return match.group(1)
+  return None
+
+
 @retry_on_exception(max_tries=3)
 def _fetch_default_branch_via_api(token: str, owner: str, repo: str) -> str:
   """Queries repository metadata from GitHub with raise_for_status checks."""
@@ -612,13 +625,19 @@ def main() -> None:
 
   # Step 3: Run `cm find .` and generate report (Fail-fast with clear errors)
   logger.info("Scanning codebase for findings...")
+  session_id = None
   try:
-    run_command(
+    find_res = run_command(
         [cm_binary, "find", "."],
         cwd=repo_dir,
         env=scrubbed_env,
         check=True,
     )
+    session_id = extract_session_id(find_res.stdout)
+    if session_id:
+      logger.info("Detected active scan session ID: %s", session_id)
+    else:
+      logger.warning("Could not extract active session ID from scan output.")
   except Exception as e:
     logger.critical(
         "CodeMender vulnerability scanning failed. Please check the scan path"
@@ -627,8 +646,12 @@ def main() -> None:
     )
     sys.exit(1)
 
+  report_cmd = [cm_binary, "report", "--format", "json"]
+  if session_id:
+    report_cmd.extend(["--session", session_id])
+
   report_res = run_command(
-      [cm_binary, "report", "--format", "json"],
+      report_cmd,
       cwd=repo_dir,
       env=scrubbed_env,
       check=True,
