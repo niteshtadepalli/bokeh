@@ -7,6 +7,7 @@ vulnerabilities using the CodeMender CLI and open GitHub Pull Requests.
 """
 
 import base64
+import datetime
 from functools import wraps
 import hashlib
 import json
@@ -440,7 +441,7 @@ def upload_and_sign_report(
     # Generate signed URL valid for 3 days
     url = blob.generate_signed_url(
         version="v4",
-        expiration=time.time() + (3 * 24 * 60 * 60),  # 3 days
+        expiration=datetime.timedelta(days=3),  # 3 days
         method="GET",
     )
     return url
