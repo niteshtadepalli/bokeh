@@ -1,0 +1,21 @@
+steps:
+  # Step 1: Download the private cm binary from GCS using Cloud Build IAM credentials
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - 'gcloud storage cp gs://${_RELEASES_BUCKET}/latest/cm ./cm'
+
+  # Step 2: Build the container image (copies the downloaded 'cm' file into /usr/local/bin)
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/codemender-runner/orchestrator:latest'
+      - '.'
+
+substitutions:
+  _RELEASES_BUCKET: 'codemender-releases'
+
+images:
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/codemender-runner/orchestrator:latest'
