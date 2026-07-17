@@ -391,6 +391,32 @@ def is_finding_verified(db_path: str, finding_id: str) -> bool:
   return get_finding_status(db_path, finding_id) == "VERIFIED"
 
 
+def setup_local_git_excludes(repo_dir: str) -> None:
+  """Appends CodeMender metadata paths to local git excludes to prevent staging them."""
+  exclude_path = os.path.join(repo_dir, ".git", "info", "exclude")
+  try:
+    os.makedirs(os.path.dirname(exclude_path), exist_ok=True)
+    # Read existing excludes to prevent duplicates
+    existing_content = ""
+    if os.path.exists(exclude_path):
+      with open(exclude_path, "r") as f:
+        existing_content = f.read()
+
+    new_entries = []
+    for entry in [".cm_project", ".exploit"]:
+      if entry not in existing_content:
+        new_entries.append(entry)
+
+    if new_entries:
+      with open(exclude_path, "a") as f:
+        if existing_content and not existing_content.endswith("\n"):
+          f.write("\n")
+        f.write("\n".join(new_entries) + "\n")
+      logger.info("Successfully added local git excludes: %s", new_entries)
+  except Exception as e:
+    logger.warning("Failed to configure local git excludes: %s", e)
+
+
 def upload_and_sign_report(
     local_file_path: str, bucket_name: str, dest_blob_name: str
 ) -> Optional[str]:
@@ -696,6 +722,9 @@ def main() -> None:
       ["git", "config", "user.email", "codemender-agent@google.com"],
       cwd=repo_dir,
   )
+
+  # Configure local git excludes to block tracking of CodeMender temp files
+  setup_local_git_excludes(repo_dir)
 
   # Step 2: Initialize CodeMender CLI (Fail-fast with clear errors)
   logger.info("Initializing CodeMender CLI...")
