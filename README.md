@@ -36,20 +36,20 @@ graph TD
     Report --> LoopStart{5. Loop: Each Finding}
 
     LoopStart --> CheckBranch{Branch Exists on GitHub?}
-    CheckBranch -- Yes & --force not set --> Skip[Skip Finding]
-    CheckBranch -- No OR --force set --> Verify[6. Verify Finding<br/>'cm find verify']
+    CheckBranch -->|"Yes & --force not set"| Skip[Skip Finding]
+    CheckBranch -->|"No OR --force set"| Verify[6. Verify Finding<br/>'cm find verify']
 
     Verify --> IsVerified{Verified in DB?<br/>'VERIFIED'}
-    IsVerified -- No (after 3 tries) --> Skip
-    IsVerified -- Yes --> ApplyFix[7. Apply Fix on Default Branch<br/>'cm fix']
+    IsVerified -->|"No (after 3 tries)"| Skip
+    IsVerified -->|Yes| ApplyFix[7. Apply Fix on Default Branch<br/>'cm fix']
 
     ApplyFix --> IsFixed{Fix Succeeded?<br/>'FIXED'}
-    IsFixed -- No --> ResetDefault[Reset default branch]
+    IsFixed -->|No| ResetDefault[Reset default branch]
     ResetDefault --> Skip
 
-    IsFixed -- Yes --> HasChanges{Uncommitted Changes?}
-    HasChanges -- No --> ResetDefault
-    HasChanges -- Yes --> SwitchBranch[8. Checkout Feature Branch]
+    IsFixed -->|Yes| HasChanges{Uncommitted Changes?}
+    HasChanges -->|No| ResetDefault
+    HasChanges -->|Yes| SwitchBranch[8. Checkout Feature Branch]
 
     SwitchBranch --> Commit[9. Commit Changes]
     Commit --> Push[10. Push Branch]

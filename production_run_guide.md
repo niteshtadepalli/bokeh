@@ -13,11 +13,11 @@ how GCS, Secret Manager, and IAM fit together:
 
 ```mermaid
 graph LR
-    Scheduler[Cloud Scheduler] -- 1. Cron Trigger --> Job[Cloud Run Job]
-    Job -- 2. Pull Secret --> Secrets[Secret Manager]
-    Job -- 3. Scan & Fix --> GitHub[GitHub Repo]
-    Job -- 4. Upload HTML --> GCS[GCS Bucket]
-    Job -- 5. Sign Link --> IAM[IAM SignBlob API]
+    Scheduler[Cloud Scheduler] -->|"1. Cron Trigger"| Job[Cloud Run Job]
+    Job -->|"2. Pull Secret"| Secrets[Secret Manager]
+    Job -->|"3. Scan & Fix"| GitHub[GitHub Repo]
+    Job -->|"4. Upload HTML"| GCS[GCS Bucket]
+    Job -->|"5. Sign Link"| IAM[IAM SignBlob API]
 ```
 
 --------------------------------------------------------------------------------
