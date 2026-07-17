@@ -86,133 +86,17 @@ graph TD
 
 --------------------------------------------------------------------------------
 
-## Setup & Deployment Guide
+## User Guides & Documentation
 
-### 1. Configure GitHub Authentication in Google Secret Manager
+To set up, configure, and execute the CodeMender Orchestrator, refer to the
+following dedicated markdown guides:
 
-Create a secret in Google Secret Manager containing a GitHub Personal Access
-Token (PAT) or GitHub App Token with repo access:
-
-```bash
-gcloud secrets create GITHUB_APP_TOKEN --replication-policy="automatic"
-echo -n "ghp_your_github_access_token" | gcloud secrets versions add GITHUB_APP_TOKEN --data-file=-
-```
-
-### 2. Customize the Dockerfile for Your Language Toolchain
-
-Modify `Dockerfile` to include the compilers, language runtime, and build tools
-needed to build and test your codebase:
-
-#### For Node.js / TypeScript:
-
-```dockerfile
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs
-```
-
-#### For Go:
-
-```dockerfile
-COPY --from=golang:1.22 /usr/local/go /usr/local/go
-ENV PATH="/usr/local/go/bin:${PATH}"
-```
-
-#### For Java / Maven / Gradle:
-
-```dockerfile
-RUN apt-get update && apt-get install -y default-jdk maven gradle
-```
-
-### 3. Build and Push Container Image to Artifact Registry
-
-```bash
-# Create Artifact Registry Repository if not exists
-gcloud artifacts repositories create codemender-runner \
-    --repository-format=docker \
-    --location=us-central1
-
-# Build and push container image using the secure cloudbuild.yaml flow
-gcloud builds submit --config=cloudbuild.yaml \
-    --substitutions=_RELEASES_BUCKET="codemender-releases-${PROJECT_ID}" .
-```
-
-### 4. Deploy Cloud Run Job
-
-> [!IMPORTANT] **Resource Requirements**: Cloud Run deployments **MUST** use the
-> **Cloud Run Gen 2 Execution Environment** with a minimum of
-> `--ephemeral-storage=10Gi` (or higher) to safely hold large git histories,
-> build caches, and test artifacts without exhausting RAM.
-
-Deploy the Cloud Run Job using `gcloud`:
-
-```bash
-gcloud run jobs create codemender-nightly-scan \
-    --image=us-central1-docker.pkg.dev/$PROJECT_ID/codemender-runner/orchestrator:latest \
-    --region=us-central1 \
-    --execution-environment=gen2 \
-    --ephemeral-storage=10Gi \
-    --memory=4Gi \
-    --cpu=2 \
-    --set-env-vars="GITHUB_REPO_URL=https://github.com/your-org/your-repo.git,CODEMENDER_BUILD_COMMAND='npm install && npm test',CODEMENDER_REPORT_BUCKET=my-gcs-reports-bucket" \
-    --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
-```
-
-### 4.b Configure GCS Summary Report IAM Permissions (Optional)
-
-If you configure `CODEMENDER_REPORT_BUCKET` to upload summary reports to GCS,
-you must grant the Cloud Run Job's Service Account (e.g. the default Compute
-Engine service account) the required IAM permissions:
-
-1.  **GCS Write Access**: Grant the Service Account the **Storage Object
-    Creator** role (`roles/storage.objectCreator`) on the GCS bucket.
-2.  **Signed URL Generation**: Generating v4 Signed URLs dynamically in Cloud
-    Run requires the Service Account to have the **Service Account Token
-    Creator** role (`roles/iam.serviceAccountTokenCreator`) on **itself**
-    (allowing the client library to call the IAM SignBlob API on behalf of the
-    runtime identity).
-
-```bash
-# Grant GCS Write Access
-gcloud storage buckets add-iam-policy-binding gs://my-gcs-reports-bucket \
-    --member="serviceAccount:$PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
-    --role="roles/storage.objectCreator"
-
-# Grant Service Account Token Creator role to itself (to support SignBlob API)
-gcloud iam service-accounts add-iam-policy-binding $PROJECT_NUMBER-compute@developer.gserviceaccount.com \
-    --member="serviceAccount:$PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
-    --role="roles/iam.serviceAccountTokenCreator"
-```
-
-### 5. Schedule Nightly Batch Scans with Cloud Scheduler
-
-To trigger batch vulnerability scans automatically every night:
-
-```bash
-gcloud scheduler jobs create http codemender-nightly-trigger \
-    --location=us-central1 \
-    --schedule="0 2 * * *" \
-    --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$PROJECT_ID/jobs/codemender-nightly-scan:run" \
-    --http-method=POST \
-    --oauth-service-account-email="$PROJECT_NUMBER-compute@developer.gserviceaccount.com"
-```
-
---------------------------------------------------------------------------------
-
-## Local Development & Testing
-
-Run unit tests locally:
-
-```bash
-python3 -m unittest test_orchestrator.py
-```
-
-Run orchestrator manually against a target repository:
-
-```bash
-export GITHUB_REPO_URL="https://github.com/your-org/your-repo.git"
-export GITHUB_TOKEN="ghp_your_token"
-python3 orchestrator.py
-```
+*   📖 **[Local Run Guide](local_run_guide.md)**: Steps to configure your
+    developer workstation, install dependencies locally, and run the scanner
+    manually for validation and quick debugging.
+*   🚀 **[Production Run & Deployment Guide](production_run_guide.md)**:
+    Step-by-step instructions to provision GCS buckets, configure IAM roles,
+    deploy Cloud Run Jobs, and automate daily scans using Cloud Scheduler.
 
 --------------------------------------------------------------------------------
 
