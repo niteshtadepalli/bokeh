@@ -33,7 +33,7 @@ cd /google/src/cloud/xinweizhang/fde-playground/google3/experimental/users/xinwe
 
 ### Step 2: Install Python Dependencies (Optional)
 
-> **Note**  
+> [!NOTE]
 > **Zero-Setup Testing**: The orchestrator is designed with safe import
 > fallbacks. If the `google-cloud-storage` library is missing locally, the
 > script automatically switches to internal dummy mocks, allowing you to run
@@ -154,7 +154,7 @@ export CODEMENDER_FORCE_OVERWRITE="false"
 export CODEMENDER_REPORT_BUCKET="my-gcs-reports-bucket"
 ```
 
-> **Note**  
+> [!NOTE]
 > **GCS Report Authorization**: If you configure
 > `CODEMENDER_REPORT_BUCKET` for local runs, you must ensure your terminal is
 > authenticated with GCP and local Application Default Credentials (ADC) are set

@@ -185,7 +185,7 @@ gcloud iam service-accounts create ${SA_NAME} \
 
 ## Step 6: Build and Push the Docker Container
 
-> **Note**  
+> [!NOTE]
 > **CodeMender CLI Binary Security**: The releases bucket remains
 > completely private. During deployment, Cloud Build uses its own authenticated
 > Service Account to securely download the `cm` binary from GCS into the build
@@ -208,7 +208,7 @@ gcloud iam service-accounts create ${SA_NAME} \
         --substitutions=_RELEASES_BUCKET="codemender-releases-${PROJECT_ID}" .
     ```
 
-> **Tip**  
+> [!TIP]
 > **Troubleshooting Permission Denied in Cloud Build**: If the default
 > Compute Engine service account (used by Cloud Build) lacks required access to
 > staging buckets or image registries: 1. **GCS Access Denied**
@@ -239,7 +239,7 @@ gcloud iam service-accounts create ${SA_NAME} \
 
 Deploy the container as a Cloud Run Job.
 
-> **Important**  
+> [!IMPORTANT]
 > **Ephemeral Storage Requirements**: Cloud Run Gen 2 jobs
 > automatically provision a default **`10GB` of ephemeral root disk space**,
 > which is sufficient for standard builds and cloning. If your target repository
@@ -260,7 +260,7 @@ gcloud run jobs create codemender-scan \
     --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
 ```
 
-> **Tip**  
+> [!TIP]
 > **How to Scale Storage Beyond 10GB**: If you need more storage (e.g.
 > 20GB), define a volume of type `ephemeral-disk`, mount it to a directory, and
 > tell the orchestrator to use it by setting the `WORKSPACE_DIR` environment
