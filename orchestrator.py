@@ -829,7 +829,10 @@ def main() -> None:
 
       # Force checkout default branch and clean workspace
       run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
-      run_command(["git", "clean", "-fd"], cwd=repo_dir)
+      run_command(
+          ["git", "clean", "-fd", "-e", ".cm_project", "-e", ".exploit"],
+          cwd=repo_dir,
+      )
 
       verify_res = run_command(
           [cm_binary, "find", "verify", finding_id, "--yes"],
@@ -892,7 +895,10 @@ def main() -> None:
       )
       # Reset default branch to discard failed patches
       run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
-      run_command(["git", "clean", "-fd"], cwd=repo_dir)
+      run_command(
+          ["git", "clean", "-fd", "-e", ".cm_project", "-e", ".exploit"],
+          cwd=repo_dir,
+      )
       continue
 
     # Check if changes were produced (Only stage modified tracked files to avoid build garbage)
@@ -957,7 +963,10 @@ def main() -> None:
     finally:
       # Reset workspace and switch back to default branch for next iteration
       run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
-      run_command(["git", "clean", "-fd"], cwd=repo_dir)
+      run_command(
+          ["git", "clean", "-fd", "-e", ".cm_project", "-e", ".exploit"],
+          cwd=repo_dir,
+      )
 
   # Generate final HTML report
   logger.info("Generating final HTML summary report...")
