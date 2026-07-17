@@ -19,9 +19,9 @@ RUN chmod +x /usr/local/bin/cm
 # ==============================================================================
 
 # RUNTIME: Node.js & npm (Active for JS/TS projects like juice-shop)
-# RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-#     apt-get install -y nodejs && \
-#     rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
 
 # RUNTIME: Go (Uncomment to enable for Go projects)
 # COPY --from=golang:1.22 /usr/local/go /usr/local/go
