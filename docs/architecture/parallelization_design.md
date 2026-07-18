@@ -139,65 +139,53 @@ evaluated and rejected:
 
 --------------------------------------------------------------------------------
 
-## 4. Detailed Implementation (File changes)
+## 4. Detailed Implementation (Modular Package Architecture)
 
-To implement this plan, we will create or modify the following files. No other
-files should be touched.
+To implement this plan within the refactored `codemender_agent/` package structure, we will create or modify the following files:
 
-### 1. `orchestrator.py` (Modified)
+### 1. `orchestrator.py` (Entrypoint Facade)
 
-*   **Purpose**: Update the execution entrypoint to support polymorphic run
-    modes.
+*   **Purpose**: Read `CODEMENDER_RUN_MODE` environment variable (`sequential`, `scan`, `worker`, `aggregate`) and dispatch to the corresponding runner module in `codemender_agent/runners/`.
 *   **Detailed Changes**:
-    *   Read the environment variable `CODEMENDER_RUN_MODE` (defaults to
-        `sequential`).
-    *   **`sequential` mode (Default)**: Keep the existing codebase unchanged.
-        It clones, scans, and fixes in a single loop locally. This preserves the
-        local-run and dry-run capabilities out-of-the-box.
-    *   **`scan` mode**: Run `cm find .`, export findings to `/tmp/scan.sarif`,
-        copy `/root/.codemender/identity.key`, and upload both to GCS under the
-        prefix `scans/[scan_id]/`.
-    *   **`worker` mode**:
-        *   Download `identity.key` from GCS to `/root/.codemender/identity.key`
-            *before* running `cm init`.
-        *   Download `scan.sarif` and run `cm import /tmp/scan.sarif`.
-        *   Determine assigned findings using modulo filtering: `finding_index %
-            total_workers == worker_index`.
-        *   Run the verify and fix loop for assigned findings.
-        *   Export the updated database state to `/tmp/worker_[index].sarif` and
-            upload to GCS.
-    *   **`aggregate` mode**:
-        *   Download `scan.sarif` and all `worker_*.sarif` files from GCS.
-        *   Import them all sequentially to merge states.
-        *   Compile the consolidated HTML report and upload it to GCS.
+    *   `sequential`: Calls `codemender_agent.runners.sequential.run_sequential_pipeline()`.
+    *   `scan`: Calls `codemender_agent.runners.scan.run_scan_pipeline()`.
+    *   `worker`: Calls `codemender_agent.runners.worker.run_worker_pipeline()`.
+    *   `aggregate`: Calls `codemender_agent.runners.aggregate.run_aggregate_pipeline()`.
 
-### 2. `test_orchestrator.py` (Modified)
+### 2. `codemender_agent/runners/` Subpackage
 
-*   **Purpose**: Add unit test coverage for the new sharding and consolidation
-    logic.
+*   **`sequential.py`** (Existing): Sequential single-loop execution runner for local runs and simple Cloud Run Jobs.
+*   **`scan.py`** (New File): Stage 1 Coordinator runner.
+    *   Clones repo and initializes CodeMender.
+    *   Runs `cm find .` and exports `/tmp/scan.sarif`.
+    *   Copies `/root/.codemender/identity.key`.
+    *   Uploads both artifacts to GCS under `scans/[scan_id]/`.
+*   **`worker.py`** (New File): Stage 2 Parallel Worker runner.
+    *   Downloads `identity.key` to `/root/.codemender/identity.key` *before* running `cm init` to inherit the session Client ID.
+    *   Downloads `scan.sarif` and imports baseline state (`cm import`).
+    *   Applies modulo filtering: `finding_index % total_workers == worker_index`.
+    *   Executes `verify` and `fix` loop for assigned slice; pushes feature branches & PRs.
+    *   Exports shard state to `/tmp/worker_[index].sarif` and uploads to GCS.
+*   **`aggregate.py`** (New File): Stage 3 Aggregator runner.
+    *   Downloads `scan.sarif` and all `worker_*.sarif` files from GCS.
+    *   Merges all SARIF files sequentially into the SQLite state DB (`cm import`).
+    *   Generates final consolidated HTML report (`cm report -f html`) and uploads to GCS with signed access URL.
+
+### 3. `tests/` Submodule Unit Tests
+
+*   **`tests/test_runners_scan.py`**: Unit tests for Stage 1 artifact generation and GCS uploads.
+*   **`tests/test_runners_worker.py`**: Unit tests for modulo partitioning, identity key restoration, SARIF importing, and shard fixing.
+*   **`tests/test_runners_aggregate.py`**: Unit tests for multi-SARIF merging and HTML report compilation.
+
+### 4. `docs/guides/production_run.md` (Updated)
+
+*   **Purpose**: Update deployment documentation for parallel workflow orchestration.
 *   **Detailed Changes**:
-    *   Test GCS download/upload fallback mocks.
-    *   Test the modulo partitioning logic (verifying that findings are divided
-        evenly and deterministically across different indices and counts).
-    *   Test the SARIF import merging sequence to ensure no updates are dropped.
+    *   Document deploying Google Cloud Workflows (`gcp_parallel_workflow.yaml`).
+    *   Document GitHub Actions matrix workflow (`gha_parallel_workflow.yaml`).
+    *   Detail required IAM roles (`roles/workflows.invoker`, `roles/run.developer`).
 
-### 3. `production_run_guide.md` (Modified)
+### 5. Workflow Configuration Templates (New Files)
 
-*   **Purpose**: Add user documentation for deploying the parallel workflow.
-*   **Detailed Changes**:
-    *   Provide step-by-step instructions on creating the Cloud Workflows
-        definition and linking it to Cloud Scheduler.
-    *   Document the required IAM permissions for the Workflow service account.
-
-### 4. `gcp_parallel_workflow.yaml` (New File)
-
-*   **Purpose**: The Google Cloud Workflows YAML definition.
-*   **Rationale**: Serves as the template that customers deploy to orchestrate
-    the sequential scan, parallel fix, and aggregation container tasks on GCP.
-
-### 5. `gha_parallel_workflow.yaml` (New File)
-
-*   **Purpose**: A template GitHub Actions workflow.
-*   **Rationale**: Serves as the template showing how to run the parallel scan
-    and fix pipeline completely for free inside GitHub Actions runner pools
-    using matrix builds and job artifacts, without needing GCP resources.
+*   **`gcp_parallel_workflow.yaml`**: Cloud Workflows definition managing Stage 1 $\rightarrow$ Stage 2 ($N$ parallel tasks) $\rightarrow$ Stage 3 on GCP.
+*   **`gha_parallel_workflow.yaml`**: GitHub Actions workflow template managing parallel matrix builds with job artifacts.

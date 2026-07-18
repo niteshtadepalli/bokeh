@@ -301,9 +301,31 @@ values.
       },
       "ConfidenceLevel": {
         "type": "string",
-        "description": "Qualitative confidence descriptor."
+        "description": "Qualitative confidence level descriptor."
       }
-    }
+    },
+    "required": [
+      "FindingID",
+      "SessionID",
+      "Title",
+      "FilePath",
+      "Severity",
+      "Confidence",
+      "Analysis",
+      "Snippet",
+      "VulnType",
+      "VulnID",
+      "Fingerprint",
+      "Status",
+      "SourceStage",
+      "FindingJSON",
+      "UpdatedAt",
+      "StartLine",
+      "EndLine",
+      "DismissReason",
+      "ConfidenceLevel"
+    ],
+    "additionalProperties": false
   }
 }
 ```

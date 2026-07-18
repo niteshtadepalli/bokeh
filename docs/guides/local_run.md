@@ -33,7 +33,8 @@ cd /path/to/codemender-agent
 
 ### Step 2: Install Python Dependencies (Optional)
 
-> [!NOTE] **Zero-Setup Testing**: The orchestrator is designed with safe import
+> [!NOTE]
+> **Zero-Setup Testing**: The orchestrator is designed with safe import
 > fallbacks. If the `google-cloud-storage` library is missing locally, the
 > script automatically switches to internal dummy mocks, allowing you to run
 > unit tests (`python3 -m unittest discover tests`) and dry-runs **without
@@ -150,7 +151,8 @@ export CODEMENDER_FORCE_OVERWRITE="false"
 export CODEMENDER_REPORT_BUCKET="my-gcs-reports-bucket"
 ```
 
-> [!NOTE] **GCS Report Authorization**: If you configure
+> [!NOTE]
+> **GCS Report Authorization**: If you configure
 > `CODEMENDER_REPORT_BUCKET` for local runs, you must ensure your terminal is
 > authenticated with GCP and local Application Default Credentials (ADC) are set
 > up. Run:
