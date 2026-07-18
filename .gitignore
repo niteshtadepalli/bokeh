@@ -1,0 +1,22 @@
+# Python Bytecode and Cache Directories
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing and Coverage Caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Environment and Build Outputs
+.venv/
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# CodeMender Local Workspace Output
+.cm_project/
+.exploit/

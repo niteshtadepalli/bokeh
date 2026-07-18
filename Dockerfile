@@ -44,7 +44,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy orchestrator script
+# Copy orchestrator package and entrypoint script
+COPY codemender_agent ./codemender_agent
 COPY orchestrator.py .
 
 # Set entrypoint for Cloud Run Job execution

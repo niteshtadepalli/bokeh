@@ -89,16 +89,48 @@ graph TD
 ## User Guides & Documentation
 
 To set up, configure, and execute the CodeMender Orchestrator, refer to the
-following dedicated markdown guides:
+following dedicated markdown guides in the `docs/` folder:
 
-*   📖 **[Local Run Guide](local_run_guide.md)**: Steps to configure your
+*   📖 **[Local Run Guide](docs/guides/local_run.md)**: Steps to configure your
     developer workstation, install dependencies locally, and run the scanner
     manually for validation and quick debugging.
-*   🚀 **[Production Run & Deployment Guide](production_run_guide.md)**:
+*   🚀 **[Production Run & Deployment Guide](docs/guides/production_run.md)**:
     Step-by-step instructions to provision GCS buckets, configure IAM roles,
     deploy Cloud Run Jobs, and automate daily scans using Cloud Scheduler.
+*   🛡️
+    **[Implementation Guardrails & Design](docs/architecture/guardrails.md)**:
+    Architecture specifications, security constraints, and execution rules.
+*   ⚡
+    **[Parallelization Design Specification](docs/architecture/parallelization_design.md)**:
+    Source of Truth for multi-stage sharded parallel scanning across GCP and
+    GitHub Actions.
 
 --------------------------------------------------------------------------------
+
+## Repository Structure & Testing
+
+```
+.
+├── orchestrator.py                 # CLI entrypoint
+├── codemender_agent/               # Main Python package
+│   ├── config.py                   # Config injection & credential scrubbing
+│   ├── utils.py                    # Process execution & retry decorators
+│   ├── storage.py                  # GCS report uploads & signed URLs
+│   ├── vcs/                        # Git and GitHub API integrations
+│   ├── codemender/                 # CodeMender CLI & SQLite state DB interface
+│   └── runners/                    # Sequential and parallel execution pipelines
+├── tests/                          # Modular unit test suite
+├── docs/                           # Documentation, guides, and specifications
+└── Dockerfile                      # Deployment container definition
+```
+
+### Running Unit Tests
+
+Run the unit test suite across all submodules:
+
+```bash
+python3 -m unittest discover tests
+```
 
 ## Future Work
 
