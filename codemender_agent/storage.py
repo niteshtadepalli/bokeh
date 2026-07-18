@@ -5,35 +5,36 @@ import logging
 import os
 from typing import Optional
 
+# pylint: disable=unused-argument
+class DummyStorage:
+  """Dummy fallback for local developer/unit testing environments."""
+
+  class Blob:
+
+    def upload_from_filename(self, *args, **kwargs):
+      pass
+
+    def generate_signed_url(self, *args, **kwargs):
+      return ""
+
+  class Bucket:
+
+    def blob(self, *args, **kwargs):
+      return DummyStorage.Blob()
+
+  class Client:
+
+    def __init__(self, *args, **kwargs):
+      pass
+
+    def bucket(self, *args, **kwargs):
+      return DummyStorage.Bucket()
+
+# pylint: enable=unused-argument
+
 try:
   from google.cloud import storage
 except ImportError:
-  # Dummy fallback for local developer/unit testing environments
-  # pylint: disable=unused-argument
-  class DummyStorage:
-
-    class Blob:
-
-      def upload_from_filename(self, *args, **kwargs):
-        pass
-
-      def generate_signed_url(self, *args, **kwargs):
-        return ""
-
-    class Bucket:
-
-      def blob(self, *args, **kwargs):
-        return DummyStorage.Blob()
-
-    class Client:
-
-      def __init__(self, *args, **kwargs):
-        pass
-
-      def bucket(self, *args, **kwargs):
-        return DummyStorage.Bucket()
-
-  # pylint: enable=unused-argument
   storage = DummyStorage
 
 logger = logging.getLogger("codemender-orchestrator")

@@ -65,7 +65,7 @@ coordinate state between the stages.
         └── Uploads the final report to GCS (generates temporary signed access URL)
 ```
 
-### How the Parallel Worker Count ($N$) is Determined & Scaled
+### How the Parallel Worker Count (N) is Determined & Scaled
 
 1.  **Dynamic Derivation from Stage 1**: When Stage 1 (Scan Phase) completes,
     the coordinator parses the output `scan.sarif` file to extract the exact
@@ -81,13 +81,14 @@ coordinate state between the stages.
 3.  **The `MAX_TASKS` Cap & Modulo Partitioning Formula**: To ensure optimal
     performance without hitting quota limits, the pipeline uses a configurable
     upper limit parameter: `MAX_TASKS` (default: `10` or `20`). The worker count
-    $N$ is calculated as: $$N = \min(\text{findings\_count},
-    \text{MAX\_TASKS})$$
+    `N` is calculated as:
+
+    `N = min(findings_count, MAX_TASKS)`
 
     *   **Scenario A (Small/Medium scan)**: If 4 findings are discovered, Stage
-        2 triggers $N = 4$ worker tasks. Each task processes **1 finding**.
+        2 triggers `N = 4` worker tasks. Each task processes **1 finding**.
     *   **Scenario B (Large scan)**: If 40 findings are discovered and
-        `MAX_TASKS=10`, Stage 2 triggers $N = 10$ worker tasks. Using modulo
+        `MAX_TASKS=10`, Stage 2 triggers `N = 10` worker tasks. Using modulo
         partitioning (`finding_index % N == task_index`), each worker task
         processes **4 findings** sequentially in its isolated VM container.
     *   **Scenario C (Zero findings)**: If 0 findings are discovered, Stage 2
@@ -119,7 +120,7 @@ evaluated and rejected:
         instance. Additionally, tests trying to bind to the same hardcoded
         network ports (e.g. `3000`) would collide and crash.
 2.  **Stateless Modulo Sharding with Worker Polling (Single Job)**:
-    *   *Idea*: Booting $N$ containers in parallel at the same time. Task 0
+    *   *Idea*: Booting N containers in parallel at the same time. Task 0
         performs the scan, while Tasks 1..N idle-sleep and poll GCS waiting for
         Task 0 to upload the scan state.
     *   *Why Ruled Out*: Highly inefficient and wasteful. Worker containers
@@ -187,5 +188,5 @@ To implement this plan within the refactored `codemender_agent/` package structu
 
 ### 5. Workflow Configuration Templates (New Files)
 
-*   **`gcp_parallel_workflow.yaml`**: Cloud Workflows definition managing Stage 1 $\rightarrow$ Stage 2 ($N$ parallel tasks) $\rightarrow$ Stage 3 on GCP.
+*   **`gcp_parallel_workflow.yaml`**: Cloud Workflows definition managing Stage 1 → Stage 2 (N parallel tasks) → Stage 3 on GCP.
 *   **`gha_parallel_workflow.yaml`**: GitHub Actions workflow template managing parallel matrix builds with job artifacts.
