@@ -28,7 +28,7 @@ machine:
 Open your terminal and change directory to the repository folder:
 
 ```bash
-cd /google/src/cloud/xinweizhang/fde-playground/google3/experimental/users/xinweizhang/git/codemender-agent
+cd /path/to/codemender-agent
 ```
 
 ### Step 2: Install Python Dependencies (Optional)
@@ -37,16 +37,13 @@ cd /google/src/cloud/xinweizhang/fde-playground/google3/experimental/users/xinwe
 > **Zero-Setup Testing**: The orchestrator is designed with safe import
 > fallbacks. If the `google-cloud-storage` library is missing locally, the
 > script automatically switches to internal dummy mocks, allowing you to run
-> unit tests (`test_orchestrator.py`) and dry-runs **without installing any
-> local dependencies**.
+> unit tests (`python3 -m unittest discover tests`) and dry-runs **without
+> installing any local dependencies**.
 
 If you need to install the dependencies locally (e.g. to test actual GCS
 uploads), ensure `pip3` is installed on your workstation, then run:
 
 ```bash
-# If pip3 is missing, install it first (requires sudo):
-# sudo apt-get update && sudo apt-get install -y python3-pip
-
 pip3 install -r requirements.txt
 ```
 

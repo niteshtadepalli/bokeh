@@ -49,9 +49,9 @@ gcloud services enable \
 
 ## Step 1: Clone the Orchestrator Code Repository
 
-Before deploying, you must clone or copy the orchestrator source files (the code
-you are currently reading) to your deployment shell environment (e.g. your local
-workstation or Google Cloud Shell):
+Before deploying, you must clone or copy the orchestrator source files to your
+deployment shell environment (e.g. your local workstation or Google Cloud
+Shell):
 
 ```bash
 git clone https://github.com/your-username/codemender-agent.git
@@ -211,27 +211,24 @@ gcloud iam service-accounts create ${SA_NAME} \
 > [!TIP]
 > **Troubleshooting Permission Denied in Cloud Build**: If the default
 > Compute Engine service account (used by Cloud Build) lacks required access to
-> staging buckets or image registries: 1. **GCS Access Denied**
-> (`storage.objects.get` error): Grant GCS read/write permissions:
+> staging buckets or image registries:
 >
-> ````
-> ```bash
-> export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
-> gcloud projects add-iam-policy-binding ${PROJECT_ID} \
->     --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
->     --role="roles/storage.admin"
-> ```
-> ````
+> 1. **GCS Access Denied** (`storage.objects.get` error): Grant GCS read/write permissions:
 >
-> 1.  **Artifact Registry Access Denied**
->     (`artifactregistry.repositories.uploadArtifacts` error): Grant push
->     permissions to upload images:
+>    ```bash
+>    export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
+>    gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+>        --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+>        --role="roles/storage.admin"
+>    ```
 >
->     ```bash
->     gcloud projects add-iam-policy-binding ${PROJECT_ID} \
->         --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
->         --role="roles/artifactregistry.writer"
->     ```
+> 2. **Artifact Registry Access Denied** (`artifactregistry.repositories.uploadArtifacts` error): Grant push permissions to upload images:
+>
+>    ```bash
+>    gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+>        --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+>        --role="roles/artifactregistry.writer"
+>    ```
 
 --------------------------------------------------------------------------------
 
