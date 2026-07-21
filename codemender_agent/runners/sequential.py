@@ -115,31 +115,43 @@ def run_sequential_pipeline() -> None:
     )
     sys.exit(1)
 
-  # Step 3: Run `cm find .` and generate report
-  logger.info("Scanning codebase for findings...")
-  try:
-    find_res = run_command(
-        [cm_binary, "find", "."],
-        cwd=repo_dir,
-        env=scrubbed_env,
-        check=True,
-    )
-    session_id = extract_session_id(find_res.stdout)
-    if session_id:
-      logger.info("Detected active scan session ID: %s", session_id)
-    else:
-      logger.warning("Could not extract active session ID from scan output.")
-  except Exception as e:
-    logger.critical(
-        "CodeMender vulnerability scanning failed. Please check the scan path"
-        " or network connection to backend: %s",
-        e,
-    )
-    sys.exit(1)
+  # Step 3: Parse scan targets (separated by comma or semicolon) and run `cm find` sequentially
+  scan_target_env = os.environ.get("CODEMENDER_SCAN_TARGET", ".")
+  targets = []
+  for part in scan_target_env.split(";"):
+    for subpart in part.split(","):
+      t = subpart.strip()
+      if t:
+        targets.append(t)
+  if not targets:
+    targets = ["."]
 
+  logger.info("Starting CodeMender scanning for targets: %s", targets)
+
+  for target in targets:
+    logger.info("Running scan for target: '%s'...", target)
+    try:
+      find_res = run_command(
+          [cm_binary, "find", target],
+          cwd=repo_dir,
+          env=scrubbed_env,
+          check=True,
+      )
+      session_id = extract_session_id(find_res.stdout)
+      if session_id:
+        logger.info("Detected active scan session ID: %s for target '%s'", session_id, target)
+      else:
+        logger.warning("Could not extract active session ID from scan output for target '%s'.", target)
+    except Exception as e:
+      logger.critical(
+          "CodeMender vulnerability scanning failed for target '%s'. Stopping pipeline: %s",
+          target,
+          e,
+      )
+      sys.exit(1)
+
+  # Fetch all findings from local SQLite database across all target sessions
   report_cmd = [cm_binary, "report", "--format", "json"]
-  if session_id:
-    report_cmd.extend(["--session", session_id])
 
   report_res = run_command(
       report_cmd,

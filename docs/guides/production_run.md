@@ -257,6 +257,37 @@ gcloud run jobs create codemender-scan \
     --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
 ```
 
+### Scanning Monorepos or Large Codebases
+
+If your repository contains multiple sub-projects, microservices, or compiled production assets (e.g. frontends, blogs, desktop apps, and backends combined), scanning the entire root directory (`.`) may exceed the gRPC client transfer payload limits, leading to `StartSession RPC: Internal error encountered` crashes.
+
+To resolve this:
+
+1. **Restrict the Scan Target**: Pass the `CODEMENDER_SCAN_TARGET` environment variable. You can specify a single folder (e.g. `api`), or multiple folders separated by semicolons (e.g. `api;server/shared`). Semicolons are highly recommended for Cloud Run environment configuration flags to avoid standard comma separation conflicts in the `gcloud` CLI. The orchestrator will scan each target sequentially and aggregate the findings into a single report.
+2. **Configure Sandbox Boundaries**: Create a `.codemender.yaml` configuration file at the root of your target repository. Add `project_paths` pointing to `.` so the agent is allowed to explore and read imported files in sibling directories (like `server/` or `shared/`) during investigation across all targeted runs.
+
+#### Configuration Example:
+Add the following to the root of your source repository as `.codemender.yaml`:
+```yaml
+# Allow the CodeMender agent to read files anywhere in the repo
+project_paths:
+  - "."
+```
+
+Then configure the Cloud Run Job with `CODEMENDER_SCAN_TARGET` pointing to the targeted folders:
+```bash
+gcloud run jobs create codemender-scan \
+    --image=us-central1-docker.pkg.dev/${PROJECT_ID}/codemender-runner/orchestrator:latest \
+    --region=us-central1 \
+    --service-account=${SA_EMAIL} \
+    --execution-environment=gen2 \
+    --task-timeout=1h \
+    --memory=4Gi \
+    --cpu=2 \
+    --set-env-vars="GITHUB_REPO_URL=https://github.com/your-org/your-repo.git,CODEMENDER_SCAN_TARGET=api;server/shared,CODEMENDER_BUILD_COMMAND='npm install && npm test',CODEMENDER_REPORT_BUCKET=${BUCKET_NAME}" \
+    --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
+```
+
 > [!TIP] **How to Scale Storage Beyond 10GB**: If you need more storage (e.g.
 > 20GB), define a volume of type `ephemeral-disk`, mount it to a directory, and
 > tell the orchestrator to use it by setting the `WORKSPACE_DIR` environment
