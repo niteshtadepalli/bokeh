@@ -45,24 +45,27 @@ explicit partition lists.
 [ Stage 1: SCAN & DISPATCH (Coordinator) ]
   └── Run 1 Container (Coordinator)
         ├── Clones repo, runs 'cm init' and 'cm find .' to find all vulnerabilities once
+        ├── Records target Git commit SHA
         ├── Filters out findings whose remote branches already exist (prevents duplicate PRs & idle workers)
         ├── Tars baseline ~/.codemender/ directory (contains state.db and identity.key) -> workspace_base.tar.gz
         ├── Extracts active finding IDs and intelligently partitions them into N lists (partition_i.json)
-        └── Saves workspace_base.tar.gz, partition files, and manifest.json (findings_count) to GCS
+        └── Saves workspace_base.tar.gz, partition files, and manifest.json (findings_count, target_sha) to GCS
               │
               ▼ (Triggers automatically when Scan finishes)
 [ Stage 2: FIX (Parallel Shards) ]
   ├── Run N Containers in Parallel (Workers)
-        ├── Each container clones repo, downloads & extracts workspace_base.tar.gz to ~/.codemender/
-        ├── Each container downloads its assigned partition list (partition_i.json)
+        ├── Each container clones repo, checkouts target_sha
+        ├── Downloads & extracts workspace_base.tar.gz to ~/.codemender/ (via Signed URL)
+        ├── Downloads its assigned partition list (partition_i.json)
+        ├── Runs idempotency check (skips if remote branch/PR exists and finding is verified)
         ├── Each container runs 'cm verify <id>' & 'cm fix <id>' ONLY for assigned IDs -> Pushes PRs
-        └── Uploads its mutated database to GCS as worker_i_state.db
+        └── Uploads its mutated database to GCS as worker_i_state.db (via Signed URL)
               │
               ▼ (Triggers automatically when all Workers finish)
 [ Stage 3: AGGREGATE ]
   └── Run 1 Container (Aggregator)
         ├── Downloads workspace_base.tar.gz and all worker_i_state.db files from GCS
-        ├── Merges worker databases into base state.db via SQLite 'INSERT OR REPLACE INTO findings'
+        ├── Merges worker databases into base state.db via SQLite UPSERT (using updated_at timestamps)
         ├── Compiles final consolidated HTML report (cm report -f html)
         └── Uploads final report to GCS (generates temporary signed access URL)
 ```
@@ -105,6 +108,10 @@ role and parameters:
 :                                :            : Jobs automatically       :
 :                                :            : injects                  :
 :                                :            : `CLOUD_RUN_TASK_COUNT`.  :
+| `CODEMENDER_BASE_WORKSPACE_URL`| **Stage 2** | GCP Signed URL to download `workspace_base.tar.gz`. |
+| `CODEMENDER_PARTITION_URLS`    | **Stage 2** | JSON-serialized array of signed download URLs for partitions (indexed by task index). |
+| `CODEMENDER_UPLOAD_URLS`       | **Stage 2** | JSON-serialized array of signed upload URLs for worker databases (indexed by task index). |
+
 
 ### How the Parallel Worker Count (N) is Determined & Scaled
 
@@ -182,6 +189,58 @@ execution permissions.
         retries, Stage 3 merges all available `worker_*_state.db` files from
         GCS, generates the partial summary report, and logs warnings for missing
         worker tasks.
+
+### Code Consistency (Git SHA Pinning)
+
+To prevent code drift during parallel execution:
+
+*   Stage 1 records the exact Git commit SHA scanned and saves it as
+    `target_sha` in `manifest.json`.
+*   Stage 2 workers read `target_sha` and execute `git checkout $target_sha`
+    immediately after cloning the repository. This ensures all workers operate
+    on the exact same code baseline analyzed during the scan phase.
+
+### Security & GCS Signed URLs
+
+To mitigate the risk of untrusted code execution (tests) exploiting cloud
+credentials:
+
+*   Worker containers do not run with GCP Service Account credentials that have
+    write access to the GCS bucket.
+*   The external control plane (e.g., Cloud Workflows) generates short-lived GCP
+    Signed URLs for:
+    *   Downloading `workspace_base.tar.gz` and `partition_i.json`.
+    *   Uploading `worker_i_state.db`.
+*   Workers use these Signed URLs via standard HTTPS tools (like `curl`),
+    keeping the execution environment completely credential-free.
+
+### Concurrency Lock Isolation (Project ID)
+
+The CodeMender server restricts concurrency by allowing only one active session
+per `project_id`.
+
+*   To allow parallel workers to execute concurrently without triggering
+    `DIFFERENT_OWNER_CONFLICT` or `SAME_OWNER_CONFLICT` blocks on the server,
+    each worker must have a unique `project_id`.
+*   This is achieved by **not** transferring the `.cm_project` file (created in
+    Stage 1) to Stage 2 workers.
+*   When workers clone the repository fresh, they will lack `.cm_project`. The
+    CLI commands (`cm fix`/`cm verify`) will automatically generate a new random
+    `project_id` UUID in the workspace, ensuring clean isolation.
+
+### Worker Idempotency & Deduplication
+
+If a worker is retried (Tier 2), it must handle previously processed findings
+gracefully:
+
+*   Before attempting to fix a finding, the worker checks if a remote branch/PR
+    already exists for it.
+*   If the branch exists, the worker runs `cm verify <finding_id>` to check if
+    the vulnerability is already resolved.
+*   If verified as resolved, it updates the local status and skips the `cm fix`
+    step to avoid redundant LLM calls and PR updates.
+*   Fingerprint-based deduplication (native to `cm`) is used to ensure identical
+    findings across runs are mapped to the same ID.
 
 ### GCS Intermediate Artifact Lifecycle
 
@@ -264,32 +323,95 @@ structure, we will create or modify the following files:
 *   **`scan.py`** (New File): Stage 1 Coordinator runner.
     *   Clones repo (`git clone --depth 1`) and initializes CodeMender (`cm
         init`, `cm find .` with retries).
+    *   Records the target Git commit SHA.
     *   Checks `check_remote_branch_exists()` for each finding and **filters out
         findings whose feature branches already exist on remote** (unless
         `CODEMENDER_FORCE_OVERWRITE=true`).
     *   Creates `workspace_base.tar.gz` from `~/.codemender/`.
-    *   Extracts remaining active finding IDs, partitions them into
-        `partition_i.json` files, and writes `manifest.json`
-        (`active_findings_count`).
+    *   Extracts remaining active finding IDs, partitions them into $N$
+        `partition_i.json` files using a round-robin distribution (ensuring
+        even load and exactly $N$ partitions), and writes `manifest.json`
+        (`active_findings_count`, `target_sha`).
     *   Uploads tarball, partition lists, and manifest to GCS under
         `scans/[scan_id]/`.
 *   **`worker.py`** (New File): Stage 2 Parallel Worker runner.
-    *   Clones target repository (`git clone --depth 1`) using GitHub token.
-    *   Downloads & extracts `workspace_base.tar.gz` to `~/.codemender/` to
-        restore baseline state and `identity.key`.
-    *   Downloads assigned partition list `partition_[worker_index].json`
-        containing pre-filtered active finding IDs.
-    *   Executes `cm verify` (Tier 1 retry up to 3x) and `cm fix` for assigned
-        IDs; pushes feature branches & PRs.
+    *   Clones target repository (`git clone`) and checkouts `target_sha` (read
+        from `manifest.json`).
+    *   Downloads & extracts `workspace_base.tar.gz` to `~/.codemender/` (via
+        GCS Signed URL) to restore baseline state and `identity.key`.
+    *   Downloads assigned partition list `partition_[worker_index].json` (via
+        GCS Signed URL).
+    *   For each assigned finding, checks if a remote branch/PR already exists.
+        If so, runs `cm verify` to see if it is resolved. If already resolved,
+        skips `cm fix` (idempotency).
+    *   Executes `cm verify` and `cm fix` for unresolved findings; pushes
+        feature branches & PRs.
     *   Uploads mutated state database to
-        `scans/[scan_id]/worker_[worker_index]_state.db` on GCS.
+        `scans/[scan_id]/worker_[worker_index]_state.db` on GCS (via GCS Signed
+        URL).
 *   **`aggregate.py`** (New File): Stage 3 Aggregator runner.
     *   Downloads `workspace_base.tar.gz` and all available `worker_*_state.db`
         files from GCS.
-    *   Merges worker database tables into base `state.db` via SQLite `INSERT OR
-        REPLACE INTO findings`.
+    *   Merges worker database tables into base `state.db` using selective SQLite
+        UPSERT queries to prevent lost updates:
+        *   **Findings Merge**:
+            ```sql
+            INSERT INTO main.findings (
+                finding_id, session_id, title, file_path, severity, confidence, analysis, snippet, vuln_type, vuln_id,
+                verified, muted, mute_reason, created_at, fingerprint, status, source_stage, finding_json, updated_at,
+                start_line, end_line, dismiss_reason, confidence_level
+            )
+            SELECT 
+                finding_id, session_id, title, file_path, severity, confidence, analysis, snippet, vuln_type, vuln_id,
+                verified, muted, mute_reason, created_at, fingerprint, status, source_stage, finding_json, updated_at,
+                start_line, end_line, dismiss_reason, confidence_level
+            FROM worker.findings
+            ON CONFLICT(finding_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                title = excluded.title,
+                file_path = excluded.file_path,
+                severity = excluded.severity,
+                confidence = excluded.confidence,
+                analysis = excluded.analysis,
+                snippet = excluded.snippet,
+                vuln_type = excluded.vuln_type,
+                vuln_id = excluded.vuln_id,
+                verified = excluded.verified,
+                muted = excluded.muted,
+                mute_reason = excluded.mute_reason,
+                status = excluded.status,
+                source_stage = excluded.source_stage,
+                finding_json = excluded.finding_json,
+                updated_at = excluded.updated_at,
+                start_line = excluded.start_line,
+                end_line = excluded.end_line,
+                dismiss_reason = excluded.dismiss_reason,
+                confidence_level = excluded.confidence_level
+            WHERE excluded.updated_at > main.findings.updated_at OR main.findings.updated_at = '' OR main.findings.updated_at IS NULL;
+            ```
+        *   **Sessions Merge**:
+            ```sql
+            INSERT INTO main.sessions (session_id, operation_name, session_type, status, pipeline_mode, target, created_at, updated_at, project_root)
+            SELECT session_id, operation_name, session_type, status, pipeline_mode, target, created_at, updated_at, project_root
+            FROM worker.sessions
+            ON CONFLICT(session_id) DO UPDATE SET
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            WHERE excluded.updated_at > main.sessions.updated_at;
+            ```
+        *   **Artifacts Merge** (prevents duplicate key conflicts on autoincrement ID):
+            ```sql
+            INSERT INTO main.artifacts (session_id, filename, original_path, purpose, finding_id, created_at)
+            SELECT session_id, filename, original_path, purpose, finding_id, created_at
+            FROM worker.artifacts AS w
+            WHERE NOT EXISTS (
+                SELECT 1 FROM main.artifacts AS m
+                WHERE m.session_id = w.session_id AND m.filename = w.filename
+            );
+            ```
     *   Generates final consolidated HTML report (`cm report -f html`) and
         uploads to GCS with signed access URL.
+
 
 ### 3. `codemender_agent/storage.py` (Updated)
 
@@ -324,3 +446,72 @@ structure, we will create or modify the following files:
     1 → Stage 2 (N parallel tasks) → Stage 3 on GCP.
 *   **`gha_parallel_workflow.yaml`**: GitHub Actions workflow template managing
     parallel matrix builds with job artifacts.
+
+### 7. Intermediate File Schemas (New JSON Specs)
+
+To ensure interoperability between runners, the following JSON schemas are defined for files stored in the GCS transit directory:
+
+#### A. `manifest.json`
+Located at `scans/[scan_id]/manifest.json`. Records metadata about the scan run.
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CodeMenderScanManifest",
+  "type": "object",
+  "properties": {
+    "findings_count": {
+      "type": "integer",
+      "description": "Total number of active findings after remote branch filtering."
+    },
+    "target_sha": {
+      "type": "string",
+      "description": "The exact Git commit SHA scanned in Stage 1."
+    }
+  },
+  "required": ["findings_count", "target_sha"]
+}
+```
+
+#### B. `partition_i.json`
+Located at `scans/[scan_id]/partition_[index].json`. Defines the work unit for worker `index`.
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CodeMenderPartition",
+  "type": "object",
+  "properties": {
+    "partition_index": {
+      "type": "integer",
+      "description": "The 0-based index of this partition."
+    },
+    "finding_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "description": "List of finding UUIDs assigned to this worker task."
+    }
+  },
+  "required": ["partition_index", "finding_ids"]
+}
+```
+
+--------------------------------------------------------------------------------
+
+## 6. Future Work
+
+### 6.1. GitHub Actions Dynamic Matrix Support
+*   **Goal**: Enable native parallel execution in GitHub Actions using a dynamic matrix.
+*   **Mechanism**:
+    *   Stage 1 (Coordinator) will output a JSON array of partition indices (e.g., `[0, 1, 2]`) to GHA Runner outputs (e.g., `echo "matrix=[0,1,2]" >> $GITHUB_OUTPUT`).
+    *   Stage 2 (Workers) will use this output to dynamically define its matrix:
+        ```yaml
+        strategy:
+          matrix:
+            worker_index: ${{ fromJson(needs.scan.outputs.matrix) }}
+        ```
+    *   This allows GHA to scale workers dynamically based on the number of findings, matching the GCP Cloud Workflows capability.
+
