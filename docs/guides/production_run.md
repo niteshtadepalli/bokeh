@@ -312,16 +312,36 @@ trigger the job execution manually:
 gcloud run jobs execute codemender-scan --region=us-central1
 ```
 
-### Triggering with Overrides (e.g. Overwrite mode / Retrying):
+### Dynamic Execution Overrides (Temporary Settings)
 
-To run a forced scan (ignoring existing branch checks and force-pushing updates
-to existing branches):
+To trigger a single scan execution with temporary parameters (without modifying the permanent job configuration), pass `--update-env-vars` during the `execute` command.
 
+For example, to run a forced scan (ignoring existing branch checks and force-pushing updates):
 ```bash
 gcloud run jobs execute codemender-scan \
     --region=us-central1 \
     --update-env-vars="CODEMENDER_FORCE_OVERWRITE=true"
 ```
+
+You can also temporarily point to a different repository or target for a one-off run:
+```bash
+gcloud run jobs execute codemender-scan \
+    --region=us-central1 \
+    --update-env-vars="GITHUB_REPO_URL=https://github.com/your-org/your-repo.git,CODEMENDER_SCAN_TARGET=api"
+```
+
+### Reusing the Job for Different Repositories (Permanent Settings)
+
+Because the runner container dynamically clones whatever repository URL is passed to it, you can reuse the same deployed Cloud Run Job for different repositories by permanently updating its default environment variables:
+
+```bash
+# Update the target repository and build command for the job
+gcloud run jobs update codemender-scan \
+    --region=us-central1 \
+    --update-env-vars="GITHUB_REPO_URL=https://github.com/your-org/another-repo.git,CODEMENDER_SCAN_TARGET=src,CODEMENDER_BUILD_COMMAND='npm install && npm run build'"
+```
+
+*Note: Ensure the required language runtime for the new repository is enabled in the runner image (see the [Dockerfile](file:///google/src/cloud/xinweizhang/fde-playground/google3/experimental/users/xinweizhang/git/codemender-agent/Dockerfile) toolchains section).*
 
 --------------------------------------------------------------------------------
 
