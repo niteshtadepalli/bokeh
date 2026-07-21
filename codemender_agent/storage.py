@@ -5,6 +5,7 @@ import logging
 import os
 from typing import Optional
 
+
 # pylint: disable=unused-argument
 class DummyStorage:
   """Dummy fallback for local developer/unit testing environments."""
@@ -29,6 +30,7 @@ class DummyStorage:
 
     def bucket(self, *args, **kwargs):
       return DummyStorage.Bucket()
+
 
 # pylint: enable=unused-argument
 
@@ -67,9 +69,12 @@ def upload_and_sign_report(
     }
 
     # Wrap in Impersonated Credentials for token-only environments (e.g. Cloud Run)
+    # pylint: disable=protected-access
     if hasattr(client, "_credentials"):
       try:
+        # pylint: disable=import-outside-toplevel
         from google.auth import credentials as auth_credentials
+
         is_signing = isinstance(client._credentials, auth_credentials.Signing)
       except Exception:  # pylint: disable=broad-exception-caught
         is_signing = False
@@ -80,7 +85,9 @@ def upload_and_sign_report(
         # Fallback metadata check for sa_email if credentials.service_account_email was unset/default
         if not sa_email or sa_email == "default":
           try:
+            # pylint: disable=import-outside-toplevel
             import requests
+
             resp = requests.get(
                 "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email",
                 headers={"Metadata-Flavor": "Google"},
@@ -98,16 +105,23 @@ def upload_and_sign_report(
 
         if sa_email:
           try:
+            # pylint: disable=import-outside-toplevel
             from google.auth import impersonated_credentials
-            logger.info("Using Impersonated Credentials signer for: %s", sa_email)
+
+            logger.info(
+                "Using Impersonated Credentials signer for: %s", sa_email
+            )
             signing_creds = impersonated_credentials.Credentials(
                 source_credentials=client._credentials,
                 target_principal=sa_email,
-                target_scopes=["https://www.googleapis.com/auth/devstorage.read_write"],
+                target_scopes=[
+                    "https://www.googleapis.com/auth/devstorage.read_write"
+                ],
             )
             signing_kwargs["credentials"] = signing_creds
           except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("Failed to create impersonated credentials: %s", e)
+    # pylint: enable=protected-access
 
     url = blob.generate_signed_url(**signing_kwargs)
     return url

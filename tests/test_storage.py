@@ -15,7 +15,10 @@ class TestStorage(unittest.TestCase):
   def test_upload_and_sign_report_with_signing_credentials(
       self, mock_client_cls
   ):
-    """Test GCS URL signing when credentials already support signing (e.g. JSON key)."""
+    """Test GCS URL signing when credentials already support signing (e.g.
+
+    JSON key).
+    """
     mock_client = MagicMock()
     mock_bucket = MagicMock()
     mock_blob = MagicMock()
@@ -126,7 +129,9 @@ class TestStorage(unittest.TestCase):
         mock_impersonated_module.Credentials.assert_called_once_with(
             source_credentials=mock_credentials,
             target_principal="test-sa@project.iam.gserviceaccount.com",
-            target_scopes=["https://www.googleapis.com/auth/devstorage.read_write"],
+            target_scopes=[
+                "https://www.googleapis.com/auth/devstorage.read_write"
+            ],
         )
 
         # Verify generate_signed_url was called with the impersonated signing credentials

@@ -143,13 +143,13 @@ gcloud iam service-accounts create ${SA_NAME} \
         --role="roles/secretmanager.secretAccessor"
     ```
 
-2.  **GCS Write Access**: Allow the runner to write HTML reports to the GCS
-    bucket.
+2.  **GCS Read/Write Access**: Allow the runner to upload reports and sign URL
+    requests (which requires read permission for visitors of the signed URL).
 
     ```bash
     gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} \
         --member="serviceAccount:${SA_EMAIL}" \
-        --role="roles/storage.objectCreator"
+        --role="roles/storage.objectUser"
     ```
 
 3.  **Signed URL SignBlob permission**: To dynamically generate secure,
@@ -185,8 +185,7 @@ gcloud iam service-accounts create ${SA_NAME} \
 
 ## Step 6: Build and Push the Docker Container
 
-> [!NOTE]
-> **CodeMender CLI Binary Security**: The releases bucket remains
+> [!NOTE] **CodeMender CLI Binary Security**: The releases bucket remains
 > completely private. During deployment, Cloud Build uses its own authenticated
 > Service Account to securely download the `cm` binary from GCS into the build
 > environment before copying it into the container image.
@@ -208,27 +207,29 @@ gcloud iam service-accounts create ${SA_NAME} \
         --substitutions=_RELEASES_BUCKET="codemender-releases-${PROJECT_ID}" .
     ```
 
-> [!TIP]
-> **Troubleshooting Permission Denied in Cloud Build**: If the default
+> [!TIP] **Troubleshooting Permission Denied in Cloud Build**: If the default
 > Compute Engine service account (used by Cloud Build) lacks required access to
 > staging buckets or image registries:
 >
-> 1. **GCS Access Denied** (`storage.objects.get` error): Grant GCS read/write permissions:
+> 1.  **GCS Access Denied** (`storage.objects.get` error): Grant GCS read/write
+>     permissions:
 >
->    ```bash
->    export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
->    gcloud projects add-iam-policy-binding ${PROJECT_ID} \
->        --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
->        --role="roles/storage.admin"
->    ```
+>     ```bash
+>     export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
+>     gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+>         --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+>         --role="roles/storage.admin"
+>     ```
 >
-> 2. **Artifact Registry Access Denied** (`artifactregistry.repositories.uploadArtifacts` error): Grant push permissions to upload images:
+> 2.  **Artifact Registry Access Denied**
+>     (`artifactregistry.repositories.uploadArtifacts` error): Grant push
+>     permissions to upload images:
 >
->    ```bash
->    gcloud projects add-iam-policy-binding ${PROJECT_ID} \
->        --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
->        --role="roles/artifactregistry.writer"
->    ```
+>     ```bash
+>     gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+>         --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+>         --role="roles/artifactregistry.writer"
+>     ```
 
 --------------------------------------------------------------------------------
 
@@ -236,8 +237,7 @@ gcloud iam service-accounts create ${SA_NAME} \
 
 Deploy the container as a Cloud Run Job.
 
-> [!IMPORTANT]
-> **Ephemeral Storage Requirements**: Cloud Run Gen 2 jobs
+> [!IMPORTANT] **Ephemeral Storage Requirements**: Cloud Run Gen 2 jobs
 > automatically provision a default **`10GB` of ephemeral root disk space**,
 > which is sufficient for standard builds and cloning. If your target repository
 > has a massive dependency tree or build output that requires more than 10GB,
@@ -257,8 +257,7 @@ gcloud run jobs create codemender-scan \
     --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
 ```
 
-> [!TIP]
-> **How to Scale Storage Beyond 10GB**: If you need more storage (e.g.
+> [!TIP] **How to Scale Storage Beyond 10GB**: If you need more storage (e.g.
 > 20GB), define a volume of type `ephemeral-disk`, mount it to a directory, and
 > tell the orchestrator to use it by setting the `WORKSPACE_DIR` environment
 > variable:
