@@ -6,9 +6,18 @@ infrastructure (e.g., Cloud Run Job) to validate and fix security
 vulnerabilities using the CodeMender CLI and open GitHub Pull Requests.
 """
 
+import logging
 import os
+import sys
 
 from codemender_agent.runners.sequential import run_sequential_pipeline
+
+# Configure global root logger for all package submodules
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
 
 
 def main() -> None:
