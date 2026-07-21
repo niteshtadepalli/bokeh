@@ -5,6 +5,7 @@ import logging
 import os
 from typing import Optional
 
+
 # pylint: disable=unused-argument
 class DummyStorage:
   """Dummy fallback for local developer/unit testing environments."""
@@ -29,6 +30,7 @@ class DummyStorage:
 
     def bucket(self, *args, **kwargs):
       return DummyStorage.Bucket()
+
 
 # pylint: enable=unused-argument
 
@@ -60,12 +62,68 @@ def upload_and_sign_report(
     )
     blob.upload_from_filename(local_file_path, content_type="text/html")
 
-    # Generate signed URL valid for 3 days
-    url = blob.generate_signed_url(
-        version="v4",
-        expiration=datetime.timedelta(days=3),  # 3 days
-        method="GET",
-    )
+    signing_kwargs = {
+        "version": "v4",
+        "expiration": datetime.timedelta(days=3),  # 3 days
+        "method": "GET",
+    }
+
+    # Wrap in Impersonated Credentials for token-only environments (e.g. Cloud Run)
+    # pylint: disable=protected-access
+    if hasattr(client, "_credentials"):
+      try:
+        # pylint: disable=import-outside-toplevel
+        from google.auth import credentials as auth_credentials
+
+        is_signing = isinstance(client._credentials, auth_credentials.Signing)
+      except Exception:  # pylint: disable=broad-exception-caught
+        is_signing = False
+
+      if not is_signing:
+        sa_email = getattr(client._credentials, "service_account_email", None)
+
+        # Fallback metadata check for sa_email if credentials.service_account_email was unset/default
+        if not sa_email or sa_email == "default":
+          try:
+            # pylint: disable=import-outside-toplevel
+            import requests
+
+            resp = requests.get(
+                "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email",
+                headers={"Metadata-Flavor": "Google"},
+                timeout=2,
+            )
+            if resp.status_code == 200:
+              sa_email = resp.text.strip()
+              logger.info(
+                  "Automatically fetched service account email from Metadata"
+                  " Server: %s",
+                  sa_email,
+              )
+          except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
+        if sa_email:
+          try:
+            # pylint: disable=import-outside-toplevel
+            from google.auth import impersonated_credentials
+
+            logger.info(
+                "Using Impersonated Credentials signer for: %s", sa_email
+            )
+            signing_creds = impersonated_credentials.Credentials(
+                source_credentials=client._credentials,
+                target_principal=sa_email,
+                target_scopes=[
+                    "https://www.googleapis.com/auth/devstorage.read_write"
+                ],
+            )
+            signing_kwargs["credentials"] = signing_creds
+          except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Failed to create impersonated credentials: %s", e)
+    # pylint: enable=protected-access
+
+    url = blob.generate_signed_url(**signing_kwargs)
     return url
   except Exception as e:  # pylint: disable=broad-exception-caught
     logger.error("Failed to upload or generate signed URL for report: %s", e)
