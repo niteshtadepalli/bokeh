@@ -5,6 +5,7 @@ import logging
 import os
 from typing import Optional
 
+
 # pylint: disable=unused-argument
 class DummyStorage:
   """Dummy fallback for local developer/unit testing environments."""
@@ -29,6 +30,7 @@ class DummyStorage:
 
     def bucket(self, *args, **kwargs):
       return DummyStorage.Bucket()
+
 
 # pylint: enable=unused-argument
 
@@ -60,12 +62,46 @@ def upload_and_sign_report(
     )
     blob.upload_from_filename(local_file_path, content_type="text/html")
 
-    # Generate signed URL valid for 3 days
-    url = blob.generate_signed_url(
-        version="v4",
-        expiration=datetime.timedelta(days=3),  # 3 days
-        method="GET",
-    )
+    signing_kwargs = {
+        "version": "v4",
+        "expiration": datetime.timedelta(days=3),  # 3 days
+        "method": "GET",
+    }
+
+    # Retrieve service account email for token-only environments (e.g. Cloud Run)
+    if hasattr(client, "_credentials"):
+      try:
+        import requests
+      except ImportError:
+        requests = None
+
+      sa_email = None
+      if (
+          hasattr(client._credentials, "service_account_email")
+          and client._credentials.service_account_email
+      ):
+        sa_email = client._credentials.service_account_email
+      elif requests:
+        try:
+          resp = requests.get(
+              "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email",
+              headers={"Metadata-Flavor": "Google"},
+              timeout=2,
+          )
+          if resp.status_code == 200:
+            sa_email = resp.text.strip()
+            logger.info(
+                "Automatically fetched service account email from Metadata"
+                " Server: %s",
+                sa_email,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+
+      if sa_email:
+        signing_kwargs["service_account_email"] = sa_email
+
+    url = blob.generate_signed_url(**signing_kwargs)
     return url
   except Exception as e:  # pylint: disable=broad-exception-caught
     logger.error("Failed to upload or generate signed URL for report: %s", e)
