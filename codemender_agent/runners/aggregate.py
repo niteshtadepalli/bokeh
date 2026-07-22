@@ -212,9 +212,10 @@ def _generate_and_upload_report(
           signed_url,
       )
     else:
-      logger.error(
-          "Failed to generate signed URL for the consolidated GCS report."
+      logger.critical(
+          "Failed to upload or generate signed URL for the consolidated GCS report."
       )
+      sys.exit(1)
   else:
     logger.error(
         "Failed to execute 'cm report -f html' in aggregator (code %d).",

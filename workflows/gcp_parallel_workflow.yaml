@@ -10,6 +10,7 @@ main:
           - repo_url: ${args.repo_url}
           - build_command: ${args.build_command}
           - scan_target: ${default(map.get(args, "scan_target"), ".")}
+          - max_tasks: ${int(default(map.get(args, "max_tasks"), 20))}
           - scan_id: ${"scan-" + uuid.generate()}
 
     - log_start:
@@ -41,6 +42,8 @@ main:
                         value: ${build_command}
                       - name: CODEMENDER_SCAN_TARGET
                         value: ${scan_target}
+                      - name: CODEMENDER_MAX_TASKS
+                        value: ${string(max_tasks)}
           result: stage1_run
         retry:
           predicate: ${http.default_retry_predicate}

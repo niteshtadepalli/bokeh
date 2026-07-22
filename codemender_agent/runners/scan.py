@@ -421,7 +421,7 @@ def run_scan_pipeline() -> None:
     sys.exit(0)
 
   # 6. Partition findings
-  max_tasks = int(os.environ.get("CODEMENDER_MAX_TASKS", "10"))
+  max_tasks = int(os.environ.get("CODEMENDER_MAX_TASKS", "20"))
   partitions = _partition_findings(active_findings, max_tasks)
 
   # 7. Save and upload state
