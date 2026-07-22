@@ -77,40 +77,18 @@ GitHub Actions), the exact same container image is used. The entrypoint script
 (`orchestrator.py`) relies on environment variables to determine its execution
 role and parameters:
 
-| Variable Name                  | Required   | Description              |
-:                                : Stage(s)   :                          :
-| :----------------------------- | :--------- | :----------------------- |
-| `CODEMENDER_RUN_MODE`          | **All**    | Execution stage mode:    |
-:                                :            : `scan` (Stage 1),        :
-:                                :            : `worker` (Stage 2), or   :
-:                                :            : `aggregate` (Stage 3).   :
-:                                :            : Default fallback\:       :
-:                                :            : `sequential`.            :
-| `CODEMENDER_SCAN_ID`           | **All**    | Unique identifier for    |
-:                                :            : the scan run (e.g.,      :
-:                                :            : `scan-20260720-203000`). :
-:                                :            : Used as the GCS folder   :
-:                                :            : prefix\:                 :
-:                                :            : `scans/<scan_id>/`.      :
-| `CODEMENDER_GCS_BUCKET`        | **All**    | Name of the GCS bucket   |
-:                                :            : for state artifacts and  :
-:                                :            : report uploads.          :
-| `CODEMENDER_MAX_TASKS`         | **Stage 1  | Configurable upper limit |
-:                                : (Scan)**   : cap for parallel worker  :
-:                                :            : tasks (default\: `10` or :
-:                                :            : `20`).                   :
-| `CLOUD_RUN_TASK_INDEX`<br>*(or | **Stage 2  | 0-indexed worker task    |
-: `CODEMENDER_WORKER_INDEX`)*    : (Worker)** : number. Cloud Run Jobs   :
-:                                :            : automatically injects    :
-:                                :            : `CLOUD_RUN_TASK_INDEX`.  :
-| `CLOUD_RUN_TASK_COUNT`<br>*(or | **Stage 2  | Total parallel worker    |
-: `CODEMENDER_TOTAL_WORKERS`)*   : (Worker)** : count $N$. Cloud Run     :
-:                                :            : Jobs automatically       :
-:                                :            : injects                  :
-:                                :            : `CLOUD_RUN_TASK_COUNT`.  :
-| `CODEMENDER_BASE_WORKSPACE_URL`| **Stage 2** | GCP Signed URL to download `workspace_base.tar.gz`. |
-| `CODEMENDER_PARTITION_URLS`    | **Stage 2** | JSON-serialized array of signed download URLs for partitions (indexed by task index). |
-| `CODEMENDER_UPLOAD_URLS`       | **Stage 2** | JSON-serialized array of signed upload URLs for worker databases (indexed by task index). |
+| Variable Name | Required Stage(s) | Description |
+| :--- | :--- | :--- |
+| `CODEMENDER_RUN_MODE` | **All** | Execution stage mode: `scan` (Stage 1), `worker` (Stage 2), or `aggregate` (Stage 3).<br/>Default fallback: `sequential`. |
+| `CODEMENDER_SCAN_ID` | **All** | Unique identifier for the scan run (e.g., `scan-20260720-203000`).<br/>Used as the GCS folder prefix: `scans/<scan_id>/`. |
+| `CODEMENDER_GCS_BUCKET` | **All** | Name of the GCS bucket for state artifacts and report uploads. |
+| `CODEMENDER_MAX_TASKS` | **Stage 1 (Scan)** | Configurable upper limit cap for parallel worker tasks (default: `10` or `20`). |
+| `CLOUD_RUN_TASK_INDEX`<br/>*(or `CODEMENDER_WORKER_INDEX`)* | **Stage 2 (Worker)** | 0-indexed worker task number. Cloud Run Jobs automatically injects `CLOUD_RUN_TASK_INDEX`. |
+| `CLOUD_RUN_TASK_COUNT`<br/>*(or `CODEMENDER_TOTAL_WORKERS`)* | **Stage 2 (Worker)** | Total parallel worker count $N$. Cloud Run Jobs automatically injects `CLOUD_RUN_TASK_COUNT`. |
+| `CODEMENDER_BASE_WORKSPACE_URL` | **Stage 2** | GCP Signed URL to download `workspace_base.tar.gz`. |
+| `CODEMENDER_PARTITION_URLS` | **Stage 2** | JSON-serialized array of signed download URLs for partitions (indexed by task index). |
+| `CODEMENDER_UPLOAD_URLS` | **Stage 2** | JSON-serialized array of signed upload URLs for worker databases (indexed by task index). |
+
 
 
 ### How the Parallel Worker Count (N) is Determined & Scaled
