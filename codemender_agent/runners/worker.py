@@ -365,6 +365,7 @@ def run_worker_pipeline() -> None:
         cwd=repo_dir,
         env=scrubbed_env,
         check=True,
+        capture_stderr=False,
     )
     all_findings = parse_findings_json(report_res.stdout)
   except Exception as e:  # pylint: disable=broad-exception-caught
