@@ -44,7 +44,9 @@ main:
                         value: ${scan_target}
                       - name: CODEMENDER_MAX_TASKS
                         value: ${string(max_tasks)}
-            skip_polling: true
+            connector_params:
+              polling_policy:
+                skip_polling: true
           result: stage1_run
         retry:
           predicate: ${http.default_retry_predicate}
@@ -115,7 +117,9 @@ main:
                       value: ${partition_urls_str}
                     - name: CODEMENDER_UPLOAD_URLS
                       value: ${upload_urls_str}
-          skip_polling: true
+          connector_params:
+            polling_policy:
+              skip_polling: true
         result: stage2_run
 
     - wait_stage2:
@@ -148,7 +152,9 @@ main:
                       value: ${build_command}
                     - name: CODEMENDER_TOTAL_WORKERS
                       value: ${string(num_workers)}
-          skip_polling: true
+          connector_params:
+            polling_policy:
+              skip_polling: true
         result: stage3_run
 
     - wait_stage3:
