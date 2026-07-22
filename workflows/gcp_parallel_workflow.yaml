@@ -178,5 +178,5 @@ wait_for_job_success:
     - check_success:
         switch:
           - condition: ${execution.status.failedCount > 0}
-            raise: ${"Job execution failed: " + execution_name}
+            raise: '${"Job execution failed: " + execution_name}'
         return: ${execution}
