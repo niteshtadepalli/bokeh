@@ -425,7 +425,8 @@ Deploy the `gcp_parallel_workflow.yaml` template:
 gcloud workflows deploy codemender-parallel-workflow \
     --source=workflows/gcp_parallel_workflow.yaml \
     --location=us-central1 \
-    --service-account=${WORKFLOWS_SA_EMAIL}
+    --service-account=${WORKFLOWS_SA_EMAIL} \
+    --call-log-level=log-errors-only
 ```
 
 ### 10.4: Execute the Workflow Manually

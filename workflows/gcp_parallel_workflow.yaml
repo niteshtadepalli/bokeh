@@ -11,7 +11,7 @@ main:
           - build_command: ${args.build_command}
           - scan_target: ${default(map.get(args, "scan_target"), ".")}
           - max_tasks: ${int(default(map.get(args, "max_tasks"), 20))}
-          - scan_id: ${"scan-" + uuid.generate()}
+          - scan_id: ${"scan-" + sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
 
     - log_start:
         call: sys.log
@@ -44,6 +44,8 @@ main:
                         value: ${scan_target}
                       - name: CODEMENDER_MAX_TASKS
                         value: ${string(max_tasks)}
+          connector_params:
+            skip_polling: true
           result: stage1_run
         retry:
           predicate: ${http.default_retry_predicate}
@@ -114,6 +116,8 @@ main:
                       value: ${partition_urls_str}
                     - name: CODEMENDER_UPLOAD_URLS
                       value: ${upload_urls_str}
+        connector_params:
+          skip_polling: true
         result: stage2_run
 
     - wait_stage2:
@@ -146,6 +150,8 @@ main:
                       value: ${build_command}
                     - name: CODEMENDER_TOTAL_WORKERS
                       value: ${string(num_workers)}
+        connector_params:
+          skip_polling: true
         result: stage3_run
 
     - wait_stage3:
@@ -175,7 +181,7 @@ wait_for_job_completion:
     - wait_more:
         call: sys.sleep
         args:
-          seconds: 15
+          seconds: 60
         next: get_execution
 
 wait_for_job_success:
