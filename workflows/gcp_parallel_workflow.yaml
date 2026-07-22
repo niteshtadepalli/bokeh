@@ -166,7 +166,7 @@ wait_for_job_completion:
         result: execution
     - check_status:
         switch:
-          - condition: ${execution.status.completionTime != null}
+          - condition: ${map.get(execution, ["status", "completionTime"]) != null}
             return: ${execution}
         next: wait_more
     - wait_more:
@@ -187,7 +187,7 @@ wait_for_job_success:
         result: execution
     - check_success:
         switch:
-          - condition: ${execution.status.failedCount > 0}
+          - condition: ${default(map.get(execution, ["status", "failedCount"]), 0) > 0}
             raise: '${"Job execution failed: " + execution_name}'
     - return_result:
         return: ${execution}
