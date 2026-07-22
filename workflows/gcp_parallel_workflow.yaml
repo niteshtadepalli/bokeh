@@ -43,7 +43,7 @@ main:
                         value: ${scan_target}
           result: stage1_run
         retry:
-          predicate: ${retry.max_retries_predicate}
+          predicate: ${http.default_retry_predicate}
           max_retries: 3
           backoff:
             initial_delay: 10
