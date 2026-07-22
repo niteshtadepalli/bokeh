@@ -31,3 +31,6 @@ def get_finding_status(db_path: str, finding_id: str) -> Optional[str]:
 def is_finding_verified(db_path: str, finding_id: str) -> bool:
   """Check if the finding's status is 'VERIFIED' in the state SQLite database."""
   return get_finding_status(db_path, finding_id) == "VERIFIED"
+
+
+

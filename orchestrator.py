@@ -10,7 +10,10 @@ import logging
 import os
 import sys
 
+from codemender_agent.runners.aggregate import run_aggregate_pipeline
+from codemender_agent.runners.scan import run_scan_pipeline
 from codemender_agent.runners.sequential import run_sequential_pipeline
+from codemender_agent.runners.worker import run_worker_pipeline
 
 # Configure global root logger for all package submodules
 logging.basicConfig(
@@ -26,8 +29,14 @@ def main() -> None:
 
   if run_mode == "sequential":
     run_sequential_pipeline()
+  elif run_mode == "scan":
+    run_scan_pipeline()
+  elif run_mode == "worker":
+    run_worker_pipeline()
+  elif run_mode == "aggregate":
+    run_aggregate_pipeline()
   else:
-    # Default fallback to sequential pipeline
+    logging.warning("Unknown run mode '%s', falling back to sequential.", run_mode)
     run_sequential_pipeline()
 
 

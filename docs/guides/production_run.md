@@ -362,6 +362,99 @@ gcloud scheduler jobs create http codemender-nightly-trigger \
 
 --------------------------------------------------------------------------------
 
+## Step 10: Deploy Parallel Execution Workflow (GCP Cloud Workflows)
+
+For large repositories, running sequentially in a single Cloud Run Job may hit timeouts or resource limits. You can deploy the 3-stage parallelized pipeline using **Google Cloud Workflows** to orchestrate scanning, parallel worker execution, and aggregation.
+
+### 10.1: Deploy the Reusable Cloud Run Job
+First, deploy a single Cloud Run Job that will be used for all three stages. The workflow will override the `CODEMENDER_RUN_MODE` and other environment variables dynamically.
+
+```bash
+gcloud run jobs create codemender-runner \
+    --image=us-central1-docker.pkg.dev/${PROJECT_ID}/codemender-runner/orchestrator:latest \
+    --region=us-central1 \
+    --service-account=${SA_EMAIL} \
+    --execution-environment=gen2 \
+    --task-timeout=1h \
+    --memory=4Gi \
+    --cpu=2 \
+    --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
+```
+*(Note: We do not set default repository or run mode here; the workflow will inject them.)*
+
+### 10.2: Configure IAM Roles for Workflows
+Create a service account for Cloud Workflows (e.g. `codemender-workflows-sa`) and grant it permissions to manage Cloud Run Jobs and read from GCS:
+
+```bash
+export WORKFLOWS_SA_NAME="codemender-workflows-sa"
+export WORKFLOWS_SA_EMAIL="${WORKFLOWS_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# Create Service Account
+gcloud iam service-accounts create ${WORKFLOWS_SA_NAME} \
+    --display-name="CodeMender Workflows Service Account"
+
+# Grant permission to run Cloud Run Jobs with overrides
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+    --member="serviceAccount:${WORKFLOWS_SA_EMAIL}" \
+    --role="roles/run.developer"
+
+# Grant permission to act as the Cloud Run runner service account
+gcloud iam service-accounts add-iam-policy-binding ${SA_EMAIL} \
+    --member="serviceAccount:${WORKFLOWS_SA_EMAIL}" \
+    --role="roles/iam.serviceAccountUser"
+
+# Grant GCS read access (to read manifest.json)
+gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} \
+    --member="serviceAccount:${WORKFLOWS_SA_EMAIL}" \
+    --role="roles/storage.objectViewer"
+
+# Grant Logs Writer access
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+    --member="serviceAccount:${WORKFLOWS_SA_EMAIL}" \
+    --role="roles/logging.logWriter"
+```
+
+### 10.3: Deploy the Workflow
+Deploy the `gcp_parallel_workflow.yaml` template:
+
+```bash
+gcloud workflows deploy codemender-parallel-workflow \
+    --source=workflows/gcp_parallel_workflow.yaml \
+    --location=us-central1 \
+    --service-account=${WORKFLOWS_SA_EMAIL}
+```
+
+### 10.4: Execute the Workflow Manually
+Trigger the workflow with the repository configuration:
+
+```bash
+gcloud workflows run codemender-parallel-workflow \
+    --location=us-central1 \
+    --data='{
+      "job_name": "codemender-runner",
+      "gcs_bucket": "'"${BUCKET_NAME}"'",
+      "repo_url": "https://github.com/your-org/your-repo.git",
+      "build_command": "npm install && npm test"
+    }'
+```
+
+### 10.5: Automate Parallel Scans with Cloud Scheduler
+To run the parallel workflow nightly, point Cloud Scheduler to the Workflows execution endpoint:
+
+```bash
+gcloud scheduler jobs create http codemender-parallel-nightly \
+    --location=us-central1 \
+    --schedule="0 2 * * *" \
+    --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/us-central1/workflows/codemender-parallel-workflow/executions" \
+    --http-method=POST \
+    --message-body='{
+      "argument": "{\"job_name\":\"codemender-runner\",\"gcs_bucket\":\"'"${BUCKET_NAME}"'\",\"repo_url\":\"https://github.com/your-org/your-repo.git\",\"build_command\":\"npm install && npm test\"}"
+    }' \
+    --oauth-service-account-email="${WORKFLOWS_SA_EMAIL}"
+```
+
+--------------------------------------------------------------------------------
+
 ## Monitoring and Logs
 
 *   **View Run Logs**: Check stdout execution traces directly in Cloud Logging
@@ -432,3 +525,15 @@ re-create the infrastructure for every repository.
         --http-method=POST \
         --oauth-service-account-email="${SA_EMAIL}"
     ```
+
+--------------------------------------------------------------------------------
+
+## Future Work
+
+### GitHub Actions Orchestration (Non-GCP Runner Hosts)
+
+Orchestrating parallel execution inside GitHub Actions using self-hosted runners or GitHub-hosted runners is planned as future work.
+
+In this model, the GHA runner acts as the control plane (replacing GCP Cloud Workflows), spawning matrix jobs that use GCS Signed URLs from `manifest.json` to download resources, run fixes, and upload sharded DBs. This allows using CodeMender credential-free on worker nodes.
+
+The draft workflow configuration was previously created as `workflows/gha_parallel_workflow.yaml`. Support for this will be stabilized in a future release.

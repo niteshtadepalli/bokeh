@@ -436,7 +436,7 @@ structure, we will create or modify the following files:
 *   **Detailed Changes**:
     *   Document deploying Google Cloud Workflows
         (`gcp_parallel_workflow.yaml`).
-    *   Document GitHub Actions matrix workflow (`gha_parallel_workflow.yaml`).
+    *   (DEFERRED) Document GitHub Actions matrix workflow (`gha_parallel_workflow.yaml`).
     *   Detail required IAM roles (`roles/workflows.invoker`,
         `roles/run.developer`).
 
@@ -444,8 +444,8 @@ structure, we will create or modify the following files:
 
 *   **`gcp_parallel_workflow.yaml`**: Cloud Workflows definition managing Stage
     1 → Stage 2 (N parallel tasks) → Stage 3 on GCP.
-*   **`gha_parallel_workflow.yaml`**: GitHub Actions workflow template managing
-    parallel matrix builds with job artifacts.
+*   **`gha_parallel_workflow.yaml`** (DEFERRED): GitHub Actions workflow template managing
+    parallel matrix builds with job artifacts (moved to Future Work).
 
 ### 7. Intermediate File Schemas (New JSON Specs)
 

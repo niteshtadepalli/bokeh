@@ -1,0 +1,182 @@
+main:
+  params: [args]
+  steps:
+    - init_variables:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: ${default(map.get(args, "region"), "us-central1")}
+          - job_name: ${args.job_name}
+          - gcs_bucket: ${args.gcs_bucket}
+          - repo_url: ${args.repo_url}
+          - build_command: ${args.build_command}
+          - scan_target: ${default(map.get(args, "scan_target"), ".")}
+          - scan_id: ${"scan-" + uuid.generate()}
+
+    - run_stage1_scan:
+        try:
+          call: googleapis.run.v1.namespaces.jobs.run
+          args:
+            name: ${"namespaces/" + project_id + "/jobs/" + job_name}
+            location: ${region}
+            body:
+              overrides:
+                taskCount: 1
+                containerOverrides:
+                  - env:
+                      - name: CODEMENDER_RUN_MODE
+                        value: "scan"
+                      - name: CODEMENDER_SCAN_ID
+                        value: ${scan_id}
+                      - name: CODEMENDER_GCS_BUCKET
+                        value: ${gcs_bucket}
+                      - name: GITHUB_REPO_URL
+                        value: ${repo_url}
+                      - name: CODEMENDER_BUILD_COMMAND
+                        value: ${build_command}
+                      - name: CODEMENDER_SCAN_TARGET
+                        value: ${scan_target}
+          result: stage1_run
+        retry:
+          predicate: ${retry.max_retries_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 10
+            max_delay: 60
+            multiplier: 2
+
+    - wait_stage1:
+        call: wait_for_job_success
+        args:
+          execution_name: ${stage1_run.metadata.name}
+          region: ${region}
+
+    - read_manifest:
+        call: googleapis.storage.v1.objects.get
+        args:
+          bucket: ${gcs_bucket}
+          object: ${"scans/" + scan_id + "/manifest.json"}
+          alt: "media"
+        result: manifest_response
+
+    - parse_manifest:
+        assign:
+          - manifest: ${manifest_response}
+          - findings_count: ${int(manifest.findings_count)}
+          - target_sha: ${manifest.target_sha}
+
+    - check_findings:
+        switch:
+          - condition: ${findings_count == 0}
+            next: finish_workflow
+
+    - prepare_worker_vars:
+        assign:
+          - base_workspace_url: ${manifest.base_workspace_url}
+          - partition_urls_str: ${json.encode_to_string(manifest.partition_urls)}
+          - upload_urls_str: ${json.encode_to_string(manifest.upload_urls)}
+          - num_workers: ${len(manifest.partition_urls)}
+
+    - run_stage2_workers:
+        call: googleapis.run.v1.namespaces.jobs.run
+        args:
+          name: ${"namespaces/" + project_id + "/jobs/" + job_name}
+          location: ${region}
+          body:
+            overrides:
+              taskCount: ${num_workers}
+              containerOverrides:
+                - env:
+                    - name: CODEMENDER_RUN_MODE
+                      value: "worker"
+                    - name: CODEMENDER_SCAN_ID
+                      value: ${scan_id}
+                    - name: CODEMENDER_GCS_BUCKET
+                      value: ${gcs_bucket}
+                    - name: GITHUB_REPO_URL
+                      value: ${repo_url}
+                    - name: CODEMENDER_BUILD_COMMAND
+                      value: ${build_command}
+                    - name: CODEMENDER_TARGET_SHA
+                      value: ${target_sha}
+                    - name: CODEMENDER_BASE_WORKSPACE_URL
+                      value: ${base_workspace_url}
+                    - name: CODEMENDER_PARTITION_URLS
+                      value: ${partition_urls_str}
+                    - name: CODEMENDER_UPLOAD_URLS
+                      value: ${upload_urls_str}
+        result: stage2_run
+
+    - wait_stage2:
+        call: wait_for_job_completion
+        args:
+          execution_name: ${stage2_run.metadata.name}
+          region: ${region}
+        result: stage2_execution
+
+    - run_stage3_aggregate:
+        call: googleapis.run.v1.namespaces.jobs.run
+        args:
+          name: ${"namespaces/" + project_id + "/jobs/" + job_name}
+          location: ${region}
+          body:
+            overrides:
+              taskCount: 1
+              containerOverrides:
+                - env:
+                    - name: CODEMENDER_RUN_MODE
+                      value: "aggregate"
+                    - name: CODEMENDER_SCAN_ID
+                      value: ${scan_id}
+                    - name: CODEMENDER_GCS_BUCKET
+                      value: ${gcs_bucket}
+                    - name: GITHUB_REPO_URL
+                      value: ${repo_url}
+                    - name: CODEMENDER_BUILD_COMMAND
+                      value: ${build_command}
+                    - name: CODEMENDER_TOTAL_WORKERS
+                      value: ${string(num_workers)}
+        result: stage3_run
+
+    - wait_stage3:
+        call: wait_for_job_success
+        args:
+          execution_name: ${stage3_run.metadata.name}
+          region: ${region}
+
+    - finish_workflow:
+        return: "Workflow completed successfully."
+
+wait_for_job_completion:
+  params: [execution_name, region]
+  steps:
+    - get_execution:
+        call: googleapis.run.v1.namespaces.executions.get
+        args:
+          name: ${execution_name}
+          location: ${region}
+        result: execution
+    - check_status:
+        switch:
+          - condition: ${execution.status.completionTime != null}
+            return: ${execution}
+        next: wait_more
+    - wait_more:
+        call: sys.sleep
+        args:
+          seconds: 15
+        next: get_execution
+
+wait_for_job_success:
+  params: [execution_name, region]
+  steps:
+    - wait_done:
+        call: wait_for_job_completion
+        args:
+          execution_name: ${execution_name}
+          region: ${region}
+        result: execution
+    - check_success:
+        switch:
+          - condition: ${execution.status.failedCount > 0}
+            raise: ${"Job execution failed: " + execution_name}
+        return: ${execution}
