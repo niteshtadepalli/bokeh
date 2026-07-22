@@ -47,6 +47,7 @@ main:
     - wait_stage1:
         call: wait_for_job_success
         args:
+          project_id: ${project_id}
           execution_name: ${stage1_run.metadata.name}
           region: ${region}
 
@@ -109,6 +110,7 @@ main:
     - wait_stage2:
         call: wait_for_job_completion
         args:
+          project_id: ${project_id}
           execution_name: ${stage2_run.metadata.name}
           region: ${region}
         result: stage2_execution
@@ -140,6 +142,7 @@ main:
     - wait_stage3:
         call: wait_for_job_success
         args:
+          project_id: ${project_id}
           execution_name: ${stage3_run.metadata.name}
           region: ${region}
 
@@ -147,12 +150,12 @@ main:
         return: "Workflow completed successfully."
 
 wait_for_job_completion:
-  params: [execution_name, region]
+  params: [project_id, execution_name, region]
   steps:
     - get_execution:
         call: googleapis.run.v1.namespaces.executions.get
         args:
-          name: ${execution_name}
+          name: ${"namespaces/" + project_id + "/executions/" + execution_name}
           location: ${region}
         result: execution
     - check_status:
@@ -167,11 +170,12 @@ wait_for_job_completion:
         next: get_execution
 
 wait_for_job_success:
-  params: [execution_name, region]
+  params: [project_id, execution_name, region]
   steps:
     - wait_done:
         call: wait_for_job_completion
         args:
+          project_id: ${project_id}
           execution_name: ${execution_name}
           region: ${region}
         result: execution
@@ -179,4 +183,5 @@ wait_for_job_success:
         switch:
           - condition: ${execution.status.failedCount > 0}
             raise: '${"Job execution failed: " + execution_name}'
+    - return_result:
         return: ${execution}
