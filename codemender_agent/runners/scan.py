@@ -218,8 +218,16 @@ def _filter_findings(
 
     # Check if a remote branch already exists for this finding to avoid duplicates
     vuln_type = finding.get("VulnType") or "vulnerability"
-    file_path = finding.get("FilePath") or "unknown_file"
-    branch_name = generate_branch_name(vuln_type, file_path)
+    fingerprint = (
+        finding.get("Fingerprint")
+        or finding.get("fingerprint")
+        or finding.get("FindingID")
+        or ""
+    )
+
+    branch_name = generate_branch_name(vuln_type, fingerprint)
+
+
 
     if not force_overwrite and check_remote_branch_exists(
         clean_repo_url, token, branch_name, cwd=repo_dir
@@ -232,6 +240,7 @@ def _filter_findings(
       continue
 
     active_findings.append(finding)
+
 
   return active_findings
 

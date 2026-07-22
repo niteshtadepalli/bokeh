@@ -125,11 +125,12 @@ To build this Minimum Viable Product, we will create the following files in the
         successful fix (instead of waiting for the end of the entire loop), the
         orchestrator ensures partial progress is preserved if the job times out
         or fails midway.
-    *   **PR Spam Prevention:** Generating a stable branch name using a hash of
-        `VulnType` + `FilePath` (e.g.,
-        `codemender/fix-<vulntype>-<hash(filepath)[:8]>`) and checking if a
+    *   **PR Spam Prevention:** Generating a stable branch name using the stable
+        finding fingerprint (e.g.,
+        `codemender/fix-<vulntype>-<fingerprint[:8]>`) and checking if a
         branch or PR already exists on remote before running `cm fix` to ensure
         idempotency.
+
     *   Pushing the fixed branch directly to remote and creating the PR via the
         GitHub REST API immediately after each fix is generated using the
         scrubbed token.

@@ -1,8 +1,8 @@
 """Git URL and repository manipulation utilities for CodeMender Agent."""
 
 import base64
-import hashlib
 import logging
+
 import os
 import re
 from typing import Tuple
@@ -53,13 +53,15 @@ def parse_repo_owner_and_name(repo_url: str) -> Tuple[str, str]:
   raise ValueError(f"Could not parse owner and repo name from URL: {repo_url}")
 
 
-def generate_branch_name(vuln_type: str, file_path: str) -> str:
-  """Generates a stable, idempotent Git branch name based on VulnType and FilePath hash."""
+def generate_branch_name(vuln_type: str, fingerprint: str) -> str:
+  """Generates a stable, idempotent Git branch name based on VulnType and Fingerprint hash."""
   vuln_clean = re.sub(
       r"[^a-zA-Z0-9\-_]", "-", (vuln_type or "vuln").strip().lower()
   )
-  path_hash = hashlib.sha256((file_path or "").encode("utf-8")).hexdigest()[:8]
-  return f"codemender/fix-{vuln_clean}-{path_hash}"
+  suffix = fingerprint[:8]
+  return f"codemender/fix-{vuln_clean}-{suffix}"
+
+
 
 
 def setup_local_git_excludes(repo_dir: str) -> None:
