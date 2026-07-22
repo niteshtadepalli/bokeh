@@ -111,10 +111,9 @@ class TestAggregateRunner(unittest.TestCase):
 
     cursor.execute("SELECT finding_id, title, status, updated_at FROM findings ORDER BY finding_id")
     findings = cursor.fetchall()
-    self.assertEqual(len(findings), 3)
+    self.assertEqual(len(findings), 2)
     self.assertEqual(findings[0], ("fid-1", "Updated Title 1", "FIXED", "2026-07-21T12:00:00Z"))
     self.assertEqual(findings[1], ("fid-2", "Title 2", "DETECTED", "2026-07-20T10:00:00Z"))
-    self.assertEqual(findings[2], ("fid-3", "Title 3", "FIXED", "2026-07-21T12:00:00Z"))
 
     cursor.execute("SELECT session_id, status, updated_at FROM sessions")
     sessions = cursor.fetchall()

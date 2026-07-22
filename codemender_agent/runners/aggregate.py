@@ -54,8 +54,11 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
             finding_id, session_id, title, file_path, severity, confidence, analysis, snippet, vuln_type, vuln_id,
             verified, muted, mute_reason, created_at, fingerprint, status, source_stage, finding_json, updated_at,
             start_line, end_line, dismiss_reason, confidence_level
-        FROM worker.findings
-        WHERE true
+        FROM worker.findings AS w
+        WHERE EXISTS (
+            SELECT 1 FROM main.findings AS m
+            WHERE m.finding_id = w.finding_id
+        )
         ON CONFLICT(finding_id) DO UPDATE SET
             session_id = excluded.session_id,
             title = excluded.title,
@@ -101,7 +104,10 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
         INSERT INTO main.artifacts (session_id, filename, original_path, purpose, finding_id, created_at)
         SELECT session_id, filename, original_path, purpose, finding_id, created_at
         FROM worker.artifacts AS w
-        WHERE NOT EXISTS (
+        WHERE (w.finding_id IS NULL OR EXISTS (
+            SELECT 1 FROM main.findings AS m
+            WHERE m.finding_id = w.finding_id
+        )) AND NOT EXISTS (
             SELECT 1 FROM main.artifacts AS m
             WHERE m.session_id = w.session_id AND m.filename = w.filename
         );
@@ -213,7 +219,8 @@ def _generate_and_upload_report(
       )
     else:
       logger.critical(
-          "Failed to upload or generate signed URL for the consolidated GCS report."
+          "Failed to upload or generate signed URL for the consolidated GCS"
+          " report."
       )
       sys.exit(1)
   else:
