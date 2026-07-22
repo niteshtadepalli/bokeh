@@ -530,6 +530,52 @@ re-create the infrastructure for every repository.
         --oauth-service-account-email="${SA_EMAIL}"
     ```
 
+### Adding a New Repository (Parallel Workflow)
+
+When using the parallel Cloud Workflows pipeline (`codemender-parallel-workflow`), the process is simplified. Because the control plane (Workflows) dynamically accepts arguments, you **do not** need to deploy any new Cloud Run Jobs or Workflows.
+
+#### What you can SKIP:
+*   **Step 1 to 5 (Infra & IAM)**: Reuse all existing setup.
+*   **Step 6 (Docker Build)**: Reuse the generic `codemender-runner` image.
+*   **Step 7 (Cloud Run Deploy)**: Reuse the `codemender-runner` Job.
+
+#### What you MUST do:
+
+1.  **Execute the workflow for the new repository**:
+    Pass the new repository's parameters dynamically when executing the workflow:
+
+    ```bash
+    export PROJECT_ID=$(gcloud config get-value project)
+    export BUCKET_NAME="codemender-reports-${PROJECT_ID}"
+
+    gcloud workflows run codemender-parallel-workflow \
+        --location=us-central1 \
+        --data='{
+          "job_name": "codemender-runner",
+          "gcs_bucket": "'"${BUCKET_NAME}"'",
+          "repo_url": "https://github.com/your-org/new-repo.git",
+          "build_command": "npm install && npm test",
+          "scan_target": "."
+        }'
+    ```
+
+2.  **Schedule the parallel scan (Cloud Scheduler)**:
+    Create a new Cloud Scheduler trigger pointing to the Workflows engine with the serialized JSON payload:
+
+    ```bash
+    export SA_EMAIL="codemender-runner-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+
+    gcloud scheduler jobs create http codemender-parallel-[NEW-REPO-NAME]-trigger \
+        --location=us-central1 \
+        --schedule="0 3 * * *" \
+        --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/us-central1/workflows/codemender-parallel-workflow/executions" \
+        --http-method=POST \
+        --oauth-service-account-email="${SA_EMAIL}" \
+        --message-body='{
+          "argument": "{\"job_name\": \"codemender-runner\", \"gcs_bucket\": \"'"${BUCKET_NAME}"'\", \"repo_url\": \"https://github.com/your-org/[NEW-REPO].git\", \"build_command\": \"npm install && npm test\"}"
+        }'
+    ```
+
 --------------------------------------------------------------------------------
 
 ## Future Work

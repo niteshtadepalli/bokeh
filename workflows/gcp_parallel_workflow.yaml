@@ -12,6 +12,12 @@ main:
           - scan_target: ${default(map.get(args, "scan_target"), ".")}
           - scan_id: ${"scan-" + uuid.generate()}
 
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Starting parallel scan for repository: " + repo_url + " (Scan ID: " + scan_id + ")"}'
+          severity: INFO
+
     - run_stage1_scan:
         try:
           call: googleapis.run.v1.namespaces.jobs.run
