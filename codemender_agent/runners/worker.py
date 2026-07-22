@@ -352,7 +352,9 @@ def run_worker_pipeline() -> None:
   # If partition has no findings, upload unmodified base DB and exit
   if not finding_ids:
     logger.info("No findings in partition. Exiting.")
-    upload_to_url(state_db_path, upload_url)
+    if not upload_to_url(state_db_path, upload_url):
+      logger.critical("Failed to upload unmodified database.")
+      sys.exit(1)
     sys.exit(0)
 
   inject_codemender_config(repo_dir)

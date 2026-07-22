@@ -61,7 +61,7 @@ main:
         call: googleapis.storage.v1.objects.get
         args:
           bucket: ${gcs_bucket}
-          object: ${"scans/" + scan_id + "/manifest.json"}
+          object: ${text.url_encode("scans/" + scan_id + "/manifest.json")}
           alt: "media"
         result: manifest_response
 

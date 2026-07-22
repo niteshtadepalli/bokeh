@@ -287,9 +287,11 @@ def _save_and_upload_state(
   make_tarfile(tarball_path, codemender_home)
 
   # Upload tarball
-  upload_file_to_gcs(
+  if not upload_file_to_gcs(
       tarball_path, bucket_name, f"scans/{scan_id}/workspace_base.tar.gz"
-  )
+  ):
+    logger.critical("Failed to upload base workspace archive to GCS.")
+    sys.exit(1)
 
   # Generate Signed URL for the base workspace
   base_workspace_blob = f"scans/{scan_id}/workspace_base.tar.gz"
@@ -308,7 +310,9 @@ def _save_and_upload_state(
       json.dump(partition_data, f, indent=2)
 
     part_blob = f"scans/{scan_id}/partition_{i}.json"
-    upload_file_to_gcs(part_path, bucket_name, part_blob)
+    if not upload_file_to_gcs(part_path, bucket_name, part_blob):
+      logger.critical("Failed to upload partition file to GCS.")
+      sys.exit(1)
 
     # Generate Signed URL for workers to download their partition
     part_url = generate_signed_url(bucket_name, part_blob, method="GET")
@@ -335,9 +339,11 @@ def _save_and_upload_state(
   manifest_path = os.path.join(workspace_dir, "manifest.json")
   with open(manifest_path, "w") as f:
     json.dump(manifest, f, indent=2)
-  upload_file_to_gcs(
+  if not upload_file_to_gcs(
       manifest_path, bucket_name, f"scans/{scan_id}/manifest.json"
-  )
+  ):
+    logger.critical("Failed to upload manifest.json to GCS.")
+    sys.exit(1)
 
 
 def run_scan_pipeline() -> None:
@@ -383,9 +389,11 @@ def run_scan_pipeline() -> None:
     manifest_path = os.path.join(workspace_dir, "manifest.json")
     with open(manifest_path, "w") as f:
       json.dump(manifest, f, indent=2)
-    upload_file_to_gcs(
+    if not upload_file_to_gcs(
         manifest_path, bucket_name, f"scans/{scan_id}/manifest.json"
-    )
+    ):
+      logger.critical("Failed to upload manifest.json to GCS.")
+      sys.exit(1)
     sys.exit(0)
 
   # 5. Filter findings
@@ -405,9 +413,11 @@ def run_scan_pipeline() -> None:
     manifest_path = os.path.join(workspace_dir, "manifest.json")
     with open(manifest_path, "w") as f:
       json.dump(manifest, f, indent=2)
-    upload_file_to_gcs(
+    if not upload_file_to_gcs(
         manifest_path, bucket_name, f"scans/{scan_id}/manifest.json"
-    )
+    ):
+      logger.critical("Failed to upload manifest.json to GCS.")
+      sys.exit(1)
     sys.exit(0)
 
   # 6. Partition findings
