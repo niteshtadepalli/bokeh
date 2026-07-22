@@ -185,7 +185,8 @@ gcloud iam service-accounts create ${SA_NAME} \
 
 ## Step 6: Build and Push the Docker Container
 
-> [!NOTE] **CodeMender CLI Binary Security**: The releases bucket remains
+> [!NOTE]
+> **CodeMender CLI Binary Security**: The releases bucket remains
 > completely private. During deployment, Cloud Build uses its own authenticated
 > Service Account to securely download the `cm` binary from GCS into the build
 > environment before copying it into the container image.
@@ -207,7 +208,8 @@ gcloud iam service-accounts create ${SA_NAME} \
         --substitutions=_RELEASES_BUCKET="codemender-releases-${PROJECT_ID}" .
     ```
 
-> [!TIP] **Troubleshooting Permission Denied in Cloud Build**: If the default
+> [!TIP]
+> **Troubleshooting Permission Denied in Cloud Build**: If the default
 > Compute Engine service account (used by Cloud Build) lacks required access to
 > staging buckets or image registries:
 >
@@ -237,7 +239,8 @@ gcloud iam service-accounts create ${SA_NAME} \
 
 Deploy the container as a Cloud Run Job.
 
-> [!IMPORTANT] **Ephemeral Storage Requirements**: Cloud Run Gen 2 jobs
+> [!IMPORTANT]
+> **Ephemeral Storage Requirements**: Cloud Run Gen 2 jobs
 > automatically provision a default **`10GB` of ephemeral root disk space**,
 > which is sufficient for standard builds and cloning. If your target repository
 > has a massive dependency tree or build output that requires more than 10GB,
@@ -257,7 +260,39 @@ gcloud run jobs create codemender-scan \
     --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
 ```
 
-> [!TIP] **How to Scale Storage Beyond 10GB**: If you need more storage (e.g.
+### Scanning Monorepos or Large Codebases
+
+If your repository contains multiple sub-projects, microservices, or compiled production assets (e.g. frontends, blogs, desktop apps, and backends combined), scanning the entire root directory (`.`) may exceed the gRPC client transfer payload limits, leading to `StartSession RPC: Internal error encountered` crashes.
+
+To resolve this:
+
+1. **Restrict the Scan Target**: Pass the `CODEMENDER_SCAN_TARGET` environment variable. You can specify a single folder (e.g. `api`), or multiple folders separated by semicolons (e.g. `api;server/shared`). Semicolons are highly recommended for Cloud Run environment configuration flags to avoid standard comma separation conflicts in the `gcloud` CLI. The orchestrator will scan each target sequentially and aggregate the findings into a single report.
+2. **Configure Sandbox Boundaries**: Create a `.codemender.yaml` configuration file at the root of your target repository. Add `project_paths` pointing to `.` so the agent is allowed to explore and read imported files in sibling directories (like `server/` or `shared/`) during investigation across all targeted runs.
+
+#### Configuration Example:
+Add the following to the root of your source repository as `.codemender.yaml`:
+```yaml
+# Allow the CodeMender agent to read files anywhere in the repo
+project_paths:
+  - "."
+```
+
+Then configure the Cloud Run Job with `CODEMENDER_SCAN_TARGET` pointing to the targeted folders:
+```bash
+gcloud run jobs create codemender-scan \
+    --image=us-central1-docker.pkg.dev/${PROJECT_ID}/codemender-runner/orchestrator:latest \
+    --region=us-central1 \
+    --service-account=${SA_EMAIL} \
+    --execution-environment=gen2 \
+    --task-timeout=1h \
+    --memory=4Gi \
+    --cpu=2 \
+    --set-env-vars="GITHUB_REPO_URL=https://github.com/your-org/your-repo.git,CODEMENDER_SCAN_TARGET=api;server/shared,CODEMENDER_BUILD_COMMAND='npm install && npm test',CODEMENDER_REPORT_BUCKET=${BUCKET_NAME}" \
+    --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
+```
+
+> [!TIP]
+> **How to Scale Storage Beyond 10GB**: If you need more storage (e.g.
 > 20GB), define a volume of type `ephemeral-disk`, mount it to a directory, and
 > tell the orchestrator to use it by setting the `WORKSPACE_DIR` environment
 > variable:
@@ -281,16 +316,36 @@ trigger the job execution manually:
 gcloud run jobs execute codemender-scan --region=us-central1
 ```
 
-### Triggering with Overrides (e.g. Overwrite mode / Retrying):
+### Dynamic Execution Overrides (Temporary Settings)
 
-To run a forced scan (ignoring existing branch checks and force-pushing updates
-to existing branches):
+To trigger a single scan execution with temporary parameters (without modifying the permanent job configuration), pass `--update-env-vars` during the `execute` command.
 
+For example, to run a forced scan (ignoring existing branch checks and force-pushing updates):
 ```bash
 gcloud run jobs execute codemender-scan \
     --region=us-central1 \
     --update-env-vars="CODEMENDER_FORCE_OVERWRITE=true"
 ```
+
+You can also temporarily point to a different repository or target for a one-off run:
+```bash
+gcloud run jobs execute codemender-scan \
+    --region=us-central1 \
+    --update-env-vars="GITHUB_REPO_URL=https://github.com/your-org/your-repo.git,CODEMENDER_SCAN_TARGET=api"
+```
+
+### Reusing the Job for Different Repositories (Permanent Settings)
+
+Because the runner container dynamically clones whatever repository URL is passed to it, you can reuse the same deployed Cloud Run Job for different repositories by permanently updating its default environment variables:
+
+```bash
+# Update the target repository and build command for the job
+gcloud run jobs update codemender-scan \
+    --region=us-central1 \
+    --update-env-vars="GITHUB_REPO_URL=https://github.com/your-org/another-repo.git,CODEMENDER_SCAN_TARGET=src,CODEMENDER_BUILD_COMMAND='npm install && npm run build'"
+```
+
+*Note: Ensure the required language runtime for the new repository is enabled in the runner image (see the [Dockerfile](file:///google/src/cloud/xinweizhang/fde-playground/google3/experimental/users/xinweizhang/git/codemender-agent/Dockerfile) toolchains section).*
 
 --------------------------------------------------------------------------------
 
@@ -307,6 +362,100 @@ gcloud scheduler jobs create http codemender-nightly-trigger \
     --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/codemender-scan:run" \
     --http-method=POST \
     --oauth-service-account-email="${SA_EMAIL}"
+```
+
+--------------------------------------------------------------------------------
+
+## Step 10: Deploy Parallel Execution Workflow (GCP Cloud Workflows)
+
+For large repositories, running sequentially in a single Cloud Run Job may hit timeouts or resource limits. You can deploy the 3-stage parallelized pipeline using **Google Cloud Workflows** to orchestrate scanning, parallel worker execution, and aggregation.
+
+### 10.1: Deploy the Reusable Cloud Run Job
+First, deploy a single Cloud Run Job that will be used for all three stages. The workflow will override the `CODEMENDER_RUN_MODE` and other environment variables dynamically.
+
+```bash
+gcloud run jobs create codemender-runner \
+    --image=us-central1-docker.pkg.dev/${PROJECT_ID}/codemender-runner/orchestrator:latest \
+    --region=us-central1 \
+    --service-account=${SA_EMAIL} \
+    --execution-environment=gen2 \
+    --task-timeout=1h \
+    --memory=4Gi \
+    --cpu=2 \
+    --set-secrets="GITHUB_APP_TOKEN=GITHUB_APP_TOKEN:latest"
+```
+*(Note: We do not set default repository or run mode here; the workflow will inject them.)*
+
+### 10.2: Configure IAM Roles for Workflows
+Create a service account for Cloud Workflows (e.g. `codemender-workflows-sa`) and grant it permissions to manage Cloud Run Jobs and read from GCS:
+
+```bash
+export WORKFLOWS_SA_NAME="codemender-workflows-sa"
+export WORKFLOWS_SA_EMAIL="${WORKFLOWS_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# Create Service Account
+gcloud iam service-accounts create ${WORKFLOWS_SA_NAME} \
+    --display-name="CodeMender Workflows Service Account"
+
+# Grant permission to run Cloud Run Jobs with overrides
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+    --member="serviceAccount:${WORKFLOWS_SA_EMAIL}" \
+    --role="roles/run.developer"
+
+# Grant permission to act as the Cloud Run runner service account
+gcloud iam service-accounts add-iam-policy-binding ${SA_EMAIL} \
+    --member="serviceAccount:${WORKFLOWS_SA_EMAIL}" \
+    --role="roles/iam.serviceAccountUser"
+
+# Grant GCS read access (to read manifest.json)
+gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} \
+    --member="serviceAccount:${WORKFLOWS_SA_EMAIL}" \
+    --role="roles/storage.objectViewer"
+
+# Grant Logs Writer access
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+    --member="serviceAccount:${WORKFLOWS_SA_EMAIL}" \
+    --role="roles/logging.logWriter"
+```
+
+### 10.3: Deploy the Workflow
+Deploy the `gcp_parallel_workflow.yaml` template:
+
+```bash
+gcloud workflows deploy codemender-parallel-workflow \
+    --source=workflows/gcp_parallel_workflow.yaml \
+    --location=us-central1 \
+    --service-account=${WORKFLOWS_SA_EMAIL} \
+    --call-log-level=log-errors-only
+```
+
+### 10.4: Execute the Workflow Manually
+Trigger the workflow with the repository configuration:
+
+```bash
+gcloud workflows run codemender-parallel-workflow \
+    --location=us-central1 \
+    --data='{
+      "job_name": "codemender-runner",
+      "gcs_bucket": "'"${BUCKET_NAME}"'",
+      "repo_url": "https://github.com/your-org/your-repo.git",
+      "build_command": "npm install && npm test"
+    }'
+```
+
+### 10.5: Automate Parallel Scans with Cloud Scheduler
+To run the parallel workflow nightly, point Cloud Scheduler to the Workflows execution endpoint:
+
+```bash
+gcloud scheduler jobs create http codemender-parallel-nightly \
+    --location=us-central1 \
+    --schedule="0 2 * * *" \
+    --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/us-central1/workflows/codemender-parallel-workflow/executions" \
+    --http-method=POST \
+    --message-body='{
+      "argument": "{\"job_name\":\"codemender-runner\",\"gcs_bucket\":\"'"${BUCKET_NAME}"'\",\"repo_url\":\"https://github.com/your-org/your-repo.git\",\"build_command\":\"npm install && npm test\"}"
+    }' \
+    --oauth-service-account-email="${WORKFLOWS_SA_EMAIL}"
 ```
 
 --------------------------------------------------------------------------------
@@ -381,3 +530,61 @@ re-create the infrastructure for every repository.
         --http-method=POST \
         --oauth-service-account-email="${SA_EMAIL}"
     ```
+
+### Adding a New Repository (Parallel Workflow)
+
+When using the parallel Cloud Workflows pipeline (`codemender-parallel-workflow`), the process is simplified. Because the control plane (Workflows) dynamically accepts arguments, you **do not** need to deploy any new Cloud Run Jobs or Workflows.
+
+#### What you can SKIP:
+*   **Step 1 to 5 (Infra & IAM)**: Reuse all existing setup.
+*   **Step 6 (Docker Build)**: Reuse the generic `codemender-runner` image.
+*   **Step 7 (Cloud Run Deploy)**: Reuse the `codemender-runner` Job.
+
+#### What you MUST do:
+
+1.  **Execute the workflow for the new repository**:
+    Pass the new repository's parameters dynamically when executing the workflow:
+
+    ```bash
+    export PROJECT_ID=$(gcloud config get-value project)
+    export BUCKET_NAME="codemender-reports-${PROJECT_ID}"
+
+    gcloud workflows run codemender-parallel-workflow \
+        --location=us-central1 \
+        --data='{
+          "job_name": "codemender-runner",
+          "gcs_bucket": "'"${BUCKET_NAME}"'",
+          "repo_url": "https://github.com/your-org/new-repo.git",
+          "build_command": "npm install && npm test",
+          "scan_target": "."
+        }'
+    ```
+
+2.  **Schedule the parallel scan (Cloud Scheduler)**:
+    Create a new Cloud Scheduler trigger pointing to the Workflows engine with the serialized JSON payload:
+
+    ```bash
+    export SA_EMAIL="codemender-runner-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+
+    gcloud scheduler jobs create http codemender-parallel-[NEW-REPO-NAME]-trigger \
+        --location=us-central1 \
+        --schedule="0 3 * * *" \
+        --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/us-central1/workflows/codemender-parallel-workflow/executions" \
+        --http-method=POST \
+        --oauth-service-account-email="${SA_EMAIL}" \
+        --message-body='{
+          "argument": "{\"job_name\": \"codemender-runner\", \"gcs_bucket\": \"'"${BUCKET_NAME}"'\", \"repo_url\": \"https://github.com/your-org/[NEW-REPO].git\", \"build_command\": \"npm install && npm test\"}"
+        }'
+    ```
+
+--------------------------------------------------------------------------------
+
+## Future Work
+
+### GitHub Actions Orchestration (Non-GCP Runner Hosts)
+
+Orchestrating parallel execution inside GitHub Actions using self-hosted runners or GitHub-hosted runners is planned as future work.
+
+In this model, the GHA runner acts as the control plane (replacing GCP Cloud Workflows), spawning matrix jobs that use GCS Signed URLs from `manifest.json` to download resources, run fixes, and upload sharded DBs. This allows using CodeMender credential-free on worker nodes.
+
+The draft workflow configuration was previously created as `workflows/gha_parallel_workflow.yaml`. Support for this will be stabilized in a future release.

@@ -1,0 +1,216 @@
+main:
+  params: [args]
+  steps:
+    - init_variables:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: ${default(map.get(args, "region"), "us-central1")}
+          - job_name: ${args.job_name}
+          - gcs_bucket: ${args.gcs_bucket}
+          - repo_url: ${args.repo_url}
+          - build_command: ${args.build_command}
+          - scan_target: ${default(map.get(args, "scan_target"), ".")}
+          - max_tasks: ${int(default(map.get(args, "max_tasks"), 20))}
+          - timeout_seconds: ${int(default(map.get(args, "timeout_seconds"), 86400))}
+          - scan_id: ${"scan-" + sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Starting parallel scan for repository: " + repo_url + " (Scan ID: " + scan_id + ")"}'
+          severity: INFO
+
+    - run_stage1_scan:
+        try:
+          call: http.post
+          args:
+            url: ${"https://" + region + "-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/" + project_id + "/jobs/" + job_name + ":run"}
+            auth:
+              type: OAuth2
+            body:
+              overrides:
+                taskCount: 1
+                timeoutSeconds: ${timeout_seconds}
+                containerOverrides:
+                  - env:
+                      - name: CODEMENDER_RUN_MODE
+                        value: "scan"
+                      - name: CODEMENDER_SCAN_ID
+                        value: ${scan_id}
+                      - name: CODEMENDER_GCS_BUCKET
+                        value: ${gcs_bucket}
+                      - name: GITHUB_REPO_URL
+                        value: ${repo_url}
+                      - name: CODEMENDER_BUILD_COMMAND
+                        value: ${build_command}
+                      - name: CODEMENDER_SCAN_TARGET
+                        value: ${scan_target}
+                      - name: CODEMENDER_MAX_TASKS
+                        value: ${string(max_tasks)}
+          result: stage1_response
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 10
+            max_delay: 60
+            multiplier: 2
+
+    - wait_stage1:
+        call: wait_for_job_success
+        args:
+          project_id: ${project_id}
+          execution_name: ${stage1_response.body.metadata.name}
+          region: ${region}
+          timeout_seconds: ${timeout_seconds}
+
+    - read_manifest:
+        call: googleapis.storage.v1.objects.get
+        args:
+          bucket: ${gcs_bucket}
+          object: ${text.url_encode("scans/" + scan_id + "/manifest.json")}
+          alt: "media"
+        result: manifest_response
+
+    - parse_manifest:
+        assign:
+          - manifest: ${manifest_response}
+          - findings_count: ${int(manifest.findings_count)}
+          - target_sha: ${manifest.target_sha}
+
+    - check_findings:
+        switch:
+          - condition: ${findings_count == 0}
+            next: finish_workflow
+
+    - prepare_worker_vars:
+        assign:
+          - base_workspace_url: ${manifest.base_workspace_url}
+          - partition_urls_str: ${json.encode_to_string(manifest.partition_urls)}
+          - upload_urls_str: ${json.encode_to_string(manifest.upload_urls)}
+          - num_workers: ${len(manifest.partition_urls)}
+
+    - run_stage2_workers:
+        call: http.post
+        args:
+          url: ${"https://" + region + "-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/" + project_id + "/jobs/" + job_name + ":run"}
+          auth:
+            type: OAuth2
+          body:
+            overrides:
+              taskCount: ${num_workers}
+              timeoutSeconds: ${timeout_seconds}
+              containerOverrides:
+                - env:
+                    - name: CODEMENDER_RUN_MODE
+                      value: "worker"
+                    - name: CODEMENDER_SCAN_ID
+                      value: ${scan_id}
+                    - name: CODEMENDER_GCS_BUCKET
+                      value: ${gcs_bucket}
+                    - name: GITHUB_REPO_URL
+                      value: ${repo_url}
+                    - name: CODEMENDER_BUILD_COMMAND
+                      value: ${build_command}
+                    - name: CODEMENDER_TARGET_SHA
+                      value: ${target_sha}
+                    - name: CODEMENDER_BASE_WORKSPACE_URL
+                      value: ${base_workspace_url}
+                    - name: CODEMENDER_PARTITION_URLS
+                      value: ${partition_urls_str}
+                    - name: CODEMENDER_UPLOAD_URLS
+                      value: ${upload_urls_str}
+        result: stage2_response
+
+    - wait_stage2:
+        call: wait_for_job_completion
+        args:
+          project_id: ${project_id}
+          execution_name: ${stage2_response.body.metadata.name}
+          region: ${region}
+          timeout_seconds: ${timeout_seconds}
+        result: stage2_execution
+
+    - run_stage3_aggregate:
+        call: http.post
+        args:
+          url: ${"https://" + region + "-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/" + project_id + "/jobs/" + job_name + ":run"}
+          auth:
+            type: OAuth2
+          body:
+            overrides:
+              taskCount: 1
+              timeoutSeconds: ${timeout_seconds}
+              containerOverrides:
+                - env:
+                    - name: CODEMENDER_RUN_MODE
+                      value: "aggregate"
+                    - name: CODEMENDER_SCAN_ID
+                      value: ${scan_id}
+                    - name: CODEMENDER_GCS_BUCKET
+                      value: ${gcs_bucket}
+                    - name: GITHUB_REPO_URL
+                      value: ${repo_url}
+                    - name: CODEMENDER_BUILD_COMMAND
+                      value: ${build_command}
+                    - name: CODEMENDER_TOTAL_WORKERS
+                      value: ${string(num_workers)}
+        result: stage3_response
+
+    - wait_stage3:
+        call: wait_for_job_success
+        args:
+          project_id: ${project_id}
+          execution_name: ${stage3_response.body.metadata.name}
+          region: ${region}
+          timeout_seconds: ${timeout_seconds}
+
+    - finish_workflow:
+        return: "Workflow completed successfully."
+
+wait_for_job_completion:
+  params: [project_id, execution_name, region, timeout_seconds]
+  steps:
+    - init_loop:
+        assign:
+          - elapsed: 0
+          - sleep_interval: 60
+    - get_execution:
+        call: googleapis.run.v1.namespaces.executions.get
+        args:
+          name: ${"namespaces/" + project_id + "/executions/" + execution_name}
+          location: ${region}
+        result: execution
+    - check_status:
+        switch:
+          - condition: ${map.get(execution, ["status", "completionTime"]) != null}
+            return: ${execution}
+          - condition: ${elapsed >= timeout_seconds}
+            raise: '${"Job execution " + execution_name + " timed out after " + string(timeout_seconds) + " seconds."}'
+        next: wait_more
+    - wait_more:
+        call: sys.sleep
+        args:
+          seconds: ${sleep_interval}
+    - increment_timer:
+        assign:
+          - elapsed: ${elapsed + sleep_interval}
+        next: get_execution
+
+wait_for_job_success:
+  params: [project_id, execution_name, region, timeout_seconds]
+  steps:
+    - wait_done:
+        call: wait_for_job_completion
+        args:
+          project_id: ${project_id}
+          execution_name: ${execution_name}
+          region: ${region}
+          timeout_seconds: ${timeout_seconds}
+        result: execution
+    - check_success:
+        switch:
+          - condition: ${default(map.get(execution, ["status", "failedCount"]), 0) > 0}
+            raise: '${"Job execution failed: " + execution_name}'
+    - return_result:
+        return: ${execution}

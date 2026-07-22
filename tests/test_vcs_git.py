@@ -5,7 +5,15 @@ import os
 import tempfile
 import unittest
 
-from codemender_agent.vcs.git import enforce_https_url, generate_branch_name, get_git_auth_header, parse_repo_owner_and_name, sanitize_git_url, setup_local_git_excludes
+from codemender_agent.vcs.git import (
+    enforce_https_url,
+    generate_branch_name,
+    get_git_auth_header,
+    parse_repo_owner_and_name,
+    sanitize_git_url,
+    setup_local_git_excludes,
+)
+
 
 
 class TestVcsGit(unittest.TestCase):
@@ -70,9 +78,10 @@ class TestVcsGit(unittest.TestCase):
 
   def test_generate_branch_name(self):
     """Verify creation of idempotent branch names."""
-    branch = generate_branch_name("SQL Injection", "src/db.py")
-    self.assertTrue(branch.startswith("codemender/fix-sql-injection-"))
-    self.assertEqual(len(branch), len("codemender/fix-sql-injection-") + 8)
+    branch = generate_branch_name("SQL Injection", "abcdef1234567890")
+    self.assertEqual(branch, "codemender/fix-sql-injection-abcdef12")
+
+
 
   def test_setup_local_git_excludes(self):
     """Verify local git excludes are correctly appended without duplicates."""

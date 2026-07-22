@@ -72,10 +72,11 @@ graph TD
     of the scan (`git clone --depth 1`). Fixed branches are pushed directly to
     remote and PRs opened immediately, delegating merge conflict resolution to
     GitHub's PR mergeability checks.
--   **PR Spam Prevention**: Branch names are deterministically derived using a
-    hash of `VulnType` + `FilePath` (e.g., `codemender/fix-sqli-a1b2c3d4`). If a
+-   **PR Spam Prevention**: Branch names are deterministically derived using the
+    stable finding fingerprint (e.g., `codemender/fix-sqli-a1b2c3d4`). If a
     branch already exists on origin, the orchestrator skips duplicate `cm fix`
     operations.
+
 -   **Workspace Reset**: Uses forced branch checkout (`git checkout -f`) when
     switching branches between findings.
 -   **GCS Summary Reports**: At the end of the orchestrator run, it

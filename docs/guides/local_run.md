@@ -149,6 +149,11 @@ export CODEMENDER_FORCE_OVERWRITE="false"
 
 # (Optional) GCS bucket to upload and sign the final HTML summary report
 export CODEMENDER_REPORT_BUCKET="my-gcs-reports-bucket"
+
+# (Optional) Targeted subdirectory path(s) to restrict the initial scan scope.
+# Multiple directories can be specified as a semicolon-separated or comma-separated list (e.g. "api;server/shared").
+# Defaults to "." (the entire repository) if not specified.
+export CODEMENDER_SCAN_TARGET="api;server/shared"
 ```
 
 > [!NOTE]
