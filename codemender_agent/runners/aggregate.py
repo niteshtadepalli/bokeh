@@ -113,7 +113,38 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
         );
     """)
 
+    # 4. Patches Merge:
+    # We copy patches from worker to main. On conflict (patch_id already exists),
+    # we update the fields. We filter to ensure the patch refers to a finding
+    # that exists in the main findings table (preventing ghost patches).
+    cursor.execute("""
+        INSERT INTO main.patches (
+            patch_id, finding_id, session_id, diff, reasoning, status, backup_path,
+            target_file, edited_files, validation_result, created_at
+        )
+        SELECT 
+            patch_id, finding_id, session_id, diff, reasoning, status, backup_path,
+            target_file, edited_files, validation_result, created_at
+        FROM worker.patches AS w
+        WHERE EXISTS (
+            SELECT 1 FROM main.findings AS m
+            WHERE m.finding_id = w.finding_id
+        )
+        ON CONFLICT(patch_id) DO UPDATE SET
+            finding_id = excluded.finding_id,
+            session_id = excluded.session_id,
+            diff = excluded.diff,
+            reasoning = excluded.reasoning,
+            status = excluded.status,
+            backup_path = excluded.backup_path,
+            target_file = excluded.target_file,
+            edited_files = excluded.edited_files,
+            validation_result = excluded.validation_result,
+            created_at = excluded.created_at;
+    """)
+
     conn.commit()
+
     logger.info("Merged %s successfully.", worker_db_path)
   except sqlite3.Error as e:  # pylint: disable=broad-exception-caught
     logger.error("Failed to merge database %s: %s", worker_db_path, e)

@@ -33,7 +33,14 @@ class TestAggregateRunner(unittest.TestCase):
     self.env_patcher.stop()
     self.temp_dir.cleanup()
 
-  def create_test_db(self, path, findings_data, sessions_data=None, artifacts_data=None):
+  def create_test_db(
+      self,
+      path,
+      findings_data,
+      sessions_data=None,
+      artifacts_data=None,
+      patches_data=None,
+  ):
     conn = sqlite3.connect(path)
     cursor = conn.cursor()
 
@@ -57,26 +64,66 @@ class TestAggregateRunner(unittest.TestCase):
             finding_id TEXT, created_at TEXT
         )
     """)
+    cursor.execute("""
+        CREATE TABLE patches (
+            patch_id TEXT PRIMARY KEY, finding_id TEXT, session_id TEXT, diff TEXT, reasoning TEXT,
+            status TEXT DEFAULT 'pending', backup_path TEXT, target_file TEXT DEFAULT '',
+            edited_files TEXT DEFAULT '[]', validation_result TEXT DEFAULT '', created_at TEXT
+        )
+    """)
 
     for f in findings_data:
-      cursor.execute("""
+      cursor.execute(
+          """
           INSERT INTO findings (finding_id, title, status, updated_at)
           VALUES (?, ?, ?, ?)
-      """, (f["finding_id"], f["title"], f["status"], f["updated_at"]))
+      """,
+          (f["finding_id"], f["title"], f["status"], f["updated_at"]),
+      )
 
     if sessions_data:
       for s in sessions_data:
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO sessions (session_id, status, updated_at)
             VALUES (?, ?, ?)
-        """, (s["session_id"], s["status"], s["updated_at"]))
+        """,
+            (s["session_id"], s["status"], s["updated_at"]),
+        )
 
     if artifacts_data:
       for a in artifacts_data:
-        cursor.execute("""
-            INSERT INTO artifacts (session_id, filename)
-            VALUES (?, ?)
-        """, (a["session_id"], a["filename"]))
+        cursor.execute(
+            """
+            INSERT INTO artifacts (session_id, filename, finding_id)
+            VALUES (?, ?, ?)
+        """,
+            (a["session_id"], a["filename"], a.get("finding_id")),
+        )
+
+    if patches_data:
+      for p in patches_data:
+        cursor.execute(
+            """
+            INSERT INTO patches (
+                patch_id, finding_id, session_id, diff, status, backup_path,
+                target_file, edited_files, validation_result, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                p["patch_id"],
+                p["finding_id"],
+                p["session_id"],
+                p["diff"],
+                p.get("status", "applied"),
+                p.get("backup_path", ""),
+                p.get("target_file", ""),
+                p.get("edited_files", "[]"),
+                p.get("validation_result", ""),
+                p.get("created_at", ""),
+            ),
+        )
 
     conn.commit()
     conn.close()
@@ -85,46 +132,153 @@ class TestAggregateRunner(unittest.TestCase):
     base_db = os.path.join(self.workspace_dir, "base_state.db")
     worker_db = os.path.join(self.workspace_dir, "worker_state.db")
 
-    self.create_test_db(base_db, [
-        {"finding_id": "fid-1", "title": "Old Title 1", "status": "DETECTED", "updated_at": "2026-07-20T10:00:00Z"},
-        {"finding_id": "fid-2", "title": "Title 2", "status": "DETECTED", "updated_at": "2026-07-20T10:00:00Z"}
-    ], [
-        {"session_id": "sess-1", "status": "RUNNING", "updated_at": "2026-07-20T10:00:00Z"}
-    ], [
-        {"session_id": "sess-1", "filename": "art-1"}
-    ])
+    self.create_test_db(
+        base_db,
+        [
+            {
+                "finding_id": "fid-1",
+                "title": "Old Title 1",
+                "status": "DETECTED",
+                "updated_at": "2026-07-20T10:00:00Z",
+            },
+            {
+                "finding_id": "fid-2",
+                "title": "Title 2",
+                "status": "DETECTED",
+                "updated_at": "2026-07-20T10:00:00Z",
+            },
+        ],
+        [{
+            "session_id": "sess-1",
+            "status": "RUNNING",
+            "updated_at": "2026-07-20T10:00:00Z",
+        }],
+        [{"session_id": "sess-1", "filename": "art-1", "finding_id": "fid-1"}],
+        [{
+            "patch_id": "pid-1",
+            "finding_id": "fid-1",
+            "session_id": "sess-1",
+            "diff": "old-diff",
+            "target_file": "old_file.py",
+        }],
+    )
 
-    self.create_test_db(worker_db, [
-        {"finding_id": "fid-1", "title": "Updated Title 1", "status": "FIXED", "updated_at": "2026-07-21T12:00:00Z"},
-        {"finding_id": "fid-3", "title": "Title 3", "status": "FIXED", "updated_at": "2026-07-21T12:00:00Z"}
-    ], [
-        {"session_id": "sess-1", "status": "COMPLETED", "updated_at": "2026-07-21T12:00:00Z"}
-    ], [
-        {"session_id": "sess-1", "filename": "art-1"},
-        {"session_id": "sess-1", "filename": "art-2"}
-    ])
+    self.create_test_db(
+        worker_db,
+        [
+            {
+                "finding_id": "fid-1",
+                "title": "Updated Title 1",
+                "status": "FIXED",
+                "updated_at": "2026-07-21T12:00:00Z",
+            },
+            {
+                "finding_id": "fid-3",
+                "title": "Title 3",
+                "status": "FIXED",
+                "updated_at": "2026-07-21T12:00:00Z",
+            },
+        ],
+        [{
+            "session_id": "sess-1",
+            "status": "COMPLETED",
+            "updated_at": "2026-07-21T12:00:00Z",
+        }],
+        [
+            {
+                "session_id": "sess-1",
+                "filename": "art-1",
+                "finding_id": "fid-1",
+            },
+            {
+                "session_id": "sess-1",
+                "filename": "art-2",
+                "finding_id": "fid-2",
+            },
+            {
+                "session_id": "sess-1",
+                "filename": "art-3",
+                "finding_id": "fid-3",
+            },
+        ],
+        [
+            {
+                "patch_id": "pid-1",
+                "finding_id": "fid-1",
+                "session_id": "sess-1",
+                "diff": "new-diff",
+                "target_file": "file1.py",
+                "edited_files": '["file1.py"]',
+                "validation_result": "passed",
+            },
+            {
+                "patch_id": "pid-2",
+                "finding_id": "fid-2",
+                "session_id": "sess-1",
+                "diff": "diff-2",
+                "target_file": "file2.py",
+                "edited_files": '["file2.py"]',
+                "validation_result": "passed",
+            },
+            {
+                "patch_id": "pid-3",
+                "finding_id": "fid-3",
+                "session_id": "sess-1",
+                "diff": "ghost-diff",
+                "target_file": "ghost.py",
+            },
+        ],
+    )
 
     merge_db(base_db, worker_db)
 
     conn = sqlite3.connect(base_db)
     cursor = conn.cursor()
 
-    cursor.execute("SELECT finding_id, title, status, updated_at FROM findings ORDER BY finding_id")
+    cursor.execute(
+        "SELECT finding_id, title, status, updated_at FROM findings ORDER BY"
+        " finding_id"
+    )
     findings = cursor.fetchall()
     self.assertEqual(len(findings), 2)
-    self.assertEqual(findings[0], ("fid-1", "Updated Title 1", "FIXED", "2026-07-21T12:00:00Z"))
-    self.assertEqual(findings[1], ("fid-2", "Title 2", "DETECTED", "2026-07-20T10:00:00Z"))
+    self.assertEqual(
+        findings[0],
+        ("fid-1", "Updated Title 1", "FIXED", "2026-07-21T12:00:00Z"),
+    )
+    self.assertEqual(
+        findings[1], ("fid-2", "Title 2", "DETECTED", "2026-07-20T10:00:00Z")
+    )
 
     cursor.execute("SELECT session_id, status, updated_at FROM sessions")
     sessions = cursor.fetchall()
     self.assertEqual(len(sessions), 1)
-    self.assertEqual(sessions[0], ("sess-1", "COMPLETED", "2026-07-21T12:00:00Z"))
+    self.assertEqual(
+        sessions[0], ("sess-1", "COMPLETED", "2026-07-21T12:00:00Z")
+    )
 
-    cursor.execute("SELECT session_id, filename FROM artifacts ORDER BY filename")
+    cursor.execute(
+        "SELECT session_id, filename FROM artifacts ORDER BY filename"
+    )
     artifacts = cursor.fetchall()
     self.assertEqual(len(artifacts), 2)
     self.assertEqual(artifacts[0], ("sess-1", "art-1"))
     self.assertEqual(artifacts[1], ("sess-1", "art-2"))
+
+    # Assert patches are merged and ghost patch (pid-3) is excluded
+    cursor.execute(
+        "SELECT patch_id, finding_id, diff, target_file, edited_files,"
+        " validation_result FROM patches ORDER BY patch_id"
+    )
+    patches = cursor.fetchall()
+    self.assertEqual(len(patches), 2)
+    self.assertEqual(
+        patches[0],
+        ("pid-1", "fid-1", "new-diff", "file1.py", '["file1.py"]', "passed"),
+    )
+    self.assertEqual(
+        patches[1],
+        ("pid-2", "fid-2", "diff-2", "file2.py", '["file2.py"]', "passed"),
+    )
 
     conn.close()
 
@@ -148,7 +302,7 @@ class TestAggregateRunner(unittest.TestCase):
     mock_which.return_value = "/bin/cm"
     mock_list_gcs_blobs.return_value = [
         "scans/test-scan-123/worker_0_state.db",
-        "scans/test-scan-123/worker_1_state.db"
+        "scans/test-scan-123/worker_1_state.db",
     ]
     mock_upload_and_sign_report.return_value = "https://report-url"
 
@@ -171,24 +325,24 @@ class TestAggregateRunner(unittest.TestCase):
     mock_download_gcs.assert_any_call(
         os.path.join(self.workspace_dir, "manifest.json"),
         "test-bucket",
-        "scans/test-scan-123/manifest.json"
+        "scans/test-scan-123/manifest.json",
     )
 
     mock_download_gcs.assert_any_call(
         os.path.join(self.workspace_dir, "workspace_base.tar.gz"),
         "test-bucket",
-        "scans/test-scan-123/workspace_base.tar.gz"
+        "scans/test-scan-123/workspace_base.tar.gz",
     )
 
     mock_download_gcs.assert_any_call(
         os.path.join(self.workspace_dir, "worker_dbs", "worker_0_state.db"),
         "test-bucket",
-        "scans/test-scan-123/worker_0_state.db"
+        "scans/test-scan-123/worker_0_state.db",
     )
     mock_download_gcs.assert_any_call(
         os.path.join(self.workspace_dir, "worker_dbs", "worker_1_state.db"),
         "test-bucket",
-        "scans/test-scan-123/worker_1_state.db"
+        "scans/test-scan-123/worker_1_state.db",
     )
 
     self.assertEqual(mock_merge_db.call_count, 2)
