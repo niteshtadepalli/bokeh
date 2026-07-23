@@ -5,6 +5,15 @@ within an engineering team's own infrastructure (e.g., as a Google Cloud Run
 Job). It automates local vulnerability scanning, validation, automated patching
 via the CodeMender CLI (`cm`), and Pull Request generation on GitHub.
 
+> [!IMPORTANT] **CodeMender Compatibility Warning**: This orchestrator was built
+> and validated on top of **CodeMender CLI version
+> `codemender-cli-v0.1.0-20260515-vMvg-916238397.zip`**. Since the CodeMender
+> CLI and its internal state database schema are actively under development,
+> upgrading the `cm` binary to a newer version may introduce database schema or
+> CLI output changes. If that occurs, modifications may be required to the
+> orchestrator's parsers (`codemender_agent/codemender/`) and database merger
+> (`codemender_agent/runners/aggregate.py`) to remain functional.
+
 --------------------------------------------------------------------------------
 
 ## Architecture Overview (Bring Your Own Project - BYOP)
@@ -79,6 +88,7 @@ graph TD
 
 -   **Workspace Reset**: Uses forced branch checkout (`git checkout -f`) when
     switching branches between findings.
+
 -   **GCS Summary Reports**: At the end of the orchestrator run, it
     automatically compiles an interactive HTML summary report (`cm report -f
     html`). If `CODEMENDER_REPORT_BUCKET` is configured, the report is uploaded
@@ -110,28 +120,82 @@ following dedicated markdown guides in the `docs/` folder:
 
 ## Repository Structure & Testing
 
+### Source Directory Structure
+
+The repository is organized as a modular Python package with matching unit tests
+and dedicated deployment files:
+
 ```
 .
-├── orchestrator.py                 # CLI entrypoint
-├── codemender_agent/               # Main Python package
-│   ├── config.py                   # Config injection & credential scrubbing
-│   ├── utils.py                    # Process execution & retry decorators
-│   ├── storage.py                  # GCS report uploads & signed URLs
-│   ├── vcs/                        # Git and GitHub API integrations
-│   ├── codemender/                 # CodeMender CLI & SQLite state DB interface
-│   └── runners/                    # Sequential and parallel execution pipelines
-├── tests/                          # Modular unit test suite
-├── docs/                           # Documentation, guides, and specifications
-└── Dockerfile                      # Deployment container definition
+├── Dockerfile                      # Deployment container definition
+├── README.md                       # High-level overview & setup documentation
+├── cloudbuild.yaml                 # GCP Cloud Build definition
+├── requirements.txt                # Python package dependencies
+├── orchestrator.py                 # CLI entrypoint script
+├── codemender_agent/               # Core orchestrator library
+│   ├── __init__.py
+│   ├── config.py                   # Config injection & environment credential scrubbing
+│   ├── utils.py                    # Subprocess helpers, port freeing, and retry decorators
+│   ├── storage.py                  # GCS file transfers & Signed URL generation helpers
+│   ├── codemender/                 # Interface wrapper for CodeMender CLI
+│   │   ├── __init__.py
+│   │   ├── cli.py                  # JSON parsers for findings and session reports
+│   │   └── db.py                   # SQLite status checkers (verify status, fix status)
+│   ├── vcs/                        # Version Control System (VCS) integrations
+│   │   ├── __init__.py
+│   │   ├── git.py                  # Git CLI wrapper & deterministic branch naming
+│   │   └── github.py               # GitHub API client (REST API endpoints for PRs & branches)
+│   └── runners/                    # Pipeline runner scripts executing workflows
+│       ├── __init__.py
+│       ├── sequential.py           # Sequential single-task scanning & fixing loop
+│       ├── scan.py                 # Stage 1: Parallel coordinator scanning & partitioning
+│       ├── worker.py               # Stage 2: Ephemeral parallel fixing worker task
+│       └── aggregate.py            # Stage 3: Database aggregator & report generator
+├── tests/                          # Modular test suite shadowing package layout
+│   ├── __init__.py
+│   ├── cm                          # Mock executable mimicking cm CLI interactions
+│   ├── dummy_cm.py                 # Mock Python server simulating the CodeMender backend
+│   ├── test_config.py              # Config parser unit tests
+│   ├── test_utils.py               # Subprocess & decorator unit tests
+│   ├── test_storage.py             # GCS upload/download unit tests
+│   ├── test_codemender_cli.py      # cm CLI parsing unit tests
+│   ├── test_codemender_db.py       # Local database status checker unit tests
+│   ├── test_vcs_git.py             # Git CLI wrapper and branch naming unit tests
+│   ├── test_vcs_github.py          # GitHub API integration unit tests
+│   ├── test_runners_scan.py        # Stage 1 Scan coordinator unit tests
+│   ├── test_runners_worker.py      # Stage 2 Parallel worker unit tests
+│   ├── test_runners_aggregate.py   # Stage 3 Database aggregator unit tests
+│   └── e2e_test_local.py           # Mock local end-to-end integration test runner
+├── workflows/
+│   └── gcp_parallel_workflow.yaml  # GCP Cloud Workflows Orchestration YAML
+└── docs/                           # Architectural specs, guides, and runbooks
 ```
 
 ### Running Unit Tests
 
-Run the unit test suite across all submodules:
+Modular unit tests are written using the standard Python `unittest` module and
+do not require GCP credentials or active Git permissions (uses mocks and dummy
+wrappers).
 
-```bash
-python3 -m unittest discover tests
-```
+*   **Run all unit tests**:
+
+    ```bash
+    python3 -m unittest discover tests
+    ```
+
+*   **Run a specific test suite** (e.g., Git utilities):
+
+    ```bash
+    python3 -m unittest tests/test_vcs_git.py
+    ```
+
+*   **Run local integration/simulation tests**: To simulate the end-to-end
+    orchestrator pipeline locally without deploying containers or making live
+    GitHub PRs:
+
+    ```bash
+    python3 tests/e2e_test_local.py
+    ```
 
 ## Future Work
 

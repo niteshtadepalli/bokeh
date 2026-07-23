@@ -377,16 +377,46 @@ structure, we will create or modify the following files:
                 updated_at = excluded.updated_at
             WHERE excluded.updated_at > main.sessions.updated_at;
             ```
-        *   **Artifacts Merge** (prevents duplicate key conflicts on autoincrement ID):
+        *   **Artifacts Merge** (prevents duplicate key conflicts on autoincrement ID and filters ghost findings):
             ```sql
             INSERT INTO main.artifacts (session_id, filename, original_path, purpose, finding_id, created_at)
             SELECT session_id, filename, original_path, purpose, finding_id, created_at
             FROM worker.artifacts AS w
-            WHERE NOT EXISTS (
+            WHERE (w.finding_id IS NULL OR EXISTS (
+                SELECT 1 FROM main.findings AS m
+                WHERE m.finding_id = w.finding_id
+            )) AND NOT EXISTS (
                 SELECT 1 FROM main.artifacts AS m
                 WHERE m.session_id = w.session_id AND m.filename = w.filename
             );
             ```
+        *   **Patches Merge** (merges fix diffs and reasoning from worker nodes, ignoring ghost patches):
+            ```sql
+            INSERT INTO main.patches (
+                patch_id, finding_id, session_id, diff, reasoning, status, backup_path,
+                target_file, edited_files, validation_result, created_at
+            )
+            SELECT 
+                patch_id, finding_id, session_id, diff, reasoning, status, backup_path,
+                target_file, edited_files, validation_result, created_at
+            FROM worker.patches AS w
+            WHERE EXISTS (
+                SELECT 1 FROM main.findings AS m
+                WHERE m.finding_id = w.finding_id
+            )
+            ON CONFLICT(patch_id) DO UPDATE SET
+                finding_id = excluded.finding_id,
+                session_id = excluded.session_id,
+                diff = excluded.diff,
+                reasoning = excluded.reasoning,
+                status = excluded.status,
+                backup_path = excluded.backup_path,
+                target_file = excluded.target_file,
+                edited_files = excluded.edited_files,
+                validation_result = excluded.validation_result,
+                created_at = excluded.created_at;
+            ```
+
     *   Generates final consolidated HTML report (`cm report -f html`) and
         uploads to GCS with signed access URL.
 
