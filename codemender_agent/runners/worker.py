@@ -12,6 +12,7 @@ from typing import Optional
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.db import get_finding_status
 from codemender_agent.codemender.db import is_finding_verified
+from codemender_agent.config import get_cleanup_ports
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
@@ -185,8 +186,9 @@ def _process_finding(
         attempt,
         max_verify_attempts,
     )
-    free_port(3000)
-    free_port(3001)
+    for port in get_cleanup_ports():
+      free_port(port)
+
 
     run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
     run_command(

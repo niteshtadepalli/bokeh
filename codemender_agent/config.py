@@ -3,7 +3,8 @@
 import logging
 import os
 import sys
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
+
 
 import yaml
 
@@ -164,3 +165,28 @@ def inject_codemender_config(repo_dir: str) -> None:
     )
   except Exception as e:
     logger.error("Failed to write global config.yaml: %s", e)
+
+
+def get_cleanup_ports() -> List[int]:
+  """Retrieves the list of ports to free before verification tasks."""
+  env_ports = os.environ.get("CODEMENDER_CLEANUP_PORTS")
+  if env_ports:
+    try:
+      return [int(p.strip()) for p in env_ports.split(",") if p.strip()]
+    except ValueError as e:
+      logger.warning(
+          "Invalid CODEMENDER_CLEANUP_PORTS configuration: %s. Using default"
+          " list.",
+          e,
+      )
+
+  # Default common framework development ports to terminate before execution:
+  # - 3000, 3001: Node.js, Express, React dev servers, NestJS
+  # - 5000: Flask, older React/Serve templates
+  # - 8000: Django, Python http.server, PHP built-in server
+  # - 8080: Java Spring Boot, Tomcat, Google App Engine
+  # - 8081: React Native bundler, alternative Node APIs
+  # - 9000: PHP-FPM, Play Framework, Go web servers
+  return [3000, 3001, 5000, 8000, 8080, 8081, 9000]
+
+

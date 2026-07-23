@@ -8,7 +8,10 @@ import time
 
 from codemender_agent.codemender.cli import extract_session_id, parse_findings_json
 from codemender_agent.codemender.db import get_finding_status, is_finding_verified
-from codemender_agent.config import get_github_credentials, get_scrubbed_env, inject_codemender_config
+from codemender_agent.config import get_cleanup_ports
+from codemender_agent.config import get_github_credentials
+from codemender_agent.config import get_scrubbed_env
+from codemender_agent.config import inject_codemender_config
 from codemender_agent.storage import upload_and_sign_report
 from codemender_agent.utils import free_port, run_command
 from codemender_agent.vcs.git import generate_branch_name, get_git_auth_header, parse_repo_owner_and_name, sanitize_git_url, setup_local_git_excludes
@@ -230,8 +233,9 @@ def run_sequential_pipeline() -> None:
           max_verify_attempts,
       )
 
-      free_port(3000)
-      free_port(3001)
+      for port in get_cleanup_ports():
+        free_port(port)
+
 
       run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
       run_command(

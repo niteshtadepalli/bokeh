@@ -7,7 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
+    psmisc \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
 
 # Copy CodeMender CLI binary (downloaded by Cloud Build step into workspace root)
 COPY cm /usr/local/bin/cm

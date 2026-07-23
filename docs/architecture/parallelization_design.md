@@ -88,6 +88,8 @@ role and parameters:
 | `CODEMENDER_BASE_WORKSPACE_URL` | **Stage 2** | GCP Signed URL to download `workspace_base.tar.gz`. |
 | `CODEMENDER_PARTITION_URLS` | **Stage 2** | JSON-serialized array of signed download URLs for partitions (indexed by task index). |
 | `CODEMENDER_UPLOAD_URLS` | **Stage 2** | JSON-serialized array of signed upload URLs for worker databases (indexed by task index). |
+| `CODEMENDER_CLEANUP_PORTS` | **Worker / Seq** | Optional comma-separated list of TCP port numbers to terminate before running code verifications (defaults to common web framework ports: `3000, 3001, 5000, 8000, 8080, 8081, 9000`). |
+
 
 
 
