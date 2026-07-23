@@ -5,7 +5,8 @@ within an engineering team's own infrastructure (e.g., as a Google Cloud Run
 Job). It automates local vulnerability scanning, validation, automated patching
 via the CodeMender CLI (`cm`), and Pull Request generation on GitHub.
 
-> [!IMPORTANT] **CodeMender Compatibility Warning**: This orchestrator was built
+> [!IMPORTANT] 
+> **CodeMender Compatibility Warning**: This orchestrator was built
 > and validated on top of **CodeMender CLI version
 > `codemender-cli-v0.1.0-20260515-vMvg-916238397.zip`**. Since the CodeMender
 > CLI and its internal state database schema are actively under development,
