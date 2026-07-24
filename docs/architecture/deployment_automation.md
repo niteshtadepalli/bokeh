@@ -180,8 +180,10 @@ We will create a new directory `terraform/gcp/` containing the following files:
 *   Creates Artifact Registry Docker repository (`${var.resource_prefix}-runner`) with a
     cleanup policy to remove old/untagged images.
 *   Retrieves Cloud Build Service Account using
-    `data.google_project.project.number` and binds `roles/storage.objectViewer` (or
-    editor if Cloud Build uploads releases) on the Releases bucket.
+    `data.google_project.project.number` and binds `roles/storage.objectViewer` across
+    both legacy (`${data.google_project.project.number}@cloudbuild.gserviceaccount.com`)
+    and compute default (`${data.google_project.project.number}-compute@developer.gserviceaccount.com`)
+    service accounts for source tarball (`_cloudbuild`) and release bucket access.
 
 ### 6. `terraform/gcp/secret.tf`
 

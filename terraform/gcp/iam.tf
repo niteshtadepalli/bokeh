@@ -50,6 +50,18 @@ resource "google_secret_manager_secret_iam_member" "runner_secret_accessor" {
   member    = "serviceAccount:${google_service_account.runner_sa.email}"
 }
 
+# Logging Writer IAM for Runner, Workflow, and Scheduler Service Accounts
+resource "google_project_iam_member" "service_accounts_log_writer" {
+  for_each = toset([
+    "serviceAccount:${google_service_account.runner_sa.email}",
+    "serviceAccount:${google_service_account.workflow_sa.email}",
+    "serviceAccount:${google_service_account.scheduler_sa.email}",
+  ])
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = each.key
+}
+
 # Resource-restricted Cloud Run Job IAM for Workflow SA
 resource "google_cloud_run_v2_job_iam_member" "workflow_job_runner_binding" {
   project  = google_cloud_run_v2_job.runner.project

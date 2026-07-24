@@ -11,11 +11,13 @@ steps:
     args:
       - 'build'
       - '-t'
-      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/codemender-runner/orchestrator:latest'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest'
       - '.'
 
 substitutions:
   _RELEASES_BUCKET: 'codemender-releases'
+  _REPO_NAME: 'codemender-runner'
+  _REGION: 'us-central1'
 
 images:
-  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/codemender-runner/orchestrator:latest'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest'

@@ -11,14 +11,20 @@ This guide provides step-by-step instructions to setup, deploy, and run the
 The parallel scanning pipeline uses **Infrastructure as Code (IaC)** to
 provision:
 
-*   **Google Cloud Storage (GCS)**: Private buckets for binary releases (`releases`) and scan reports (`reports`).
-*   **Artifact Registry**: Docker container repository for runner images (`codemender-runner`).
+*   **Google Cloud Storage (GCS)**: Private buckets for binary releases
+    (`releases`) and scan reports (`reports`).
+*   **Artifact Registry**: Docker container repository for runner images
+    (`codemender-runner`).
 *   **Secret Manager**: Secure storage for GitHub tokens (`GITHUB_APP_TOKEN`).
-*   **Service Accounts & Custom IAM**: Ephemeral, least-privilege access for Cloud Run, Cloud Workflows, and Cloud Build.
-*   **Cloud Run v2 Job**: Ephemeral runner container pool for `scan`, `worker`, and `aggregate` modes.
-*   **Cloud Workflows**: Coordinator workflow orchestrating multi-stage parallel tasks without container timeouts.
+*   **Service Accounts & Custom IAM**: Ephemeral, least-privilege access for
+    Cloud Run, Cloud Workflows, and Cloud Build.
+*   **Cloud Run v2 Job**: Ephemeral runner container pool for `scan`, `worker`,
+    and `aggregate` modes.
+*   **Cloud Workflows**: Coordinator workflow orchestrating multi-stage parallel
+    tasks without container timeouts.
 *   **Cloud Scheduler**: Nightly trigger for automated repository scanning.
-*   *(Optional)* **Serverless VPC Access & Cloud NAT**: Dedicated private network egress routing.
+*   *(Optional)* **Serverless VPC Access & Cloud NAT**: Dedicated private
+    network egress routing.
 
 ```mermaid
 graph TD
@@ -40,9 +46,34 @@ graph TD
 Ensure you have the following before starting:
 
 1.  **GCP Project**: An active GCP project with billing enabled.
-2.  **Local Tooling**: Installed `gcloud` CLI, `terraform` (v1.3.0+), `git`, and `docker`.
-3.  **IAM Permissions**: User account with `Owner` or `Editor` + `Security Admin` privileges on the target GCP project.
-4.  **GitHub Token**: A GitHub Personal Access Token (PAT) or GitHub App Token with repository `contents:write` and `pull_requests:write` permissions.
+2.  **Local Tooling**: Installed `gcloud` CLI, `terraform` (v1.3.0+), `git`, and
+    `docker`.
+3.  **IAM Permissions**: User account with `Owner` or `Editor` + `Security
+    Admin` privileges on the target GCP project.
+4.  **GitHub Authentication Token**: A valid GitHub token stored in GCP Secret
+    Manager (`GITHUB_APP_TOKEN`). CodeMender natively supports either token
+    type:
+
+    *   **Option A: Personal Access Token (PAT)**
+
+        *   **Official Documentation**:
+            [GitHub Docs: Managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+        *   **Required Scopes**: `repo` (for classic PATs) OR `Contents: Read
+            and write` + `Pull requests: Read and write` (for Fine-grained
+            PATs).
+        *   **Prefix Format**: Starts with `ghp_...` (classic) or
+            `github_pat_...` (fine-grained).
+        *   **Lifetime**: Long-lived / static until manually revoked or expired.
+
+    *   **Option B: GitHub App Installation Token**
+
+        *   **Official Documentation**:
+            *   [GitHub Docs: About creating GitHub Apps](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/about-creating-github-apps)
+            *   [GitHub Docs: Authenticating as a GitHub App Installation](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation)
+        *   **Required Permissions**: `Contents: Read & Write`, `Pull Requests:
+            Read & Write`, `Metadata: Read-Only`.
+        *   **Prefix Format**: Starts with `ghs_...`.
+        *   **Lifetime**: Ephemeral (valid for **1 hour**).
 
 --------------------------------------------------------------------------------
 
@@ -58,10 +89,14 @@ cd codemender-agent/terraform/gcp
 ```
 
 #### Where to create `terraform.tfvars`:
-The `terraform.tfvars` file **must be created directly inside `terraform/gcp/terraform.tfvars`**.
+
+The `terraform.tfvars` file **must be created directly inside
+`terraform/gcp/terraform.tfvars`**.
 
 #### Setting the Environment Prefix (`resource_prefix`):
-Set the environment prefix (e.g. `codemender-dev`, `codemender-prod`) in `resource_prefix`:
+
+Set the environment prefix (e.g. `codemender-dev`, `codemender-prod`) in
+`resource_prefix`:
 
 ```bash
 # Set your active GCP Project ID and Environment Prefix
@@ -80,10 +115,14 @@ scheduler_cron       = "0 2 * * *"
 EOF
 ```
 
-*(Alternatively, create `terraform/gcp/terraform.tfvars` manually using `nano` or `touch` and set `resource_prefix = "codemender-dev"`).*
+*(Alternatively, create `terraform/gcp/terraform.tfvars` manually using `nano`
+or `touch` and set `resource_prefix = "codemender-dev"`).*
 
 #### Apply Terraform Configuration:
-Initialize and apply the Terraform configuration to provision the GCS buckets, Artifact Registry, Service Accounts, IAM bindings, Cloud Run Job, Workflows, Secret Manager secret, and enable all required GCP APIs:
+
+Initialize and apply the Terraform configuration to provision the GCS buckets,
+Artifact Registry, Service Accounts, IAM bindings, Cloud Run Job, Workflows,
+Secret Manager secret, and enable all required GCP APIs:
 
 ```bash
 # Initialize provider plugins
@@ -96,11 +135,13 @@ terraform plan
 terraform apply -auto-approve
 ```
 
----
+--------------------------------------------------------------------------------
 
 ### Step 2: Upload CLI Binary to Terraform-Provisioned Releases Bucket
 
-Terraform automatically creates the private GCS Releases Bucket and grants Cloud Build read permissions to it. Upload your compiled `cm-linux` binary directly to the bucket created by Terraform:
+Terraform automatically creates the private GCS Releases Bucket and grants Cloud
+Build read permissions to it. Upload your compiled `cm-linux` binary directly to
+the bucket created by Terraform:
 
 ```bash
 export RELEASES_BUCKET=$(terraform output -raw releases_bucket_name)
@@ -109,40 +150,70 @@ export RELEASES_BUCKET=$(terraform output -raw releases_bucket_name)
 gcloud storage cp /path/to/cm-linux gs://${RELEASES_BUCKET}/latest/cm
 ```
 
----
+--------------------------------------------------------------------------------
 
 ### Step 3: Build & Push Base Docker Container Image
 
-Return to the repository root directory (`codemender-agent/`) and build the runner container image using Cloud Build (which fetches `cm` from the GCS Releases bucket):
+Return to the repository root directory (`codemender-agent/`) and build the
+runner container image using Cloud Build (which fetches `cm` from the GCS
+Releases bucket and pushes the container to Artifact Registry):
 
 ```bash
 cd ../..
 
+export RELEASES_BUCKET="$(cd terraform/gcp && terraform output -raw releases_bucket_name)"
+export REPO_NAME="$(cd terraform/gcp && terraform output -raw runner_job_name 2>/dev/null || echo codemender-runner)"
+
 # Build and push container image to Artifact Registry
 gcloud builds submit --config=cloudbuild.yaml \
-    --substitutions=_RELEASES_BUCKET="${RELEASES_BUCKET}" .
+    --substitutions=_RELEASES_BUCKET="${RELEASES_BUCKET}",_REPO_NAME="${REPO_NAME}" .
 ```
 
----
+--------------------------------------------------------------------------------
 
 ### Step 4: Populate GitHub Access Token in Secret Manager
 
-Terraform initializes the `GITHUB_APP_TOKEN` secret with placeholder data. Update it with your actual GitHub PAT/App token:
+Terraform initializes the `GITHUB_APP_TOKEN` Secret Manager secret with
+placeholder data (`"PLACEHOLDER"`). Add your actual GitHub PAT or GitHub App
+Installation Access Token:
+
+#### Using a GitHub Personal Access Token (PAT):
 
 ```bash
 export PROJECT_ID=$(gcloud config get-value project)
 
-echo -n "ghp_your_github_token_here" | \
+# Add PAT version (ghp_...) to Secret Manager
+echo -n "ghp_your_github_personal_access_token" | \
     gcloud secrets versions add GITHUB_APP_TOKEN \
     --data-file=- \
     --project=${PROJECT_ID}
 ```
 
----
+#### Using a GitHub App Installation Token:
+
+```bash
+export PROJECT_ID=$(gcloud config get-value project)
+
+# Add GitHub App Installation Access Token (ghs_...) to Secret Manager
+echo -n "ghs_your_github_app_installation_token" | \
+    gcloud secrets versions add GITHUB_APP_TOKEN \
+    --data-file=- \
+    --project=${PROJECT_ID}
+```
+
+> [!NOTE] 
+> **Token Expiration Handling**: Because GitHub App Installation Tokens
+> (`ghs_...`) expire after 1 hour, automated nightly pipelines using GitHub Apps
+> should generate fresh tokens prior to execution using the GitHub App Private
+> Key (`.pem`) and App ID, then update Secret Manager via `gcloud secrets
+> versions add`.
+
+--------------------------------------------------------------------------------
 
 ### Step 5: Execute Parallel Scan Workflow
 
-Trigger an execution of the `codemender-coordinator` Cloud Workflow for your target repository:
+Trigger an execution of the `codemender-coordinator` Cloud Workflow for your
+target repository:
 
 ```bash
 export REGION="us-central1"
@@ -162,27 +233,31 @@ gcloud workflows run ${WORKFLOW_NAME} \
     }'
 ```
 
----
+--------------------------------------------------------------------------------
 
 ### Step 6: Monitor Execution & Retrieve Summary Report
 
-1.  **Monitor Workflow Execution**: View real-time state transitions and worker logs:
+1.  **Monitor Workflow Execution**: View real-time state transitions and worker
+    logs:
 
     ```bash
     gcloud workflows executions list ${WORKFLOW_NAME} --location=${REGION}
     ```
 
-2.  **Access HTML Summary Report**: At the end of Stage 3 (Aggregate), inspect the signed HTML report URL printed in Cloud Logging or retrieve it directly from GCS:
+2.  **Access HTML Summary Report**: At the end of Stage 3 (Aggregate), inspect
+    the signed HTML report URL printed in Cloud Logging or retrieve it directly
+    from GCS:
 
     ```bash
     gcloud storage ls gs://${REPORTS_BUCKET}/scans/
     ```
 
----
+--------------------------------------------------------------------------------
 
 ### Step 7: Enable Nightly Scheduled Runs
 
-The provisioned Cloud Scheduler job is paused by default. To enable nightly automated scanning:
+The provisioned Cloud Scheduler job is paused by default. To enable nightly
+automated scanning:
 
 ```bash
 export SCHEDULER_JOB_NAME="$(cd terraform/gcp && terraform output -raw scheduler_job_name 2>/dev/null || echo codemender-nightly-scan)"
@@ -193,7 +268,9 @@ gcloud scheduler jobs resume ${SCHEDULER_JOB_NAME} --location=${REGION}
 
 ## 4. Troubleshooting & Operational Commands
 
-*   **Update Runner Container Image**: Re-build the image with `gcloud builds submit`. Terraform uses `lifecycle { ignore_changes = [image] }` so image updates will not conflict with Terraform state.
+*   **Update Runner Container Image**: Re-build the image with `gcloud builds
+    submit`. Terraform uses `lifecycle { ignore_changes = [image] }` so image
+    updates will not conflict with Terraform state.
 *   **Manual Job Overrides**: Test run a single Cloud Run Job task manually:
 
     ```bash
