@@ -198,4 +198,5 @@ wait_for_operation:
             raise: '${"Operation failed: " + operation.error.message}'
           - condition: ${int(default(map.get(operation.response, "failedCount"), 0)) > 0}
             raise: '${"Job execution failed with " + string(operation.response.failedCount) + " failed tasks."}'
+    - return_result:
         return: ${operation.response}
