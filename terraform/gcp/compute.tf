@@ -9,6 +9,13 @@ resource "google_cloud_run_v2_job" "runner" {
 
       containers {
         image = "alpine:latest"
+
+        resources {
+          limits = {
+            cpu    = var.runner_cpu
+            memory = var.runner_memory
+          }
+        }
       }
 
       dynamic "vpc_access" {

@@ -153,8 +153,8 @@ We will create a new directory `terraform/gcp/` containing the following files:
 
 *   Declares all input variables: `project_id`, `region`, `resource_prefix`
     (defaults to `"codemender"` for environment isolation), `reports_bucket_name`,
-    `releases_bucket_name`, `create_vpc_and_nat`, `existing_vpc_connector_id`,
-    `scheduler_cron`.
+    `releases_bucket_name`, `runner_cpu` (defaults to `"2"`), `runner_memory` (defaults to `"4Gi"`),
+    `create_vpc_and_nat`, `existing_vpc_connector_id`, `scheduler_cron`.
 *   Includes `vpc_connector_cidr` variable, defaulting to `10.0.0.0/26` with
     regex validation, as well as `vpc_connector_min_instances`,
     `vpc_connector_max_instances`, and `vpc_connector_machine_type`.

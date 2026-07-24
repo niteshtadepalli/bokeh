@@ -25,6 +25,18 @@ variable "releases_bucket_name" {
   description = "Name of the GCS bucket for binary releases."
 }
 
+variable "runner_cpu" {
+  type        = string
+  description = "CPU limit for Cloud Run Job worker tasks (e.g. '1', '2', '4', '8')."
+  default     = "2"
+}
+
+variable "runner_memory" {
+  type        = string
+  description = "Memory limit for Cloud Run Job worker tasks (e.g. '2Gi', '4Gi', '8Gi', '16Gi')."
+  default     = "4Gi"
+}
+
 variable "create_vpc_and_nat" {
   type        = bool
   description = "Whether to create a dedicated VPC network, subnet, connector, and Cloud NAT for private egress."

@@ -93,15 +93,14 @@ cd codemender-agent/terraform/gcp
 The `terraform.tfvars` file **must be created directly inside
 `terraform/gcp/terraform.tfvars`**.
 
-#### Setting the Environment Prefix (`resource_prefix`):
+#### Setting Environment Prefix & Cloud Run Resources (`runner_cpu` / `runner_memory`):
 
-Set the environment prefix (e.g. `codemender-dev`, `codemender-prod`) in
-`resource_prefix`:
+Set your project variables, environment prefix, and desired Cloud Run Job CPU/Memory limits:
 
 ```bash
 # Set your active GCP Project ID and Environment Prefix
 export PROJECT_ID=$(gcloud config get-value project)
-export PREFIX="codemender-dev"  # <-- Set your environment prefix here (e.g. codemender-dev, codemender-prod)
+export PREFIX="codemender-dev"  # <-- Set your environment prefix here
 
 # Generate terraform.tfvars inside terraform/gcp/
 cat <<EOF > terraform.tfvars
@@ -110,13 +109,15 @@ region               = "us-central1"
 resource_prefix      = "${PREFIX}"
 reports_bucket_name  = "${PREFIX}-reports-${PROJECT_ID}"
 releases_bucket_name = "${PREFIX}-releases-${PROJECT_ID}"
+runner_cpu           = "2"      # Cloud Run Job vCPU limit ("1", "2", "4", "8")
+runner_memory        = "4Gi"    # Cloud Run Job RAM limit ("2Gi", "4Gi", "8Gi", "16Gi")
 create_vpc_and_nat   = false
 scheduler_cron       = "0 2 * * *"
 EOF
 ```
 
 *(Alternatively, create `terraform/gcp/terraform.tfvars` manually using `nano`
-or `touch` and set `resource_prefix = "codemender-dev"`).*
+or `touch` and set `runner_cpu = "4"` / `runner_memory = "8Gi"`).*
 
 #### Apply Terraform Configuration:
 
