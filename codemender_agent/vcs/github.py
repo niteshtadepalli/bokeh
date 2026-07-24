@@ -88,7 +88,7 @@ def get_default_branch(token: str, owner: str, repo: str) -> str:
   return "main"
 
 
-@retry_on_exception(max_tries=3)
+@retry_on_exception(max_tries=5, initial_delay=3, backoff_factor=2)
 def create_pull_request(
     token: str,
     owner: str,
