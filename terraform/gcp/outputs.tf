@@ -13,6 +13,11 @@ output "releases_bucket_url" {
   value       = google_storage_bucket.releases.url
 }
 
+output "releases_bucket_name" {
+  description = "GCS bucket name for binary releases."
+  value       = google_storage_bucket.releases.name
+}
+
 output "artifact_registry_repository" {
   description = "Artifact Registry Docker repository path."
   value       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.docker_repo.repository_id}"
