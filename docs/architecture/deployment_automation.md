@@ -199,6 +199,7 @@ We will create a new directory `terraform/gcp/` containing the following files:
     (`${var.resource_prefix}-scheduler-sa`).
 *   Creates custom `google_project_iam_custom_role` with permissions:
     *   `run.jobs.run`
+    *   `run.jobs.runWithOverrides`
     *   `run.jobs.get`
     *   `run.operations.get` (Required for the manual polling loop using v2
         operations API)

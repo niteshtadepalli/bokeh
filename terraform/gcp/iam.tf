@@ -23,6 +23,7 @@ resource "google_project_iam_custom_role" "workflow_job_runner" {
   project     = var.project_id
   permissions = [
     "run.jobs.run",
+    "run.jobs.runWithOverrides",
     "run.jobs.get",
     "run.operations.get",
     "run.executions.get",
