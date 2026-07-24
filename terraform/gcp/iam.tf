@@ -31,11 +31,17 @@ resource "google_project_iam_custom_role" "workflow_job_runner" {
   ]
 }
 
-# Bucket-level IAM for Runner SA
+# Bucket-level IAM for Runner SA & Workflow SA
 resource "google_storage_bucket_iam_member" "runner_reports_admin" {
   bucket = google_storage_bucket.reports.name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.runner_sa.email}"
+}
+
+resource "google_storage_bucket_iam_member" "workflow_reports_viewer" {
+  bucket = google_storage_bucket.reports.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.workflow_sa.email}"
 }
 
 resource "google_storage_bucket_iam_member" "runner_releases_viewer" {
@@ -63,13 +69,11 @@ resource "google_project_iam_member" "service_accounts_log_writer" {
   member  = each.key
 }
 
-# Resource-restricted Cloud Run Job IAM for Workflow SA
-resource "google_cloud_run_v2_job_iam_member" "workflow_job_runner_binding" {
-  project  = google_cloud_run_v2_job.runner.project
-  location = google_cloud_run_v2_job.runner.location
-  name     = google_cloud_run_v2_job.runner.name
-  role     = google_project_iam_custom_role.workflow_job_runner.id
-  member   = "serviceAccount:${google_service_account.workflow_sa.email}"
+# Project-level IAM binding for Workflow SA to run jobs, poll operations, and monitor executions
+resource "google_project_iam_member" "workflow_job_runner_binding" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.workflow_job_runner.id
+  member  = "serviceAccount:${google_service_account.workflow_sa.email}"
 }
 
 # Service Account User IAM for Workflow SA on Runner SA

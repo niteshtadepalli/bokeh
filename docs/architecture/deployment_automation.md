@@ -207,11 +207,12 @@ We will create a new directory `terraform/gcp/` containing the following files:
     *   `run.executions.list`
 *   Binds bucket-level roles:
     *   Runner SA: `roles/storage.objectAdmin` on Reports bucket.
+    *   Workflow SA: `roles/storage.objectViewer` on Reports bucket (required for Stage 1 `read_manifest` step).
     *   Runner SA: `roles/storage.objectViewer` on Releases bucket.
 *   Binds `roles/secretmanager.secretAccessor` on the GitHub token secret to the
     Runner SA.
-*   Grants the custom job runner role to the workflow SA **restricted to the
-    specific Cloud Run Job resource**.
+*   Grants the custom job runner role to the workflow SA **at the project level**
+    (required to poll top-level regional Operations `projects/.../locations/.../operations/*`).
 *   Grants `roles/iam.serviceAccountUser` on the runner SA to the workflow SA.
 *   Grants `roles/workflows.invoker` to the scheduler SA at project level.
 
