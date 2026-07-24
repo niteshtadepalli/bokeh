@@ -1,5 +1,5 @@
 resource "google_cloud_scheduler_job" "nightly_scan" {
-  name        = "codemender-nightly-scan"
+  name        = "${var.resource_prefix}-nightly-scan"
   description = "Triggers nightly CodeMender parallel scan workflow"
   schedule    = var.scheduler_cron
   time_zone   = "Etc/UTC"

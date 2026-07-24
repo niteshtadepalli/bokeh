@@ -1,5 +1,5 @@
 resource "google_cloud_run_v2_job" "runner" {
-  name     = "codemender-runner"
+  name     = "${var.resource_prefix}-runner"
   location = var.region
   project  = var.project_id
 
@@ -31,7 +31,7 @@ resource "google_cloud_run_v2_job" "runner" {
 }
 
 resource "google_workflows_workflow" "coordinator" {
-  name            = "codemender-coordinator"
+  name            = "${var.resource_prefix}-coordinator"
   region          = var.region
   project         = var.project_id
   description     = "Coordinates parallel CodeMender security scan and fix executions"

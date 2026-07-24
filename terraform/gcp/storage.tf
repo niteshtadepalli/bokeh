@@ -29,7 +29,7 @@ resource "google_storage_bucket" "releases" {
 
 resource "google_artifact_registry_repository" "docker_repo" {
   location      = var.region
-  repository_id = "codemender-runner"
+  repository_id = "${var.resource_prefix}-runner"
   description   = "Docker repository for CodeMender runner containers"
   format        = "DOCKER"
   project       = var.project_id
@@ -53,15 +53,12 @@ resource "google_artifact_registry_repository" "docker_repo" {
   depends_on = [google_project_service.enabled_services]
 }
 
-resource "google_project_service_identity" "cloudbuild" {
-  project = var.project_id
-  service = "cloudbuild.googleapis.com"
-
-  depends_on = [google_project_service.enabled_services]
+data "google_project" "project" {
+  project_id = var.project_id
 }
 
 resource "google_storage_bucket_iam_member" "cloudbuild_releases_viewer" {
   bucket = google_storage_bucket.releases.name
   role   = "roles/storage.objectViewer"
-  member = "serviceAccount:${google_project_service_identity.cloudbuild.email}"
+  member = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
 }
