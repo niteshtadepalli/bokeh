@@ -82,7 +82,7 @@ EOF
 *(Alternatively, you can manually create the file using `nano terraform.tfvars` or `touch terraform.tfvars` inside `terraform/gcp/` and edit its contents).*
 
 #### Apply Terraform Configuration:
-Initialize and apply the Terraform configuration to provision the GCS buckets, Artifact Registry, Service Accounts, IAM bindings, Cloud Run Job, Workflows, and Secret Manager secret:
+Initialize and apply the Terraform configuration to provision the GCS buckets, Artifact Registry, Service Accounts, IAM bindings, Cloud Run Job, Workflows, Secret Manager secret, and enable all required GCP APIs (including `cloudresourcemanager.googleapis.com`):
 
 ```bash
 # Initialize provider plugins

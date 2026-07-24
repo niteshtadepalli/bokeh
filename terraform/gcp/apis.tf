@@ -1,5 +1,6 @@
 locals {
   required_apis = [
+    "cloudresourcemanager.googleapis.com",
     "run.googleapis.com",
     "workflows.googleapis.com",
     "secretmanager.googleapis.com",

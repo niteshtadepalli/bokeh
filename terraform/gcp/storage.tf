@@ -55,6 +55,8 @@ resource "google_artifact_registry_repository" "docker_repo" {
 
 data "google_project" "project" {
   project_id = var.project_id
+
+  depends_on = [google_project_service.enabled_services]
 }
 
 resource "google_storage_bucket_iam_member" "cloudbuild_releases_viewer" {
