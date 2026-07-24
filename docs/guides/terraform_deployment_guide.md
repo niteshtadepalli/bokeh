@@ -58,31 +58,32 @@ cd codemender-agent/terraform/gcp
 ```
 
 #### Where to create `terraform.tfvars`:
-The `terraform.tfvars` file **must be located directly inside the `terraform/gcp/` directory** (`codemender-agent/terraform/gcp/terraform.tfvars`). Terraform automatically loads variable values from files named `*.tfvars` in the current working directory.
+The `terraform.tfvars` file **must be created directly inside `terraform/gcp/terraform.tfvars`**.
 
-#### Command to create `terraform.tfvars`:
-You can create the `terraform.tfvars` file automatically using `cat` with your GCP project ID:
+#### Setting the Environment Prefix (`resource_prefix`):
+Set the environment prefix (e.g. `codemender-dev`, `codemender-prod`) in `resource_prefix`:
 
 ```bash
-# Set your active GCP Project ID
+# Set your active GCP Project ID and Environment Prefix
 export PROJECT_ID=$(gcloud config get-value project)
+export PREFIX="codemender-dev"  # <-- Set your environment prefix here (e.g. codemender-dev, codemender-prod)
 
 # Generate terraform.tfvars inside terraform/gcp/
 cat <<EOF > terraform.tfvars
 project_id           = "${PROJECT_ID}"
 region               = "us-central1"
-resource_prefix      = "codemender"
-reports_bucket_name  = "codemender-reports-${PROJECT_ID}"
-releases_bucket_name = "codemender-releases-${PROJECT_ID}"
+resource_prefix      = "${PREFIX}"
+reports_bucket_name  = "${PREFIX}-reports-${PROJECT_ID}"
+releases_bucket_name = "${PREFIX}-releases-${PROJECT_ID}"
 create_vpc_and_nat   = false
 scheduler_cron       = "0 2 * * *"
 EOF
 ```
 
-*(Alternatively, you can manually create the file using `nano terraform.tfvars` or `touch terraform.tfvars` inside `terraform/gcp/` and edit its contents).*
+*(Alternatively, create `terraform/gcp/terraform.tfvars` manually using `nano` or `touch` and set `resource_prefix = "codemender-dev"`).*
 
 #### Apply Terraform Configuration:
-Initialize and apply the Terraform configuration to provision the GCS buckets, Artifact Registry, Service Accounts, IAM bindings, Cloud Run Job, Workflows, Secret Manager secret, and enable all required GCP APIs (including `cloudresourcemanager.googleapis.com`):
+Initialize and apply the Terraform configuration to provision the GCS buckets, Artifact Registry, Service Accounts, IAM bindings, Cloud Run Job, Workflows, Secret Manager secret, and enable all required GCP APIs:
 
 ```bash
 # Initialize provider plugins
@@ -145,12 +146,14 @@ Trigger an execution of the `codemender-coordinator` Cloud Workflow for your tar
 
 ```bash
 export REGION="us-central1"
-export REPORTS_BUCKET="codemender-reports-${PROJECT_ID}"
+export REPORTS_BUCKET="$(cd terraform/gcp && terraform output -raw reports_bucket_name 2>/dev/null || echo codemender-reports-${PROJECT_ID})"
+export JOB_NAME="$(cd terraform/gcp && terraform output -raw runner_job_name 2>/dev/null || echo codemender-runner)"
+export WORKFLOW_NAME="$(cd terraform/gcp && terraform output -raw workflow_name 2>/dev/null || echo codemender-coordinator)"
 
-gcloud workflows run codemender-coordinator \
+gcloud workflows run ${WORKFLOW_NAME} \
     --location=${REGION} \
     --data='{
-      "job_name": "codemender-runner",
+      "job_name": "'"${JOB_NAME}"'",
       "gcs_bucket": "'"${REPORTS_BUCKET}"'",
       "repo_url": "https://github.com/your-org/your-repo.git",
       "build_command": "npm install && npm test",
@@ -166,7 +169,7 @@ gcloud workflows run codemender-coordinator \
 1.  **Monitor Workflow Execution**: View real-time state transitions and worker logs:
 
     ```bash
-    gcloud workflows executions list codemender-coordinator --location=${REGION}
+    gcloud workflows executions list ${WORKFLOW_NAME} --location=${REGION}
     ```
 
 2.  **Access HTML Summary Report**: At the end of Stage 3 (Aggregate), inspect the signed HTML report URL printed in Cloud Logging or retrieve it directly from GCS:
@@ -179,10 +182,11 @@ gcloud workflows run codemender-coordinator \
 
 ### Step 7: Enable Nightly Scheduled Runs
 
-The provisioned Cloud Scheduler job (`codemender-nightly-scan`) is paused by default. To enable nightly automated scanning:
+The provisioned Cloud Scheduler job is paused by default. To enable nightly automated scanning:
 
 ```bash
-gcloud scheduler jobs resume codemender-nightly-scan --location=${REGION}
+export SCHEDULER_JOB_NAME="$(cd terraform/gcp && terraform output -raw scheduler_job_name 2>/dev/null || echo codemender-nightly-scan)"
+gcloud scheduler jobs resume ${SCHEDULER_JOB_NAME} --location=${REGION}
 ```
 
 --------------------------------------------------------------------------------
@@ -193,7 +197,7 @@ gcloud scheduler jobs resume codemender-nightly-scan --location=${REGION}
 *   **Manual Job Overrides**: Test run a single Cloud Run Job task manually:
 
     ```bash
-    gcloud run jobs execute codemender-runner \
+    gcloud run jobs execute ${JOB_NAME} \
         --region=${REGION} \
         --update-env-vars="CODEMENDER_RUN_MODE=scan,GITHUB_REPO_URL=https://github.com/your-org/your-repo.git"
     ```

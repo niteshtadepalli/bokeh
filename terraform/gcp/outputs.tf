@@ -8,6 +8,11 @@ output "reports_bucket_url" {
   value       = google_storage_bucket.reports.url
 }
 
+output "reports_bucket_name" {
+  description = "GCS bucket name for scan reports."
+  value       = google_storage_bucket.reports.name
+}
+
 output "releases_bucket_url" {
   description = "GCS bucket URL for binary releases."
   value       = google_storage_bucket.releases.url
@@ -16,6 +21,21 @@ output "releases_bucket_url" {
 output "releases_bucket_name" {
   description = "GCS bucket name for binary releases."
   value       = google_storage_bucket.releases.name
+}
+
+output "runner_job_name" {
+  description = "Cloud Run Job name."
+  value       = google_cloud_run_v2_job.runner.name
+}
+
+output "workflow_name" {
+  description = "Cloud Workflows workflow name."
+  value       = google_workflows_workflow.coordinator.name
+}
+
+output "scheduler_job_name" {
+  description = "Cloud Scheduler job name."
+  value       = google_cloud_scheduler_job.nightly_scan.name
 }
 
 output "artifact_registry_repository" {
