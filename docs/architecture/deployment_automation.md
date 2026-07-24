@@ -218,8 +218,9 @@ We will create a new directory `terraform/gcp/` containing the following files:
 
 ### 8. `terraform/gcp/compute.tf`
 
-*   Creates `google_cloud_run_v2_job` (`${var.resource_prefix}-runner`) with a
-    placeholder `alpine:latest` image and ignore lifecycle rules for the image.
+*   Creates `google_cloud_run_v2_job` (`${var.resource_prefix}-runner`) configured directly
+    with the Artifact Registry image path (`${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.docker_repo.repository_id}/orchestrator:latest`).
+*   Binds Secret Manager secret `GITHUB_APP_TOKEN` version `"latest"` to environment variable `GITHUB_APP_TOKEN`.
 *   Includes dynamic `vpc_access` block to attach the connector if enabled,
     setting `egress = "ALL_TRAFFIC"`.
 *   Creates `google_workflows_workflow` (`${var.resource_prefix}-coordinator`) loading

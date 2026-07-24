@@ -8,12 +8,22 @@ resource "google_cloud_run_v2_job" "runner" {
       service_account = google_service_account.runner_sa.email
 
       containers {
-        image = "alpine:latest"
+        image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.docker_repo.repository_id}/orchestrator:latest"
 
         resources {
           limits = {
             cpu    = var.runner_cpu
             memory = var.runner_memory
+          }
+        }
+
+        env {
+          name = "GITHUB_APP_TOKEN"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.github_app_token.secret_id
+              version = "latest"
+            }
           }
         }
       }
@@ -26,12 +36,6 @@ resource "google_cloud_run_v2_job" "runner" {
         }
       }
     }
-  }
-
-  lifecycle {
-    ignore_changes = [
-      template[0].template[0].containers[0].image,
-    ]
   }
 
   depends_on = [google_project_service.enabled_services]

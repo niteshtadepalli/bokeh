@@ -95,7 +95,8 @@ The `terraform.tfvars` file **must be created directly inside
 
 #### Setting Environment Prefix & Cloud Run Resources (`runner_cpu` / `runner_memory`):
 
-Set your project variables, environment prefix, and desired Cloud Run Job CPU/Memory limits:
+Set your project variables, environment prefix, and desired Cloud Run Job
+CPU/Memory limits:
 
 ```bash
 # Set your active GCP Project ID and Environment Prefix
@@ -156,8 +157,9 @@ gcloud storage cp /path/to/cm-linux gs://${RELEASES_BUCKET}/latest/cm
 ### Step 3: Build & Push Base Docker Container Image
 
 Return to the repository root directory (`codemender-agent/`) and build the
-runner container image using Cloud Build (which fetches `cm` from the GCS
-Releases bucket and pushes the container to Artifact Registry):
+runner container image using Cloud Build (which fetches `cm` from GCS Releases
+and pushes the container directly to the Artifact Registry repository configured
+by Terraform):
 
 ```bash
 cd ../..
@@ -202,7 +204,7 @@ echo -n "ghs_your_github_app_installation_token" | \
     --project=${PROJECT_ID}
 ```
 
-> [!NOTE] 
+> [!NOTE]
 > **Token Expiration Handling**: Because GitHub App Installation Tokens
 > (`ghs_...`) expire after 1 hour, automated nightly pipelines using GitHub Apps
 > should generate fresh tokens prior to execution using the GitHub App Private
@@ -270,8 +272,7 @@ gcloud scheduler jobs resume ${SCHEDULER_JOB_NAME} --location=${REGION}
 ## 4. Troubleshooting & Operational Commands
 
 *   **Update Runner Container Image**: Re-build the image with `gcloud builds
-    submit`. Terraform uses `lifecycle { ignore_changes = [image] }` so image
-    updates will not conflict with Terraform state.
+    submit`.
 *   **Manual Job Overrides**: Test run a single Cloud Run Job task manually:
 
     ```bash
