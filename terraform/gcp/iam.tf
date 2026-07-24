@@ -66,11 +66,9 @@ resource "google_service_account_iam_member" "workflow_runner_sa_user" {
   member             = "serviceAccount:${google_service_account.workflow_sa.email}"
 }
 
-# Workflow Invoker IAM for Scheduler SA on Coordinator Workflow
-resource "google_workflows_workflow_iam_member" "scheduler_workflow_invoker" {
-  project        = google_workflows_workflow.coordinator.project
-  region         = google_workflows_workflow.coordinator.region
-  name           = google_workflows_workflow.coordinator.name
-  role           = "roles/workflows.invoker"
-  member         = "serviceAccount:${google_service_account.scheduler_sa.email}"
+# Workflow Invoker IAM for Scheduler SA at Project Level
+resource "google_project_iam_member" "scheduler_workflow_invoker" {
+  project = var.project_id
+  role    = "roles/workflows.invoker"
+  member  = "serviceAccount:${google_service_account.scheduler_sa.email}"
 }

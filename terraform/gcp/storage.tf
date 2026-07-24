@@ -53,7 +53,7 @@ resource "google_artifact_registry_repository" "docker_repo" {
   depends_on = [google_project_service.enabled_services]
 }
 
-data "google_project_service_identity" "cloudbuild" {
+resource "google_project_service_identity" "cloudbuild" {
   project = var.project_id
   service = "cloudbuild.googleapis.com"
 
@@ -63,5 +63,5 @@ data "google_project_service_identity" "cloudbuild" {
 resource "google_storage_bucket_iam_member" "cloudbuild_releases_viewer" {
   bucket = google_storage_bucket.releases.name
   role   = "roles/storage.objectViewer"
-  member = "serviceAccount:${data.google_project_service_identity.cloudbuild.email}"
+  member = "serviceAccount:${google_project_service_identity.cloudbuild.email}"
 }

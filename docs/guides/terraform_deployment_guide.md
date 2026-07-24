@@ -57,18 +57,31 @@ git clone https://github.com/your-username/codemender-agent.git
 cd codemender-agent/terraform/gcp
 ```
 
-Create a `terraform.tfvars` file customized for your GCP project:
+#### Where to create `terraform.tfvars`:
+The `terraform.tfvars` file **must be located directly inside the `terraform/gcp/` directory** (`codemender-agent/terraform/gcp/terraform.tfvars`). Terraform automatically loads variable values from files named `*.tfvars` in the current working directory.
 
-```hcl
-project_id           = "YOUR_GCP_PROJECT_ID"
+#### Command to create `terraform.tfvars`:
+You can create the `terraform.tfvars` file automatically using `cat` with your GCP project ID:
+
+```bash
+# Set your active GCP Project ID
+export PROJECT_ID=$(gcloud config get-value project)
+
+# Generate terraform.tfvars inside terraform/gcp/
+cat <<EOF > terraform.tfvars
+project_id           = "${PROJECT_ID}"
 region               = "us-central1"
 resource_prefix      = "codemender"
-reports_bucket_name  = "codemender-reports-YOUR_GCP_PROJECT_ID"
-releases_bucket_name = "codemender-releases-YOUR_GCP_PROJECT_ID"
+reports_bucket_name  = "codemender-reports-${PROJECT_ID}"
+releases_bucket_name = "codemender-releases-${PROJECT_ID}"
 create_vpc_and_nat   = false
 scheduler_cron       = "0 2 * * *"
+EOF
 ```
 
+*(Alternatively, you can manually create the file using `nano terraform.tfvars` or `touch terraform.tfvars` inside `terraform/gcp/` and edit its contents).*
+
+#### Apply Terraform Configuration:
 Initialize and apply the Terraform configuration to provision the GCS buckets, Artifact Registry, Service Accounts, IAM bindings, Cloud Run Job, Workflows, and Secret Manager secret:
 
 ```bash
@@ -99,7 +112,7 @@ gcloud storage cp /path/to/cm-linux gs://${RELEASES_BUCKET}/latest/cm
 
 ### Step 3: Build & Push Base Docker Container Image
 
-Return to the repository root directory and build the runner container image using Cloud Build (which fetches `cm` from the GCS Releases bucket):
+Return to the repository root directory (`codemender-agent/`) and build the runner container image using Cloud Build (which fetches `cm` from the GCS Releases bucket):
 
 ```bash
 cd ../..
