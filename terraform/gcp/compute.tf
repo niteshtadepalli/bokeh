@@ -38,7 +38,10 @@ resource "google_cloud_run_v2_job" "runner" {
     }
   }
 
-  depends_on = [google_project_service.enabled_services]
+  depends_on = [
+    google_project_service.enabled_services,
+    google_secret_manager_secret_iam_member.runner_secret_accessor
+  ]
 }
 
 resource "google_workflows_workflow" "coordinator" {
