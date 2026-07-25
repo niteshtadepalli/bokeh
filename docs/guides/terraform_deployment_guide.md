@@ -15,7 +15,7 @@ provision:
     (`releases`) and scan reports (`reports`).
 *   **Artifact Registry**: Docker container repository for runner images
     (`codemender-runner`).
-*   **Secret Manager**: Secure storage for GitHub tokens (`GITHUB_APP_TOKEN`).
+*   **Secret Manager**: Secure storage for GitHub tokens (`${PREFIX}-github-token`).
 *   **Service Accounts & Custom IAM**: Ephemeral, least-privilege access for
     Cloud Run, Cloud Workflows, and Cloud Build.
 *   **Cloud Run v2 Job**: Ephemeral runner container pool for `scan`, `worker`,
@@ -25,6 +25,17 @@ provision:
 *   **Cloud Scheduler**: Nightly trigger for automated repository scanning.
 *   *(Optional)* **Serverless VPC Access & Cloud NAT**: Dedicated private
     network egress routing.
+
+### Resource Scope: Shared vs. Isolated (Multi-Prefix Deployments)
+If you deploy multiple pipelines in the same GCP project using different `resource_prefix` values, resources are partitioned as follows:
+
+*   **Shared Resources (Project-wide)**:
+    *   **GCP APIs**: APIs enabled for the project are shared by all pipelines.
+*   **Isolated Resources (Unique per prefix)**:
+    *   **Compute & Workflow**: Cloud Run Job (`${prefix}-runner`) and Cloud Workflow (`${prefix}-coordinator`).
+    *   **Storage & Secret**: GCS Reports/Releases buckets, Artifact Registry repository, and Secret Manager GitHub secret (`${prefix}-github-token`).
+    *   **Security**: Service Accounts (`${prefix}-runner-sa`, etc.) and Custom IAM Role bindings.
+    *   **VPC & Networking**: Dedicated VPC Connector (`${prefix}-vpc-conn`) and Router (requires setting distinct `vpc_connector_cidr` ranges).
 
 ```mermaid
 graph TD
@@ -51,7 +62,7 @@ Ensure you have the following before starting:
 3.  **IAM Permissions**: User account with `Owner` or `Editor` + `Security
     Admin` privileges on the target GCP project.
 4.  **GitHub Authentication Token**: A valid GitHub token stored in GCP Secret
-    Manager (`GITHUB_APP_TOKEN`). CodeMender natively supports either token
+    Manager (prefixed as `${PREFIX}-github-token`). CodeMender natively supports either token
     type:
 
     *   **Option A: Personal Access Token (PAT)**
@@ -176,7 +187,7 @@ gcloud builds submit --config=cloudbuild.yaml \
 
 ### Step 4: Populate GitHub Access Token in Secret Manager
 
-Terraform initializes the `GITHUB_APP_TOKEN` Secret Manager secret with
+Terraform initializes the `${PREFIX}-github-token` Secret Manager secret with
 placeholder data (`"PLACEHOLDER"`). Add your actual GitHub PAT or GitHub App
 Installation Access Token:
 
@@ -187,7 +198,7 @@ export PROJECT_ID=$(gcloud config get-value project)
 
 # Add PAT version (ghp_...) to Secret Manager
 echo -n "ghp_your_github_personal_access_token" | \
-    gcloud secrets versions add GITHUB_APP_TOKEN \
+    gcloud secrets versions add "${PREFIX}-github-token" \
     --data-file=- \
     --project=${PROJECT_ID}
 ```
@@ -199,7 +210,7 @@ export PROJECT_ID=$(gcloud config get-value project)
 
 # Add GitHub App Installation Access Token (ghs_...) to Secret Manager
 echo -n "ghs_your_github_app_installation_token" | \
-    gcloud secrets versions add GITHUB_APP_TOKEN \
+    gcloud secrets versions add "${PREFIX}-github-token" \
     --data-file=- \
     --project=${PROJECT_ID}
 ```

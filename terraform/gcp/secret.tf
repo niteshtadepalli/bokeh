@@ -1,5 +1,5 @@
 resource "google_secret_manager_secret" "github_app_token" {
-  secret_id = "GITHUB_APP_TOKEN"
+  secret_id = "${var.resource_prefix}-github-token"
   project   = var.project_id
 
   replication {
