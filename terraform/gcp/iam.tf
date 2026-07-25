@@ -57,6 +57,13 @@ resource "google_secret_manager_secret_iam_member" "runner_secret_accessor" {
   member    = "serviceAccount:${google_service_account.runner_sa.email}"
 }
 
+# Service Account Token Creator IAM for Runner SA on itself (required for GCS signed URL generation)
+resource "google_service_account_iam_member" "runner_token_creator" {
+  service_account_id = google_service_account.runner_sa.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.runner_sa.email}"
+}
+
 # Logging Writer IAM for Runner, Workflow, and Scheduler Service Accounts
 resource "google_project_iam_member" "service_accounts_log_writer" {
   for_each = toset([

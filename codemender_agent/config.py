@@ -51,7 +51,7 @@ def get_github_credentials() -> Tuple[str, str]:
     )
     sys.exit(1)
 
-  return repo_url, token
+  return repo_url.strip(), token.strip()
 
 
 def inject_codemender_config(repo_dir: str) -> None:

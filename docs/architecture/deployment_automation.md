@@ -209,6 +209,7 @@ We will create a new directory `terraform/gcp/` containing the following files:
     *   Runner SA: `roles/storage.objectAdmin` on Reports bucket.
     *   Workflow SA: `roles/storage.objectViewer` on Reports bucket (required for Stage 1 `read_manifest` step).
     *   Runner SA: `roles/storage.objectViewer` on Releases bucket.
+*   Grants `roles/iam.serviceAccountTokenCreator` on the Runner SA to itself (required for `signBlob` / GCS signed URL generation).
 *   Binds `roles/secretmanager.secretAccessor` on the GitHub token secret to the
     Runner SA.
 *   Grants the custom job runner role to the workflow SA **at the project level**
