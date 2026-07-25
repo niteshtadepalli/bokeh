@@ -6,16 +6,25 @@ import shutil
 import sys
 import time
 
-from codemender_agent.codemender.cli import extract_session_id, parse_findings_json
-from codemender_agent.codemender.db import get_finding_status, is_finding_verified
+from codemender_agent.codemender.cli import extract_session_id
+from codemender_agent.codemender.cli import parse_findings_json
+from codemender_agent.codemender.db import get_finding_status
+from codemender_agent.codemender.db import is_finding_verified
 from codemender_agent.config import get_cleanup_ports
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
 from codemender_agent.storage import upload_and_sign_report
-from codemender_agent.utils import free_port, run_command
-from codemender_agent.vcs.git import generate_branch_name, get_git_auth_header, parse_repo_owner_and_name, sanitize_git_url, setup_local_git_excludes
-from codemender_agent.vcs.github import check_remote_branch_exists, create_pull_request, get_default_branch
+from codemender_agent.utils import free_port
+from codemender_agent.utils import run_command
+from codemender_agent.vcs.git import generate_branch_name
+from codemender_agent.vcs.git import get_git_auth_header
+from codemender_agent.vcs.git import parse_repo_owner_and_name
+from codemender_agent.vcs.git import sanitize_git_url
+from codemender_agent.vcs.git import setup_local_git_excludes
+from codemender_agent.vcs.github import check_remote_branch_exists
+from codemender_agent.vcs.github import create_pull_request
+from codemender_agent.vcs.github import get_default_branch
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -249,6 +258,8 @@ def run_sequential_pipeline() -> None:
           env=scrubbed_env,
           check=False,
       )
+      for port in get_cleanup_ports():
+        free_port(port)
 
       if verify_res.returncode == 0 and is_finding_verified(
           state_db_path, finding_id
@@ -290,6 +301,8 @@ def run_sequential_pipeline() -> None:
         env=scrubbed_env,
         check=False,
     )
+    for port in get_cleanup_ports():
+      free_port(port)
 
     finding_status = get_finding_status(state_db_path, finding_id)
     if fix_res.returncode != 0 or finding_status != "FIXED":

@@ -196,13 +196,14 @@ def _process_finding(
         cwd=repo_dir,
     )
 
-    # Run find verify to ensure the finding is reproducible
     verify_res = run_command(
         [cm_binary, "find", "verify", finding_id, "--yes"],
         cwd=repo_dir,
         env=scrubbed_env,
         check=False,
     )
+    for port in get_cleanup_ports():
+      free_port(port)
 
     if verify_res.returncode == 0 and is_finding_verified(
         state_db_path, finding_id
@@ -231,6 +232,8 @@ def _process_finding(
       env=scrubbed_env,
       check=False,
   )
+  for port in get_cleanup_ports():
+    free_port(port)
 
   finding_status = get_finding_status(state_db_path, finding_id)
 

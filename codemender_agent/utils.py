@@ -1,7 +1,9 @@
 """System and Subprocess utilities for CodeMender Agent."""
 
+import fcntl
 from functools import wraps
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -77,20 +79,52 @@ def run_command(
       bufsize=1,  # Line-buffered
   )
 
+  # Assert process.stdout is not None for type-checking safety
+  assert process.stdout is not None
+
+  # Make stdout non-blocking to prevent hangs on leaked background process pipes
+  fd = process.stdout.fileno()
+  fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+  fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
   # Write start delimiter
   sys.stdout.write(f"\n>>> [SUBPROCESS START] {cmd_str_short} >>>\n")
   sys.stdout.flush()
 
   stdout_lines = []
-  # Stream output line-by-line in real-time
-  assert process.stdout is not None
-  for line in iter(process.stdout.readline, ""):
-    sys.stdout.write(line)
-    sys.stdout.flush()
-    stdout_lines.append(line)
+  
+  # Stream output line-by-line in a non-blocking poll loop
+  while True:
+    try:
+      line = process.stdout.readline()
+      if line:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        stdout_lines.append(line)
+        continue
+    except (IOError, ValueError):
+      # No data currently available
+      pass
+
+    # Check if the main process has terminated
+    return_code = process.poll()
+    if return_code is not None:
+      # Read any last bytes remaining in the buffer before breaking
+      while True:
+        try:
+          line = process.stdout.readline()
+          if not line:
+            break
+          sys.stdout.write(line)
+          sys.stdout.flush()
+          stdout_lines.append(line)
+        except (IOError, ValueError):
+          break
+      break
+
+    time.sleep(0.1)
 
   process.stdout.close()
-  return_code = process.wait()
   full_stdout = "".join(stdout_lines)
 
   # Write end delimiter
