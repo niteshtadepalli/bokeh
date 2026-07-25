@@ -234,7 +234,7 @@ We will create a new directory `terraform/gcp/` containing the following files:
     targeted at the workflow execution API.
 *   Configured with a JSON payload (`argument` field) that dynamically passes
     the Terraform-provisioned resource names (Cloud Run Job name, GCS Bucket
-    name) to the Workflow.
+    name) and Git scan repository details (`repo_url`, `build_command`, and `scan_target` configured in variables).
 *   Set to `paused = true` by default.
 *   Uses a dedicated Scheduler Service Account with `roles/workflows.invoker`
     permission on the workflow.
