@@ -64,16 +64,20 @@ resource "google_service_account_iam_member" "runner_token_creator" {
   member             = "serviceAccount:${google_service_account.runner_sa.email}"
 }
 
+locals {
+  log_writer_service_accounts = {
+    "runner"    = "serviceAccount:${google_service_account.runner_sa.email}"
+    "workflows" = "serviceAccount:${google_service_account.workflow_sa.email}"
+    "scheduler" = "serviceAccount:${google_service_account.scheduler_sa.email}"
+  }
+}
+
 # Logging Writer IAM for Runner, Workflow, and Scheduler Service Accounts
 resource "google_project_iam_member" "service_accounts_log_writer" {
-  for_each = toset([
-    "serviceAccount:${google_service_account.runner_sa.email}",
-    "serviceAccount:${google_service_account.workflow_sa.email}",
-    "serviceAccount:${google_service_account.scheduler_sa.email}",
-  ])
-  project = var.project_id
-  role    = "roles/logging.logWriter"
-  member  = each.key
+  for_each = local.log_writer_service_accounts
+  project  = var.project_id
+  role     = "roles/logging.logWriter"
+  member   = each.value
 }
 
 # Project-level IAM binding for Workflow SA to run jobs, poll operations, and monitor executions
