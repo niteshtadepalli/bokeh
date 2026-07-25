@@ -213,10 +213,14 @@ echo -n "ghs_your_github_app_installation_token" | \
 
 --------------------------------------------------------------------------------
 
-### Step 5: Execute Parallel Scan Workflow
+### Step 5: Execute Parallel Scan Workflow (Supports Multiple Repositories)
 
-Trigger an execution of the `codemender-coordinator` Cloud Workflow for your
-target repository:
+The provisioned Cloud Workflows coordinator is **fully reusable** and stateless.
+You can use this single deployment to scan **different repositories** on-demand
+by simply passing the target repository's URL and build command in the execution
+data payload.
+
+#### Example A: Scan Repository 1 (NodeJS App)
 
 ```bash
 export REGION="us-central1"
@@ -233,6 +237,24 @@ gcloud workflows run ${WORKFLOW_NAME} \
       "build_command": "npm install && npm test",
       "scan_target": ".",
       "max_tasks": 20
+    }'
+```
+
+#### Example B: Scan Repository 2 (Python App)
+
+To scan a completely different repository, run the command again with updated
+details:
+
+```bash
+gcloud workflows run ${WORKFLOW_NAME} \
+    --location=${REGION} \
+    --data='{
+      "job_name": "'"${JOB_NAME}"'",
+      "gcs_bucket": "'"${REPORTS_BUCKET}"'",
+      "repo_url": "https://github.com/your-org/flask-api.git",
+      "build_command": "pip install -r requirements.txt && pytest",
+      "scan_target": "src/",
+      "max_tasks": 10
     }'
 ```
 
@@ -257,7 +279,7 @@ gcloud workflows run ${WORKFLOW_NAME} \
 
 --------------------------------------------------------------------------------
 
-### Step 7: Enable Nightly Scheduled Runs
+### Step 7: Enable and Manage Nightly Scheduled Runs
 
 The provisioned Cloud Scheduler job is paused by default. To enable nightly
 automated scanning:
@@ -265,6 +287,47 @@ automated scanning:
 ```bash
 export SCHEDULER_JOB_NAME="$(cd terraform/gcp && terraform output -raw scheduler_job_name 2>/dev/null || echo codemender-nightly-scan)"
 gcloud scheduler jobs resume ${SCHEDULER_JOB_NAME} --location=${REGION}
+```
+
+#### A. How to Update the Default Scheduler Job target
+
+To update which repository or build command the default scheduler scans, run
+`gcloud scheduler jobs update http` with a revised JSON message body:
+
+```bash
+export PROJECT_ID=$(gcloud config get-value project)
+export SCHEDULER_JOB_NAME="$(cd terraform/gcp && terraform output -raw scheduler_job_name 2>/dev/null || echo codemender-nightly-scan)"
+
+# Update payload to point to a new repository
+gcloud scheduler jobs update http ${SCHEDULER_JOB_NAME} \
+    --location=${REGION} \
+    --message-body='{"argument":"{\"job_name\":\"codemender-test-runner\",\"gcs_bucket\":\"codemender-test-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/new-org/new-repo.git\",\"build_command\":\"npm install && npm test\",\"scan_target\":\".\"}"}'
+```
+
+#### B. How to Add a New Scheduled Job for a different Repository
+
+You can schedule scans for multiple repositories by registering additional
+scheduler jobs targeting the same Workflows instance.
+
+Run `gcloud scheduler jobs create http` using the provisioned scheduler Service
+Account:
+
+```bash
+export PROJECT_ID=$(gcloud config get-value project)
+export REGION="us-central1"
+export WORKFLOW_EXECUTION_URL="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/codemender-test-coordinator/executions"
+export SCHEDULER_SA="codemender-test-scheduler-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# Create a new scheduled trigger running at 3:00 AM UTC
+gcloud scheduler jobs create http codemender-second-repo-nightly \
+    --location=${REGION} \
+    --schedule="0 3 * * *" \
+    --time-zone="Etc/UTC" \
+    --uri=${WORKFLOW_EXECUTION_URL} \
+    --http-method="POST" \
+    --headers="Content-Type=application/json" \
+    --oauth-service-account-email=${SCHEDULER_SA} \
+    --message-body='{"argument":"{\"job_name\":\"codemender-test-runner\",\"gcs_bucket\":\"codemender-test-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/another-org/another-repo.git\",\"build_command\":\"python3 -m pip install . && pytest\",\"scan_target\":\".\"}"}'
 ```
 
 --------------------------------------------------------------------------------
@@ -287,3 +350,51 @@ gcloud scheduler jobs resume ${SCHEDULER_JOB_NAME} --location=${REGION}
     cd terraform/gcp
     terraform destroy
     ```
+
+--------------------------------------------------------------------------------
+
+## 5. Appendix: Pipeline Architectures (Shared vs. Isolated)
+
+When onboarding new repositories, you have two choices for how to organize your
+CodeMender pipeline infrastructure.
+
+### Shared Pipeline Model (Reusing the Same Workflow) - *Default & Recommended*
+
+Under this model, you deploy **one** Cloud Workflow and **one** Cloud Run Job.
+You scan different repositories on-demand by passing their Git URL and build
+commands dynamically in the trigger payload (`gcloud workflows run` or unique
+Scheduled nightly tasks).
+
+*   **When to Use**:
+    *   Scanning multiple repositories belonging to **the same team or
+        organization**.
+    *   Repositories use **similar programming languages/tech stacks** (e.g. all
+        NodeJS).
+    *   You want **instant onboarding** (no new GCP resources to deploy).
+*   **Tradeoffs**:
+    *   **Shared IAM Context**: All repository scans share the same Service
+        Account and GCS bucket access. A vulnerability in one repo's test script
+        could theoretically read reports of another repo.
+    *   **Container Bloat**: The runner container image must be updated to
+        install the language runtimes and compilers (NodeJS, Python, Go, Java,
+        etc.) required for all repositories.
+
+### Isolated Pipeline Model (Workflow & Runner Per Repo)
+
+Under this model, you run the Terraform deployment separately for each
+repository (e.g., using different `resource_prefix` values like
+`codemender-app-a`, `codemender-app-b`), provisioning a dedicated workflow,
+runner job, GCS reports bucket, and Service Account for each repository.
+
+*   **When to Use**:
+    *   Scanning repositories across **different business units, teams, or
+        customers** where tenant isolation is mandatory.
+    *   Scanning repositories with **untrusted validation scripts** where strict
+        sandboxing is critical.
+    *   Scanning repositories that require **specialized OS dependencies or
+        massive compile jobs** (allowing you to tailor CPU/RAM limits per repo).
+*   **Tradeoffs**:
+    *   **Deployment Overhead**: Requires deploying and maintaining multiple
+        Terraform state files, service accounts, and logging scopes.
+    *   **Secret Proliferation**: Each repository requires its own Secret
+        Manager instance for its individual access tokens.

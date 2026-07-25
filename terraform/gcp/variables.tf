@@ -84,20 +84,4 @@ variable "scheduler_cron" {
   default     = "0 2 * * *"
 }
 
-variable "scheduler_repo_url" {
-  type        = string
-  description = "The Git repository URL to scan on the nightly schedule."
-  default     = ""
-}
 
-variable "scheduler_build_command" {
-  type        = string
-  description = "The build command to run before vulnerability verification on schedule."
-  default     = "npm install"
-}
-
-variable "scheduler_scan_target" {
-  type        = string
-  description = "The target directory to scan inside the repository on schedule."
-  default     = "."
-}

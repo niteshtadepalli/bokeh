@@ -16,9 +16,9 @@ resource "google_cloud_scheduler_job" "nightly_scan" {
         job_name      = google_cloud_run_v2_job.runner.name
         gcs_bucket    = google_storage_bucket.reports.name
         region        = var.region
-        repo_url      = var.scheduler_repo_url
-        build_command = var.scheduler_build_command
-        scan_target   = var.scheduler_scan_target
+        repo_url      = ""   # Update manually before running
+        build_command = ""   # Update manually before running
+        scan_target   = "."  # Update manually before running
       })
     }))
 
