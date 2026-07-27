@@ -325,6 +325,11 @@ def _save_and_upload_state(
 
     # Generate Signed URL for workers to download their partition
     part_url = generate_signed_url(bucket_name, part_blob, method="GET")
+    if not part_url:
+      logger.critical(
+          "Failed to generate GET signed URL for partition %d.", i
+      )
+      sys.exit(1)
     partition_urls.append(part_url)
 
     # Generate Signed URL for workers to upload their mutated DB shard
@@ -335,6 +340,11 @@ def _save_and_upload_state(
         method="PUT",
         content_type="application/octet-stream",
     )
+    if not upload_url:
+      logger.critical(
+          "Failed to generate PUT signed URL for worker %d.", i
+      )
+      sys.exit(1)
     upload_urls.append(upload_url)
 
   # Write and upload manifest with all Signed URLs included

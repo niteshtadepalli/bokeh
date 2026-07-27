@@ -373,7 +373,7 @@ Create a scheduled Cloud Scheduler trigger to run the sequential job nightly:
 gcloud scheduler jobs create http codemender-nightly-trigger \
     --location=us-central1 \
     --schedule="0 2 * * *" \
-    --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/codemender-scan:run" \
+    --uri="https://us-central1-run.googleapis.com/v2/projects/${PROJECT_ID}/locations/us-central1/jobs/codemender-scan:run" \
     --http-method=POST \
     --oauth-service-account-email="${SA_EMAIL}"
 ```

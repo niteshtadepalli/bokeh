@@ -22,15 +22,13 @@ main:
 
     - run_stage1_scan:
         try:
-          call: http.post
+          call: googleapis.run.v2.projects.locations.jobs.run
           args:
-            url: ${"https://" + region + "-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/" + project_id + "/jobs/" + job_name + ":run"}
-            auth:
-              type: OAuth2
+            name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + job_name}
             body:
               overrides:
                 taskCount: 1
-                timeoutSeconds: ${timeout_seconds}
+                timeout: ${string(timeout_seconds) + "s"}
                 containerOverrides:
                   - env:
                       - name: CODEMENDER_RUN_MODE
@@ -47,7 +45,9 @@ main:
                         value: ${scan_target}
                       - name: CODEMENDER_MAX_TASKS
                         value: ${string(max_tasks)}
-          result: stage1_response
+            connector_params:
+              skip_polling: true
+          result: stage1_operation
         retry:
           predicate: ${http.default_retry_predicate}
           max_retries: 3
@@ -57,12 +57,11 @@ main:
             multiplier: 2
 
     - wait_stage1:
-        call: wait_for_job_success
+        call: wait_for_operation
         args:
-          project_id: ${project_id}
-          execution_name: ${stage1_response.body.metadata.name}
-          region: ${region}
+          operation_name: ${stage1_operation.name}
           timeout_seconds: ${timeout_seconds}
+        result: stage1_execution
 
     - read_manifest:
         call: googleapis.storage.v1.objects.get
@@ -91,15 +90,13 @@ main:
           - num_workers: ${len(manifest.partition_urls)}
 
     - run_stage2_workers:
-        call: http.post
+        call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          url: ${"https://" + region + "-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/" + project_id + "/jobs/" + job_name + ":run"}
-          auth:
-            type: OAuth2
+          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + job_name}
           body:
             overrides:
               taskCount: ${num_workers}
-              timeoutSeconds: ${timeout_seconds}
+              timeout: ${string(timeout_seconds) + "s"}
               containerOverrides:
                 - env:
                     - name: CODEMENDER_RUN_MODE
@@ -120,27 +117,25 @@ main:
                       value: ${partition_urls_str}
                     - name: CODEMENDER_UPLOAD_URLS
                       value: ${upload_urls_str}
-        result: stage2_response
+          connector_params:
+            skip_polling: true
+        result: stage2_operation
 
     - wait_stage2:
-        call: wait_for_job_completion
+        call: wait_for_operation
         args:
-          project_id: ${project_id}
-          execution_name: ${stage2_response.body.metadata.name}
-          region: ${region}
+          operation_name: ${stage2_operation.name}
           timeout_seconds: ${timeout_seconds}
         result: stage2_execution
 
     - run_stage3_aggregate:
-        call: http.post
+        call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          url: ${"https://" + region + "-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/" + project_id + "/jobs/" + job_name + ":run"}
-          auth:
-            type: OAuth2
+          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + job_name}
           body:
             overrides:
               taskCount: 1
-              timeoutSeconds: ${timeout_seconds}
+              timeout: ${string(timeout_seconds) + "s"}
               containerOverrides:
                 - env:
                     - name: CODEMENDER_RUN_MODE
@@ -155,38 +150,38 @@ main:
                       value: ${build_command}
                     - name: CODEMENDER_TOTAL_WORKERS
                       value: ${string(num_workers)}
-        result: stage3_response
+          connector_params:
+            skip_polling: true
+        result: stage3_operation
 
     - wait_stage3:
-        call: wait_for_job_success
+        call: wait_for_operation
         args:
-          project_id: ${project_id}
-          execution_name: ${stage3_response.body.metadata.name}
-          region: ${region}
+          operation_name: ${stage3_operation.name}
           timeout_seconds: ${timeout_seconds}
+        result: stage3_execution
 
     - finish_workflow:
         return: "Workflow completed successfully."
 
-wait_for_job_completion:
-  params: [project_id, execution_name, region, timeout_seconds]
+wait_for_operation:
+  params: [operation_name, timeout_seconds]
   steps:
     - init_loop:
         assign:
           - elapsed: 0
           - sleep_interval: 60
-    - get_execution:
-        call: googleapis.run.v1.namespaces.executions.get
+    - get_operation:
+        call: googleapis.run.v2.projects.locations.operations.get
         args:
-          name: ${"namespaces/" + project_id + "/executions/" + execution_name}
-          location: ${region}
-        result: execution
+          name: ${operation_name}
+        result: operation
     - check_status:
         switch:
-          - condition: ${map.get(execution, ["status", "completionTime"]) != null}
-            return: ${execution}
+          - condition: ${default(map.get(operation, "done"), false) == true}
+            next: check_operation_result
           - condition: ${elapsed >= timeout_seconds}
-            raise: '${"Job execution " + execution_name + " timed out after " + string(timeout_seconds) + " seconds."}'
+            raise: '${"Operation " + operation_name + " timed out after " + string(timeout_seconds) + " seconds."}'
         next: wait_more
     - wait_more:
         call: sys.sleep
@@ -195,22 +190,13 @@ wait_for_job_completion:
     - increment_timer:
         assign:
           - elapsed: ${elapsed + sleep_interval}
-        next: get_execution
+        next: get_operation
 
-wait_for_job_success:
-  params: [project_id, execution_name, region, timeout_seconds]
-  steps:
-    - wait_done:
-        call: wait_for_job_completion
-        args:
-          project_id: ${project_id}
-          execution_name: ${execution_name}
-          region: ${region}
-          timeout_seconds: ${timeout_seconds}
-        result: execution
-    - check_success:
+    - check_operation_result:
         switch:
-          - condition: ${default(map.get(execution, ["status", "failedCount"]), 0) > 0}
-            raise: '${"Job execution failed: " + execution_name}'
+          - condition: ${map.get(operation, "error") != null}
+            raise: '${"Operation failed: " + operation.error.message}'
+          - condition: ${int(default(map.get(operation.response, "failedCount"), 0)) > 0}
+            raise: '${"Job execution failed with " + string(operation.response.failedCount) + " failed tasks."}'
     - return_result:
-        return: ${execution}
+        return: ${operation.response}

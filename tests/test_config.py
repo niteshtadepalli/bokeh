@@ -1,13 +1,17 @@
 """Unit tests for codemender_agent.config module."""
 
-import io
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+import unittest.mock
 
-from codemender_agent.config import get_github_credentials, get_scrubbed_env, inject_codemender_config
+from codemender_agent.config import get_cleanup_ports
+from codemender_agent.config import get_github_credentials
+from codemender_agent.config import get_scrubbed_env
+from codemender_agent.config import inject_codemender_config
 import yaml
+
+
 
 
 class TestConfig(unittest.TestCase):
@@ -23,7 +27,7 @@ class TestConfig(unittest.TestCase):
         "GITHUB_SECRET": "secret_github",
         "CUSTOM_VAR": "keep_me",
     }
-    with patch.dict(os.environ, test_env, clear=True):
+    with unittest.mock.patch.dict(os.environ, test_env, clear=True):
       scrubbed = get_scrubbed_env()
       self.assertIn("PATH", scrubbed)
       self.assertIn("CUSTOM_VAR", scrubbed)
@@ -39,7 +43,7 @@ class TestConfig(unittest.TestCase):
         "GITHUB_REPO_URL": "https://github.com/my-org/my-repo.git",
         "GITHUB_TOKEN": "valid_token",
     }
-    with patch.dict(os.environ, test_env, clear=True):
+    with unittest.mock.patch.dict(os.environ, test_env, clear=True):
       repo_url, token = get_github_credentials()
       self.assertEqual(repo_url, "https://github.com/my-org/my-repo.git")
       self.assertEqual(token, "valid_token")
@@ -55,7 +59,7 @@ class TestConfig(unittest.TestCase):
         with open(os.path.join(repo_dir, ".codemender.yaml"), "w") as f:
           yaml.dump(local_config, f)
 
-        with patch("os.path.expanduser", return_value=temp_home):
+        with unittest.mock.patch("os.path.expanduser", return_value=temp_home):
           inject_codemender_config(repo_dir)
 
           out_config = os.path.join(temp_home, ".codemender", "config.yaml")
@@ -66,6 +70,29 @@ class TestConfig(unittest.TestCase):
 
           self.assertEqual(data["build"]["command"], "npm run test:security")
           self.assertFalse(data["tools"]["confirm_commands"])
+
+  def test_get_cleanup_ports_default(self):
+    """Verify get_cleanup_ports returns default list when env is unset."""
+    with unittest.mock.patch.dict(os.environ, {}, clear=True):
+      ports = get_cleanup_ports()
+      self.assertEqual(ports, [3000, 3001, 5000, 8000, 8080, 8081, 9000])
+
+  def test_get_cleanup_ports_override(self):
+    """Verify get_cleanup_ports parses comma-separated override list."""
+    test_env = {"CODEMENDER_CLEANUP_PORTS": "3000, 8080, 9999"}
+    with unittest.mock.patch.dict(os.environ, test_env, clear=True):
+      ports = get_cleanup_ports()
+      self.assertEqual(ports, [3000, 8080, 9999])
+
+  def test_get_cleanup_ports_invalid_fallback(self):
+    """Verify get_cleanup_ports falls back to default on parse errors."""
+    test_env = {"CODEMENDER_CLEANUP_PORTS": "3000, abc, 9999"}
+    with unittest.mock.patch.dict(os.environ, test_env, clear=True):
+      ports = get_cleanup_ports()
+      self.assertEqual(ports, [3000, 3001, 5000, 8000, 8080, 8081, 9000])
+
+
+
 
 
 if __name__ == "__main__":
