@@ -18,11 +18,13 @@ variable "resource_prefix" {
 variable "reports_bucket_name" {
   type        = string
   description = "Name of the GCS bucket for scan reports."
+  default     = ""
 }
 
 variable "releases_bucket_name" {
   type        = string
   description = "Name of the GCS bucket for binary releases."
+  default     = ""
 }
 
 variable "runner_cpu" {

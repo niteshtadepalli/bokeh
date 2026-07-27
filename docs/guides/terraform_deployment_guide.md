@@ -124,14 +124,12 @@ export PREFIX="codemender-dev"  # <-- Set your environment prefix here
 # Generate terraform.tfvars inside terraform/gcp/
 cat <<EOF > terraform.tfvars
 project_id           = "${PROJECT_ID}"
-region               = "us-central1"
-resource_prefix      = "${PREFIX}"
-reports_bucket_name  = "${PREFIX}-reports-${PROJECT_ID}"
-releases_bucket_name = "${PREFIX}-releases-${PROJECT_ID}"
-runner_cpu           = "2"      # Cloud Run Job vCPU limit ("1", "2", "4", "8")
-runner_memory        = "4Gi"    # Cloud Run Job RAM limit ("2Gi", "4Gi", "8Gi", "16Gi")
-create_vpc_and_nat   = false
-scheduler_cron       = "0 2 * * *"
+region               = "us-central1"    # Target GCP region for all resources
+resource_prefix      = "${PREFIX}"      # Base prefix used to name all created resources
+runner_cpu           = "2"              # Cloud Run Job vCPU limit ("1", "2", "4", "8")
+runner_memory        = "4Gi"            # Cloud Run Job RAM limit ("2Gi", "4Gi", "8Gi", "16Gi")
+create_vpc_and_nat   = false            # Set to true to create a private VPC and Cloud NAT for egress
+scheduler_cron       = "0 2 * * *"      # Cron expression for the nightly scheduled run
 EOF
 ```
 
@@ -416,3 +414,70 @@ runner job, GCS reports bucket, and Service Account for each repository.
         Terraform state files, service accounts, and logging scopes.
     *   **Secret Proliferation**: Each repository requires its own Secret
         Manager instance for its individual access tokens.
+
+--------------------------------------------------------------------------------
+
+## 5. Deploying Multiple Environments (Advanced)
+
+If you need to deploy multiple isolated environments side-by-side (e.g.,
+`codemender-dev` and `codemender-prod`) using the same Terraform configuration,
+you should **not** simply overwrite `terraform.tfvars` and re-run `terraform
+apply`. Doing so will destroy your first environment and replace it with the new
+one.
+
+Instead, use **Terraform Workspaces** to manage separate state files for each
+environment.
+
+### 1. Create a New Terraform Workspace
+
+Navigate to your `terraform/gcp` directory and create a new workspace for your
+second environment:
+
+```bash
+cd codemender-agent/terraform/gcp
+terraform workspace new prod  # Name it whatever you like (e.g., prod, testing)
+```
+
+### 2. Create an Environment-Specific Variable File
+
+Create a new file specifically for this environment, for example `prod.tfvars`:
+
+```bash
+export PROJECT_ID=$(gcloud config get-value project)
+export PREFIX="codemender-prod"  # <-- Your second environment prefix
+
+cat <<VARS > prod.tfvars
+project_id           = "${PROJECT_ID}"
+region               = "us-central1"    # Target GCP region for all resources
+resource_prefix      = "${PREFIX}"      # Base prefix used to name all created resources
+runner_cpu           = "2"              # Cloud Run Job vCPU limit ("1", "2", "4", "8")
+runner_memory        = "4Gi"            # Cloud Run Job RAM limit ("2Gi", "4Gi", "8Gi", "16Gi")
+create_vpc_and_nat   = false            # Set to true to create a private VPC and Cloud NAT for egress
+scheduler_cron       = "0 2 * * *"      # Cron expression for the nightly scheduled run
+VARS
+```
+
+### 3. Deploy the Second Environment
+
+Run `terraform apply` but tell it to use your new variable file:
+
+```bash
+terraform apply -var-file="prod.tfvars"
+```
+
+### 4. Repeat Application Setup Steps
+
+Because this is a completely new set of infrastructure, you **must** repeat the
+application setup steps (Steps 2-4) for the new prefix:
+
+1.  **Upload the Binary (Step 2)**: Upload your `cm-linux` binary to the new
+    `${PREFIX}-releases-${PROJECT_ID}` bucket.
+2.  **Build the Container (Step 3)**: Re-run Cloud Build so the container is
+    pushed to the new environment's Artifact Registry.
+3.  **Populate Secrets (Step 4)**: Add the GitHub Token to the new
+    `${PREFIX}-github-token` secret in Secret Manager.
+
+> [!TIP]
+> **Switching Environments**: To switch back to your first environment
+> later, run `terraform workspace select default` and then run `terraform apply`
+> (which will automatically use your original `terraform.tfvars`).
