@@ -1,7 +1,8 @@
 resource "google_cloud_run_v2_job" "runner" {
-  name     = "${var.resource_prefix}-runner"
-  location = var.region
-  project  = var.project_id
+  name                = "${var.resource_prefix}-runner"
+  location            = var.region
+  project             = var.project_id
+  deletion_protection = false
 
   template {
     template {
