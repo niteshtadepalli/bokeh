@@ -5,8 +5,6 @@ mock_provider "google" {}
 variables {
   project_id           = "test-project-123"
   region               = "us-central1"
-  reports_bucket_name  = "test-reports-bucket"
-  releases_bucket_name = "test-releases-bucket"
 }
 
 run "vpc_disabled_default" {

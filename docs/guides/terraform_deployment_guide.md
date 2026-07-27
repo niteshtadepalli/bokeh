@@ -170,22 +170,22 @@ gcloud storage cp /path/to/cm-linux gs://${RELEASES_BUCKET}/latest/cm
 
 --------------------------------------------------------------------------------
 
-### Step 3: Build & Push Base Docker Container Image
+### Step 3: Build, Push & Deploy Base Docker Container Image
 
 Return to the repository root directory (`codemender-agent/`) and build the
-runner container image using Cloud Build (which fetches `cm` from GCS Releases
-and pushes the container directly to the Artifact Registry repository configured
-by Terraform):
+runner container image using Cloud Build (which fetches `cm` from GCS Releases,
+pushes the container to Artifact Registry, and updates the Cloud Run Job):
 
 ```bash
 cd ../..
 
 export RELEASES_BUCKET="$(cd terraform/gcp && terraform output -raw releases_bucket_name)"
 export REPO_NAME="$(cd terraform/gcp && terraform output -raw runner_job_name 2>/dev/null || echo codemender-runner)"
+export REGION="$(cd terraform/gcp && terraform output -raw region 2>/dev/null || echo us-central1)"
 
-# Build and push container image to Artifact Registry
+# Build and push container image to Artifact Registry, and deploy to Cloud Run
 gcloud builds submit --config=cloudbuild.yaml \
-    --substitutions=_RELEASES_BUCKET="${RELEASES_BUCKET}",_REPO_NAME="${REPO_NAME}" .
+    --substitutions=_RELEASES_BUCKET="${RELEASES_BUCKET}",_REPO_NAME="${REPO_NAME}",_REGION="${REGION}" .
 ```
 
 --------------------------------------------------------------------------------
@@ -472,8 +472,9 @@ application setup steps (Steps 2-4) for the new prefix:
 
 1.  **Upload the Binary (Step 2)**: Upload your `cm-linux` binary to the new
     `${PREFIX}-releases-${PROJECT_ID}` bucket.
-2.  **Build the Container (Step 3)**: Re-run Cloud Build so the container is
-    pushed to the new environment's Artifact Registry.
+2.  **Build and Deploy (Step 3)**: Re-run the `gcloud builds submit` command so the
+    container is built, pushed to the new environment's Artifact Registry, and
+    deployed to the new Cloud Run Job.
 3.  **Populate Secrets (Step 4)**: Add the GitHub Token to the new
     `${PREFIX}-github-token` secret in Secret Manager.
 

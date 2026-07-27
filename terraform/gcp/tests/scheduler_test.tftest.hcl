@@ -5,8 +5,6 @@ variables {
   project_id           = "test-project-123"
   region               = "us-central1"
   resource_prefix      = "test-sched"
-  reports_bucket_name  = "test-reports-bucket"
-  releases_bucket_name = "test-releases-bucket"
   scheduler_cron       = "0 3 * * *"
 }
 

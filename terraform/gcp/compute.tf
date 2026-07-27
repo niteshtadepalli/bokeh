@@ -8,7 +8,9 @@ resource "google_cloud_run_v2_job" "runner" {
       service_account = google_service_account.runner_sa.email
 
       containers {
-        image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.docker_repo.repository_id}/orchestrator:latest"
+        # Use a placeholder image initially so Terraform can provision the job before Cloud Build runs.
+        # The actual image is deployed out-of-band via Cloud Build (see cloudbuild.yaml).
+        image = "us-docker.pkg.dev/cloudrun/container/job:latest"
 
         resources {
           limits = {
@@ -36,6 +38,12 @@ resource "google_cloud_run_v2_job" "runner" {
         }
       }
     }
+  }
+
+  lifecycle {
+    ignore_changes = [
+      template[0].template[0].containers[0].image
+    ]
   }
 
   depends_on = [

@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+import unittest.mock
 
 from codemender_agent.runners.worker import run_worker_pipeline
 
@@ -15,7 +15,7 @@ class TestWorkerRunner(unittest.TestCase):
     self.temp_dir = tempfile.TemporaryDirectory()
     self.workspace_dir = self.temp_dir.name
 
-    self.env_patcher = patch.dict(
+    self.env_patcher = unittest.mock.patch.dict(
         os.environ,
         {
             "CODEMENDER_WORKER_INDEX": "0",
@@ -35,16 +35,16 @@ class TestWorkerRunner(unittest.TestCase):
     self.env_patcher.stop()
     self.temp_dir.cleanup()
 
-  @patch("codemender_agent.runners.worker.run_command")
-  @patch("codemender_agent.runners.worker.download_from_url")
-  @patch("codemender_agent.runners.worker.upload_to_url")
-  @patch("codemender_agent.runners.worker.check_remote_branch_exists")
-  @patch("codemender_agent.runners.worker.create_pull_request")
-  @patch("codemender_agent.runners.worker.is_duplicate_pr")
-  @patch("codemender_agent.runners.worker.is_finding_verified")
-  @patch("codemender_agent.runners.worker.get_finding_status")
-  @patch("tarfile.open")
-  @patch("shutil.which")
+  @unittest.mock.patch("codemender_agent.runners.worker.run_command")
+  @unittest.mock.patch("codemender_agent.runners.worker.download_from_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.upload_to_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.check_remote_branch_exists")
+  @unittest.mock.patch("codemender_agent.runners.worker.create_pull_request")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_duplicate_pr")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_finding_verified")
+  @unittest.mock.patch("codemender_agent.runners.worker.get_finding_status")
+  @unittest.mock.patch("tarfile.open")
+  @unittest.mock.patch("shutil.which")
   def test_worker_pipeline_success(
       self,
       mock_which,
@@ -77,7 +77,7 @@ class TestWorkerRunner(unittest.TestCase):
     mock_download_from_url.side_effect = download_side_effect
     mock_upload_to_url.return_value = True
 
-    mock_cm_report = MagicMock()
+    mock_cm_report = unittest.mock.MagicMock()
     mock_cm_report.stdout = json.dumps([
         {
             "FindingID": "fid-1",
@@ -91,11 +91,11 @@ class TestWorkerRunner(unittest.TestCase):
     ])
     mock_cm_report.returncode = 0
 
-    mock_git_status = MagicMock()
+    mock_git_status = unittest.mock.MagicMock()
     mock_git_status.stdout = " M db.py"
     mock_git_status.returncode = 0
 
-    mock_default = MagicMock()
+    mock_default = unittest.mock.MagicMock()
     mock_default.stdout = ""
     mock_default.returncode = 0
 
@@ -135,16 +135,16 @@ class TestWorkerRunner(unittest.TestCase):
         "http://signed-url/upload_0.db"
     )
 
-  @patch("codemender_agent.runners.worker.run_command")
-  @patch("codemender_agent.runners.worker.download_from_url")
-  @patch("codemender_agent.runners.worker.upload_to_url")
-  @patch("codemender_agent.runners.worker.check_remote_branch_exists")
-  @patch("codemender_agent.runners.worker.create_pull_request")
-  @patch("codemender_agent.runners.worker.is_duplicate_pr")
-  @patch("codemender_agent.runners.worker.is_finding_verified")
-  @patch("codemender_agent.runners.worker.get_finding_status")
-  @patch("tarfile.open")
-  @patch("shutil.which")
+  @unittest.mock.patch("codemender_agent.runners.worker.run_command")
+  @unittest.mock.patch("codemender_agent.runners.worker.download_from_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.upload_to_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.check_remote_branch_exists")
+  @unittest.mock.patch("codemender_agent.runners.worker.create_pull_request")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_duplicate_pr")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_finding_verified")
+  @unittest.mock.patch("codemender_agent.runners.worker.get_finding_status")
+  @unittest.mock.patch("tarfile.open")
+  @unittest.mock.patch("shutil.which")
   def test_worker_pipeline_idempotency_skip(
       self,
       mock_which,
@@ -158,6 +158,7 @@ class TestWorkerRunner(unittest.TestCase):
       mock_download_from_url,
       mock_run_cmd,
   ):
+    del mock_get_finding_status
     mock_which.return_value = "/bin/cm"
     mock_check_remote_branch_exists.return_value = True
     mock_is_duplicate_pr.return_value = False
@@ -176,7 +177,7 @@ class TestWorkerRunner(unittest.TestCase):
     mock_download_from_url.side_effect = download_side_effect
     mock_upload_to_url.return_value = True
 
-    mock_cm_report = MagicMock()
+    mock_cm_report = unittest.mock.MagicMock()
     mock_cm_report.stdout = json.dumps([
         {
             "FindingID": "fid-1",
@@ -190,7 +191,7 @@ class TestWorkerRunner(unittest.TestCase):
     ])
     mock_cm_report.returncode = 0
 
-    mock_default = MagicMock()
+    mock_default = unittest.mock.MagicMock()
     mock_default.stdout = ""
     mock_default.returncode = 0
 

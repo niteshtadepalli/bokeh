@@ -3,6 +3,11 @@ output "nat_ip" {
   value       = var.create_vpc_and_nat ? google_compute_address.nat_ip[0].address : null
 }
 
+output "region" {
+  description = "GCP Region for all resources."
+  value       = var.region
+}
+
 output "reports_bucket_url" {
   description = "GCS bucket URL for scan reports."
   value       = google_storage_bucket.reports.url

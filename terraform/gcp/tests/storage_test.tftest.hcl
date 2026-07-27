@@ -49,3 +49,17 @@ run "storage_resources_custom_names" {
     error_message = "Releases bucket should use provided variable when specified."
   }
 }
+
+run "storage_iam_bindings" {
+  command = plan
+
+  assert {
+    condition     = length(google_project_iam_member.cloudbuild_run_developer) > 0
+    error_message = "Cloud Build SAs must be granted run.developer role on the project."
+  }
+
+  assert {
+    condition     = length(google_service_account_iam_member.cloudbuild_runner_sa_user) > 0
+    error_message = "Cloud Build SAs must be granted iam.serviceAccountUser role on the runner SA."
+  }
+}

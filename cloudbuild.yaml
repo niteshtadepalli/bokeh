@@ -6,7 +6,7 @@ steps:
       - '-c'
       - 'gcloud storage cp gs://${_RELEASES_BUCKET}/latest/cm ./cm'
 
-  # Step 2: Build the container image (copies the downloaded 'cm' file into /usr/local/bin)
+  # Step 2: Build the container image
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
@@ -14,10 +14,26 @@ steps:
       - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest'
       - '.'
 
+  # Step 3: Push the container image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest'
+
+  # Step 4: Update the Cloud Run Job with the newly pushed image
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - '${_REPO_NAME}'
+      - '--image'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest'
+      - '--region'
+      - '${_REGION}'
+
 substitutions:
   _RELEASES_BUCKET: 'codemender-releases'
   _REPO_NAME: 'codemender-runner'
   _REGION: 'us-central1'
-
-images:
-  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest'
