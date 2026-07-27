@@ -1,5 +1,6 @@
 data "google_project" "project" {
   project_id = var.project_id
+  depends_on = [google_project_service.enabled_services["cloudresourcemanager.googleapis.com"]]
 }
 
 # GCS Bucket for HTML & Partition Scan Reports
@@ -62,10 +63,11 @@ locals {
 
 # Grant Storage Object Viewer to both legacy & compute default Cloud Build service accounts (for source tarballs and releases)
 resource "google_project_iam_member" "cloudbuild_storage_viewer" {
-  for_each = local.cloudbuild_service_accounts
-  project  = var.project_id
-  role     = "roles/storage.objectViewer"
-  member   = each.value
+  for_each   = local.cloudbuild_service_accounts
+  project    = var.project_id
+  role       = "roles/storage.objectViewer"
+  member     = each.value
+  depends_on = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
 # Grant Artifact Registry Writer to Cloud Build SAs for container image pushes
@@ -80,10 +82,11 @@ resource "google_artifact_registry_repository_iam_member" "cloudbuild_ar_writer"
 
 # Grant Cloud Logging Writer to Cloud Build SAs for build log execution
 resource "google_project_iam_member" "cloudbuild_log_writer" {
-  for_each = local.cloudbuild_service_accounts
-  project  = var.project_id
-  role     = "roles/logging.logWriter"
-  member   = each.value
+  for_each   = local.cloudbuild_service_accounts
+  project    = var.project_id
+  role       = "roles/logging.logWriter"
+  member     = each.value
+  depends_on = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
 # Grant Releases Bucket Viewer to Cloud Build SAs
@@ -96,10 +99,11 @@ resource "google_storage_bucket_iam_member" "cloudbuild_releases_viewer" {
 
 # Grant Cloud Run Developer to Cloud Build SAs so they can update the Cloud Run Job image
 resource "google_project_iam_member" "cloudbuild_run_developer" {
-  for_each = local.cloudbuild_service_accounts
-  project  = var.project_id
-  role     = "roles/run.developer"
-  member   = each.value
+  for_each   = local.cloudbuild_service_accounts
+  project    = var.project_id
+  role       = "roles/run.developer"
+  member     = each.value
+  depends_on = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
 # Grant Service Account User to Cloud Build SAs on the Runner SA

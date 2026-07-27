@@ -274,6 +274,23 @@ gcloud workflows run ${WORKFLOW_NAME} \
     }'
 ```
 
+#### Supported Workflow Arguments (`--data`)
+
+When triggering the workflow, you pass a JSON object to the `--data` flag. The
+coordinator unpacks these values and injects them as environment variables into
+the Cloud Run jobs:
+
+JSON Field        | Required | Maps to Environment Variable  | Description
+:---------------- | :------- | :---------------------------- | :----------
+`job_name`        | Yes      | N/A (Cloud Run resource name) | The name of the provisioned Cloud Run job.
+`gcs_bucket`      | Yes      | `CODEMENDER_GCS_BUCKET`       | The GCS bucket to use for state and the final report.
+`repo_url`        | Yes      | `GITHUB_REPO_URL`             | The GitHub HTTPS URL of the repository to scan.
+`build_command`   | No       | `CODEMENDER_BUILD_COMMAND`    | Your custom test command. Defaults to `.codemender.yaml` if omitted.
+`scan_target`     | No       | `CODEMENDER_SCAN_TARGET`      | Directory or directories to scan. Defaults to `.` (the whole repo). Examples: `"src/"` or `"src/;lib/;cmd/"`.
+`max_tasks`       | No       | `CODEMENDER_MAX_TASKS`        | Max findings per worker. Defaults to `20`.
+`cleanup_ports`   | No       | `CODEMENDER_CLEANUP_PORTS`    | Comma-separated ports to kill before testing.
+`force_overwrite` | No       | `CODEMENDER_FORCE_OVERWRITE`  | Pass `"true"` to bypass PR spam prevention and force re-run fixes.
+
 --------------------------------------------------------------------------------
 
 ### Step 6: Monitor Execution & Retrieve Summary Report
@@ -472,9 +489,9 @@ application setup steps (Steps 2-4) for the new prefix:
 
 1.  **Upload the Binary (Step 2)**: Upload your `cm-linux` binary to the new
     `${PREFIX}-releases-${PROJECT_ID}` bucket.
-2.  **Build and Deploy (Step 3)**: Re-run the `gcloud builds submit` command so the
-    container is built, pushed to the new environment's Artifact Registry, and
-    deployed to the new Cloud Run Job.
+2.  **Build and Deploy (Step 3)**: Re-run the `gcloud builds submit` command so
+    the container is built, pushed to the new environment's Artifact Registry,
+    and deployed to the new Cloud Run Job.
 3.  **Populate Secrets (Step 4)**: Add the GitHub Token to the new
     `${PREFIX}-github-token` secret in Secret Manager.
 
