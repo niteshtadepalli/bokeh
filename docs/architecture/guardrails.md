@@ -125,12 +125,16 @@ To build this Minimum Viable Product, we will create the following files in the
         successful fix (instead of waiting for the end of the entire loop), the
         orchestrator ensures partial progress is preserved if the job times out
         or fails midway.
-    *   **PR Spam Prevention:** Generating a stable branch name using the stable
-        finding fingerprint (e.g.,
-        `codemender/fix-<vulntype>-<fingerprint[:8]>`) and checking if a
-        branch or PR already exists on remote before running `cm fix` to ensure
-        idempotency.
-
+    *   **PR Spam Prevention (Sliding Window Deduplication):** Because
+        LLM-extracted code snippets fluctuate between scans (altering the
+        default fingerprint), the orchestrator ignores the upstream fingerprint
+        and generates a deterministic branch hash using `filePath`, `vulnType`,
+        and `startLine`. To absorb minor LLM line number jitter and support
+        multiple distinct vulnerabilities in the same file, the orchestrator
+        also uses the GitHub API to query open PRs. It checks if an open PR
+        exists for the same file and vulnerability type within a 15-line sliding
+        window of the new finding's `startLine`. If found, it skips fixing to
+        guarantee true idempotency and zero PR spam.
     *   Pushing the fixed branch directly to remote and creating the PR via the
         GitHub REST API immediately after each fix is generated using the
         scrubbed token.

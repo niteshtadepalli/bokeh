@@ -1,11 +1,12 @@
 """GitHub REST API integration for CodeMender Agent."""
 
 import logging
+import re
 from typing import Optional
 
+import requests
 from codemender_agent.utils import retry_on_exception, run_command
 from codemender_agent.vcs.git import get_git_auth_header, parse_repo_owner_and_name, sanitize_git_url
-import requests
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -86,6 +87,35 @@ def get_default_branch(token: str, owner: str, repo: str) -> str:
         "Could not determine default branch via API after retries: %s", e
     )
   return "main"
+
+
+@retry_on_exception(max_tries=3)
+def is_duplicate_pr(repo_url: str, token: str, file_path: str, vuln_type: str, start_line: int) -> bool:
+  """Checks if an open PR already exists for the same vulnerability near the same line."""
+  sanitized_url = sanitize_git_url(repo_url)
+  owner, repo = parse_repo_owner_and_name(sanitized_url)
+  
+  url = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page=100"
+  headers = {
+      "Authorization": f"Bearer {token}",
+      "Accept": "application/vnd.github+json",
+  }
+  resp = requests.get(url, headers=headers, timeout=15)
+  resp.raise_for_status()
+  
+  prs = resp.json()
+  for pr in prs:
+    body = pr.get("body") or ""
+    # Check if this PR is from CodeMender for the same file and vuln type
+    if "CodeMender Security Fix" in body and file_path in body and vuln_type in body:
+      match = re.search(r"\*\*Start Line\*\*:\s*(\d+)", body, re.IGNORECASE)
+      if match:
+        existing_line = int(match.group(1))
+        if abs(existing_line - start_line) <= 15:
+          logger.info("Found existing PR (%s) covering %s in %s near line %d.", pr.get("html_url"), vuln_type, file_path, start_line)
+          return True
+  return False
+
 
 
 @retry_on_exception(max_tries=5, initial_delay=3, backoff_factor=2)

@@ -40,6 +40,7 @@ class TestWorkerRunner(unittest.TestCase):
   @patch("codemender_agent.runners.worker.upload_to_url")
   @patch("codemender_agent.runners.worker.check_remote_branch_exists")
   @patch("codemender_agent.runners.worker.create_pull_request")
+  @patch("codemender_agent.runners.worker.is_duplicate_pr")
   @patch("codemender_agent.runners.worker.is_finding_verified")
   @patch("codemender_agent.runners.worker.get_finding_status")
   @patch("tarfile.open")
@@ -50,6 +51,7 @@ class TestWorkerRunner(unittest.TestCase):
       _mock_tarfile_open,
       mock_get_finding_status,
       mock_is_finding_verified,
+      mock_is_duplicate_pr,
       mock_create_pr,
       mock_check_remote_branch_exists,
       mock_upload_to_url,
@@ -58,6 +60,7 @@ class TestWorkerRunner(unittest.TestCase):
   ):
     mock_which.return_value = "/bin/cm"
     mock_check_remote_branch_exists.return_value = False
+    mock_is_duplicate_pr.return_value = False
     mock_is_finding_verified.return_value = True
     mock_get_finding_status.return_value = "FIXED"
     mock_create_pr.return_value = True
@@ -137,6 +140,7 @@ class TestWorkerRunner(unittest.TestCase):
   @patch("codemender_agent.runners.worker.upload_to_url")
   @patch("codemender_agent.runners.worker.check_remote_branch_exists")
   @patch("codemender_agent.runners.worker.create_pull_request")
+  @patch("codemender_agent.runners.worker.is_duplicate_pr")
   @patch("codemender_agent.runners.worker.is_finding_verified")
   @patch("codemender_agent.runners.worker.get_finding_status")
   @patch("tarfile.open")
@@ -147,6 +151,7 @@ class TestWorkerRunner(unittest.TestCase):
       _mock_tarfile_open,
       mock_get_finding_status,
       mock_is_finding_verified,
+      mock_is_duplicate_pr,
       mock_create_pr,
       mock_check_remote_branch_exists,
       mock_upload_to_url,
@@ -155,6 +160,7 @@ class TestWorkerRunner(unittest.TestCase):
   ):
     mock_which.return_value = "/bin/cm"
     mock_check_remote_branch_exists.return_value = True
+    mock_is_duplicate_pr.return_value = False
     mock_is_finding_verified.return_value = False
     mock_create_pr.return_value = True
 
