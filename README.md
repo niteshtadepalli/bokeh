@@ -113,6 +113,9 @@ following dedicated markdown guides in the `docs/` folder:
 *   🛡️
     **[Implementation Guardrails & Design](docs/architecture/guardrails.md)**:
     Architecture specifications, security constraints, and execution rules.
+*   ⚙️
+    **[Configuration Reference](docs/guides/configuration_reference.md)**:
+    Comprehensive list of all environment variables, flags, and `codemender.yaml` settings.
 *   ⚡
     **[Parallelization Design Specification](docs/architecture/parallelization_design.md)**:
     Source of Truth for multi-stage sharded parallel scanning across GCP and
