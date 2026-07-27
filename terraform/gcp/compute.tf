@@ -54,12 +54,13 @@ resource "google_cloud_run_v2_job" "runner" {
 }
 
 resource "google_workflows_workflow" "coordinator" {
-  name            = "${var.resource_prefix}-coordinator"
-  region          = var.region
-  project         = var.project_id
-  description     = "Coordinates parallel CodeMender security scan and fix executions"
-  service_account = google_service_account.workflow_sa.id
-  source_contents = file("${path.module}/../../workflows/gcp_parallel_workflow.yaml")
+  name                = "${var.resource_prefix}-coordinator"
+  region              = var.region
+  project             = var.project_id
+  deletion_protection = false
+  description         = "Coordinates parallel CodeMender security scan and fix executions"
+  service_account     = google_service_account.workflow_sa.id
+  source_contents     = file("${path.module}/../../workflows/gcp_parallel_workflow.yaml")
 
   depends_on = [google_project_service.enabled_services]
 }
