@@ -2,18 +2,21 @@ resource "google_service_account" "runner_sa" {
   account_id   = "${var.resource_prefix}-runner-sa"
   display_name = "CodeMender Runner Service Account (${var.resource_prefix})"
   project      = var.project_id
+  depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
 resource "google_service_account" "workflow_sa" {
   account_id   = "${var.resource_prefix}-workflows-sa"
   display_name = "CodeMender Workflows Service Account (${var.resource_prefix})"
   project      = var.project_id
+  depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
 resource "google_service_account" "scheduler_sa" {
   account_id   = "${var.resource_prefix}-scheduler-sa"
   display_name = "CodeMender Scheduler Service Account (${var.resource_prefix})"
   project      = var.project_id
+  depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
 resource "google_project_iam_custom_role" "workflow_job_runner" {
@@ -21,6 +24,7 @@ resource "google_project_iam_custom_role" "workflow_job_runner" {
   title       = "CodeMender Workflow Job Runner (${var.resource_prefix})"
   description = "Allows Cloud Workflows to run and monitor Cloud Run Jobs for CodeMender (${var.resource_prefix})"
   project     = var.project_id
+  depends_on  = [google_project_service.enabled_services["iam.googleapis.com"]]
   permissions = [
     "run.jobs.run",
     "run.jobs.runWithOverrides",
