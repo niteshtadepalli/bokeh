@@ -33,3 +33,10 @@ resource "google_project_service" "compute_api" {
   service            = "compute.googleapis.com"
   disable_on_destroy = false
 }
+
+resource "google_project_service_identity" "workflows_sa" {
+  provider = google
+  project  = var.project_id
+  service  = "workflows.googleapis.com"
+  depends_on = [google_project_service.enabled_services["workflows.googleapis.com"]]
+}
