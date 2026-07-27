@@ -1,5 +1,6 @@
 data "google_project" "project" {
   project_id = var.project_id
+  depends_on = [google_project_service.enabled_services["cloudresourcemanager.googleapis.com"]]
 }
 
 # GCS Bucket for HTML & Partition Scan Reports
