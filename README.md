@@ -5,7 +5,7 @@ within an engineering team's own infrastructure (e.g., as a Google Cloud Run
 Job). It automates local vulnerability scanning, validation, automated patching
 via the CodeMender CLI (`cm`), and Pull Request generation on GitHub.
 
-> [!IMPORTANT] 
+> [!IMPORTANT]
 > **CodeMender Compatibility Warning**: This orchestrator was built
 > and validated on top of **CodeMender CLI version
 > `codemender-cli-v0.1.0-20260515-vMvg-916238397.zip`**. Since the CodeMender
@@ -106,9 +106,10 @@ following dedicated markdown guides in the `docs/` folder:
 *   📖 **[Local Run Guide](docs/guides/local_run.md)**: Steps to configure your
     developer workstation, install dependencies locally, and run the scanner
     manually for validation and quick debugging.
-*   🚀 **[Production Run & Deployment Guide](docs/guides/production_run.md)**:
+*   🚀
+    **[Automated Terraform Deployment Guide](docs/guides/terraform_deployment_guide.md)**:
     Step-by-step instructions to provision GCS buckets, configure IAM roles,
-    deploy Cloud Run Jobs, and automate daily scans using Cloud Scheduler.
+    deploy Cloud Run Jobs, and automate daily scans on GCP using Terraform.
 *   🛡️
     **[Implementation Guardrails & Design](docs/architecture/guardrails.md)**:
     Architecture specifications, security constraints, and execution rules.
@@ -169,6 +170,19 @@ and dedicated deployment files:
 │   └── e2e_test_local.py           # Mock local end-to-end integration test runner
 ├── workflows/
 │   └── gcp_parallel_workflow.yaml  # GCP Cloud Workflows Orchestration YAML
+├── terraform/                      # Automated infrastructure provisioning
+│   └── gcp/                        # Google Cloud Platform Terraform modules
+│       ├── apis.tf                 # GCP API enablement
+│       ├── compute.tf              # Cloud Run Jobs & Cloud Workflows definitions
+│       ├── iam.tf                  # Custom IAM roles and Service Accounts
+│       ├── outputs.tf              # Deployment outputs and resource URLs
+│       ├── provider.tf             # Terraform provider configuration
+│       ├── scheduler.tf            # Cloud Scheduler cron jobs
+│       ├── secret.tf               # Secret Manager for tokens
+│       ├── storage.tf              # GCS Buckets and Artifact Registry
+│       ├── variables.tf            # Configurable environment variables
+│       ├── vpc.tf                  # Serverless VPC Access & Cloud NAT (Optional)
+│       └── tests/                  # Terraform integration and unit tests (`terraform test`)
 └── docs/                           # Architectural specs, guides, and runbooks
 ```
 
