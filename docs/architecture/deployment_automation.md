@@ -68,7 +68,7 @@ graph TD
 
     %% Triggers
     Scheduler -->|Trigger with Payload| Workflow
-    Workflow -->|Coordinate Tasks (v2 API Async)| CR_Job
+    Workflow -->|"Coordinate Tasks (v2 API Async)"| CR_Job
 ```
 
 ### Key Technical Concepts:
@@ -152,18 +152,19 @@ We will create a new directory `terraform/gcp/` containing the following files:
 ### 3. `terraform/gcp/variables.tf`
 
 *   Declares all input variables: `project_id`, `region`, `resource_prefix`
-    (defaults to `"codemender"` for environment isolation), `reports_bucket_name`,
-    `releases_bucket_name`, `runner_cpu` (defaults to `"2"`), `runner_memory` (defaults to `"4Gi"`),
-    `create_vpc_and_nat`, `existing_vpc_connector_id`, `scheduler_cron`.
+    (defaults to `"codemender"` for environment isolation),
+    `reports_bucket_name`, `releases_bucket_name`, `runner_cpu` (defaults to
+    `"2"`), `runner_memory` (defaults to `"4Gi"`), `create_vpc_and_nat`,
+    `existing_vpc_connector_id`, `scheduler_cron`.
 *   Includes `vpc_connector_cidr` variable, defaulting to `10.0.0.0/26` with
     regex validation, as well as `vpc_connector_min_instances`,
     `vpc_connector_max_instances`, and `vpc_connector_machine_type`.
 
 ### 4. `terraform/gcp/vpc.tf`
 
-*   Manages conditional network infrastructure using `${var.resource_prefix}` for
-    resource names (`${var.resource_prefix}-vpc`, `${var.resource_prefix}-subnet`,
-    `${var.resource_prefix}-vpc-conn`, etc.).
+*   Manages conditional network infrastructure using `${var.resource_prefix}`
+    for resource names (`${var.resource_prefix}-vpc`,
+    `${var.resource_prefix}-subnet`, `${var.resource_prefix}-vpc-conn`, etc.).
 *   Creates a `google_compute_network` and `google_compute_subnetwork` using
     `var.vpc_connector_cidr` if `create_vpc_and_nat` is true.
 *   Creates `google_vpc_access_connector` linking to the subnet.
@@ -177,13 +178,17 @@ We will create a new directory `terraform/gcp/` containing the following files:
 
 *   Creates GCS Reports bucket (with 30-day lifecycle expiration rule).
 *   Creates GCS Releases bucket.
-*   Creates Artifact Registry Docker repository (`${var.resource_prefix}-runner`) with a
-    cleanup policy to remove old/untagged images.
+*   Creates Artifact Registry Docker repository
+    (`${var.resource_prefix}-runner`) with a cleanup policy to remove
+    old/untagged images.
 *   Retrieves Cloud Build Service Account using
-    `data.google_project.project.number` and binds `roles/storage.objectViewer` across
-    both legacy (`${data.google_project.project.number}@cloudbuild.gserviceaccount.com`)
-    and compute default (`${data.google_project.project.number}-compute@developer.gserviceaccount.com`)
-    service accounts for source tarball (`_cloudbuild`) and release bucket access.
+    `data.google_project.project.number` and binds `roles/storage.objectViewer`
+    across both legacy
+    (`${data.google_project.project.number}@cloudbuild.gserviceaccount.com`) and
+    compute default
+    (`${data.google_project.project.number}-compute@developer.gserviceaccount.com`)
+    service accounts for source tarball (`_cloudbuild`) and release bucket
+    access.
 
 ### 6. `terraform/gcp/secret.tf`
 
@@ -207,26 +212,31 @@ We will create a new directory `terraform/gcp/` containing the following files:
     *   `run.executions.list`
 *   Binds bucket-level roles:
     *   Runner SA: `roles/storage.objectAdmin` on Reports bucket.
-    *   Workflow SA: `roles/storage.objectViewer` on Reports bucket (required for Stage 1 `read_manifest` step).
+    *   Workflow SA: `roles/storage.objectViewer` on Reports bucket (required
+        for Stage 1 `read_manifest` step).
     *   Runner SA: `roles/storage.objectViewer` on Releases bucket.
-*   Grants `roles/iam.serviceAccountTokenCreator` on the Runner SA to itself (required for `signBlob` / GCS signed URL generation).
+*   Grants `roles/iam.serviceAccountTokenCreator` on the Runner SA to itself
+    (required for `signBlob` / GCS signed URL generation).
 *   Binds `roles/secretmanager.secretAccessor` on the GitHub token secret to the
     Runner SA.
-*   Grants the custom job runner role to the workflow SA **at the project level**
-    (required to poll top-level regional Operations `projects/.../locations/.../operations/*`).
+*   Grants the custom job runner role to the workflow SA **at the project
+    level** (required to poll top-level regional Operations
+    `projects/.../locations/.../operations/*`).
 *   Grants `roles/iam.serviceAccountUser` on the runner SA to the workflow SA.
 *   Grants `roles/workflows.invoker` to the scheduler SA at project level.
 
 ### 8. `terraform/gcp/compute.tf`
 
-*   Creates `google_cloud_run_v2_job` (`${var.resource_prefix}-runner`) configured directly
-    with the Artifact Registry image path (`${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.docker_repo.repository_id}/orchestrator:latest`).
-*   Binds Secret Manager secret `${var.resource_prefix}-github-token` version `"latest"` to environment variable `GITHUB_APP_TOKEN`.
+*   Creates `google_cloud_run_v2_job` (`${var.resource_prefix}-runner`)
+    configured directly with the Artifact Registry image path
+    (`${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.docker_repo.repository_id}/orchestrator:latest`).
+*   Binds Secret Manager secret `${var.resource_prefix}-github-token` version
+    `"latest"` to environment variable `GITHUB_APP_TOKEN`.
 *   Includes dynamic `vpc_access` block to attach the connector if enabled,
     setting `egress = "ALL_TRAFFIC"`.
-*   Creates `google_workflows_workflow` (`${var.resource_prefix}-coordinator`) loading
-    `workflows/gcp_parallel_workflow.yaml` as static content using the `file()`
-    function.
+*   Creates `google_workflows_workflow` (`${var.resource_prefix}-coordinator`)
+    loading `workflows/gcp_parallel_workflow.yaml` as static content using the
+    `file()` function.
 
 ### 9. `terraform/gcp/scheduler.tf`
 
@@ -234,16 +244,17 @@ We will create a new directory `terraform/gcp/` containing the following files:
     targeted at the workflow execution API.
 *   Configured with a JSON payload (`argument` field) that dynamically passes
     the Terraform-provisioned resource names (Cloud Run Job name, GCS Bucket
-    name) and Git scan repository details (`repo_url`, `build_command`, and `scan_target` configured in variables).
+    name) and Git scan repository details (`repo_url`, `build_command`, and
+    `scan_target` configured in variables).
 *   Set to `paused = true` by default.
 *   Uses a dedicated Scheduler Service Account with `roles/workflows.invoker`
     permission on the workflow.
 
 ### 10. `terraform/gcp/outputs.tf`
 
-*   Exports details: static NAT IP (if created), GCS bucket URLs, GCS Releases bucket name,
-    Artifact Registry path, Workflow trigger URL, and instructions for updating the
-    GitHub App Token secret.
+*   Exports details: static NAT IP (if created), GCS bucket URLs, GCS Releases
+    bucket name, Artifact Registry path, Workflow trigger URL, and instructions
+    for updating the GitHub App Token secret.
 
 --------------------------------------------------------------------------------
 

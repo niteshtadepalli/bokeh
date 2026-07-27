@@ -90,7 +90,7 @@ resource "google_compute_router_nat" "nat" {
 # Local variables resolving VPC connector selection and fallback handling
 locals {
   # Helper boolean to verify if an existing VPC connector ID was provided (non-null & non-empty string)
-  has_existing_connector = var.existing_vpc_connector_id != null && trimspace(var.existing_vpc_connector_id) != ""
+  has_existing_connector = var.existing_vpc_connector_id != null ? trimspace(var.existing_vpc_connector_id) != "" : false
 
   # Determines whether Cloud Run should attach to a Serverless VPC Access connector
   use_vpc_access = var.create_vpc_and_nat || local.has_existing_connector

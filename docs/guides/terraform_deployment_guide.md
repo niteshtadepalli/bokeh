@@ -15,7 +15,8 @@ provision:
     (`releases`) and scan reports (`reports`).
 *   **Artifact Registry**: Docker container repository for runner images
     (`codemender-runner`).
-*   **Secret Manager**: Secure storage for GitHub tokens (`${PREFIX}-github-token`).
+*   **Secret Manager**: Secure storage for GitHub tokens
+    (`${PREFIX}-github-token`).
 *   **Service Accounts & Custom IAM**: Ephemeral, least-privilege access for
     Cloud Run, Cloud Workflows, and Cloud Build.
 *   **Cloud Run v2 Job**: Ephemeral runner container pool for `scan`, `worker`,
@@ -27,15 +28,21 @@ provision:
     network egress routing.
 
 ### Resource Scope: Shared vs. Isolated (Multi-Prefix Deployments)
-If you deploy multiple pipelines in the same GCP project using different `resource_prefix` values, resources are partitioned as follows:
+
+If you deploy multiple pipelines in the same GCP project using different
+`resource_prefix` values, resources are partitioned as follows:
 
 *   **Shared Resources (Project-wide)**:
     *   **GCP APIs**: APIs enabled for the project are shared by all pipelines.
 *   **Isolated Resources (Unique per prefix)**:
-    *   **Compute & Workflow**: Cloud Run Job (`${prefix}-runner`) and Cloud Workflow (`${prefix}-coordinator`).
-    *   **Storage & Secret**: GCS Reports/Releases buckets, Artifact Registry repository, and Secret Manager GitHub secret (`${prefix}-github-token`).
-    *   **Security**: Service Accounts (`${prefix}-runner-sa`, etc.) and Custom IAM Role bindings.
-    *   **VPC & Networking**: Dedicated VPC Connector (`${prefix}-vpc-conn`) and Router (requires setting distinct `vpc_connector_cidr` ranges).
+    *   **Compute & Workflow**: Cloud Run Job (`${prefix}-runner`) and Cloud
+        Workflow (`${prefix}-coordinator`).
+    *   **Storage & Secret**: GCS Reports/Releases buckets, Artifact Registry
+        repository, and Secret Manager GitHub secret (`${prefix}-github-token`).
+    *   **Security**: Service Accounts (`${prefix}-runner-sa`, etc.) and Custom
+        IAM Role bindings.
+    *   **VPC & Networking**: Dedicated VPC Connector (`${prefix}-vpc-conn`) and
+        Router (requires setting distinct `vpc_connector_cidr` ranges).
 
 ```mermaid
 graph TD
@@ -62,8 +69,8 @@ Ensure you have the following before starting:
 3.  **IAM Permissions**: User account with `Owner` or `Editor` + `Security
     Admin` privileges on the target GCP project.
 4.  **GitHub Authentication Token**: A valid GitHub token stored in GCP Secret
-    Manager (prefixed as `${PREFIX}-github-token`). CodeMender natively supports either token
-    type:
+    Manager (prefixed as `${PREFIX}-github-token`). CodeMender natively supports
+    either token type:
 
     *   **Option A: Personal Access Token (PAT)**
 
