@@ -22,6 +22,7 @@ from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
 from codemender_agent.vcs.github import check_remote_branch_exists
 from codemender_agent.vcs.github import get_default_branch
+from codemender_agent.vcs.github import is_duplicate_pr
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -226,8 +227,12 @@ def _filter_findings(
     )
 
     branch_name = generate_branch_name(vuln_type, fingerprint)
-
-
+    
+    file_path = finding.get("FilePath") or "unknown_file"
+    try:
+      start_line = int(finding.get("StartLine") or 0)
+    except ValueError:
+      start_line = 0
 
     if not force_overwrite and check_remote_branch_exists(
         clean_repo_url, token, branch_name, cwd=repo_dir
@@ -236,6 +241,15 @@ def _filter_findings(
           "Skipping finding %s as remote branch %s exists.",
           finding_id,
           branch_name,
+      )
+      continue
+
+    if not force_overwrite and is_duplicate_pr(
+        clean_repo_url, token, file_path, vuln_type, start_line
+    ):
+      logger.info(
+          "An open PR covering %s in %s near line %d already exists. Skipping finding %s.",
+          vuln_type, file_path, start_line, finding_id
       )
       continue
 
