@@ -163,7 +163,7 @@ the bucket created by Terraform:
 
 ```bash
 export PROJECT_ID=$(gcloud config get-value project)
-export RELEASES_BUCKET="codemender-releases-${PROJECT_ID}"
+export RELEASES_BUCKET="${PREFIX}-releases-${PROJECT_ID}"
 
 # Upload the compiled binary to latest/cm
 gcloud storage cp /path/to/cm-linux gs://${RELEASES_BUCKET}/latest/cm
@@ -181,8 +181,8 @@ pushes the container to Artifact Registry, and updates the Cloud Run Job):
 cd ../..
 
 export PROJECT_ID=$(gcloud config get-value project)
-export RELEASES_BUCKET="codemender-releases-${PROJECT_ID}"
-export REPO_NAME="codemender-runner"
+export RELEASES_BUCKET="${PREFIX}-releases-${PROJECT_ID}"
+export REPO_NAME="${PREFIX}-runner"
 export REGION="us-central1"
 
 # Build and push container image to Artifact Registry, and deploy to Cloud Run
@@ -243,9 +243,9 @@ data payload.
 ```bash
 export REGION="us-central1"
 export PROJECT_ID=$(gcloud config get-value project)
-export REPORTS_BUCKET="codemender-reports-${PROJECT_ID}"
-export JOB_NAME="codemender-runner"
-export WORKFLOW_NAME="codemender-coordinator"
+export REPORTS_BUCKET="${PREFIX}-reports-${PROJECT_ID}"
+export JOB_NAME="${PREFIX}-runner"
+export WORKFLOW_NAME="${PREFIX}-coordinator"
 
 gcloud workflows run ${WORKFLOW_NAME} \
     --location=${REGION} \
@@ -321,7 +321,8 @@ The provisioned Cloud Scheduler job is paused by default. To enable nightly
 automated scanning:
 
 ```bash
-export SCHEDULER_JOB_NAME="codemender-nightly-scan"
+export REGION="us-central1"
+export SCHEDULER_JOB_NAME="${PREFIX}-nightly-scan"
 gcloud scheduler jobs resume ${SCHEDULER_JOB_NAME} --location=${REGION}
 ```
 
@@ -331,13 +332,14 @@ To update which repository or build command the default scheduler scans, run
 `gcloud scheduler jobs update http` with a revised JSON message body:
 
 ```bash
+export REGION="us-central1"
 export PROJECT_ID=$(gcloud config get-value project)
-export SCHEDULER_JOB_NAME="codemender-nightly-scan"
+export SCHEDULER_JOB_NAME="${PREFIX}-nightly-scan"
 
 # Update payload to point to a new repository
 gcloud scheduler jobs update http ${SCHEDULER_JOB_NAME} \
     --location=${REGION} \
-    --message-body='{"argument":"{\"job_name\":\"codemender-test-runner\",\"gcs_bucket\":\"codemender-test-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/new-org/new-repo.git\",\"build_command\":\"npm install && npm test\",\"scan_target\":\".\"}"}'
+    --message-body='{"argument":"{\"job_name\":\"'"${PREFIX}"'-runner\",\"gcs_bucket\":\"'"${PREFIX}"'-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/new-org/new-repo.git\",\"build_command\":\"npm install && npm test\",\"scan_target\":\".\"}"}'
 ```
 
 #### B. How to Add a New Scheduled Job for a different Repository
@@ -351,11 +353,11 @@ Account:
 ```bash
 export PROJECT_ID=$(gcloud config get-value project)
 export REGION="us-central1"
-export WORKFLOW_EXECUTION_URL="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/codemender-test-coordinator/executions"
-export SCHEDULER_SA="codemender-test-scheduler-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+export WORKFLOW_EXECUTION_URL="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/${PREFIX}-coordinator/executions"
+export SCHEDULER_SA="${PREFIX}-scheduler-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 
 # Create a new scheduled trigger running at 3:00 AM UTC
-gcloud scheduler jobs create http codemender-second-repo-nightly \
+gcloud scheduler jobs create http ${PREFIX}-second-repo-nightly \
     --location=${REGION} \
     --schedule="0 3 * * *" \
     --time-zone="Etc/UTC" \
@@ -363,7 +365,7 @@ gcloud scheduler jobs create http codemender-second-repo-nightly \
     --http-method="POST" \
     --headers="Content-Type=application/json" \
     --oauth-service-account-email=${SCHEDULER_SA} \
-    --message-body='{"argument":"{\"job_name\":\"codemender-test-runner\",\"gcs_bucket\":\"codemender-test-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/another-org/another-repo.git\",\"build_command\":\"python3 -m pip install . && pytest\",\"scan_target\":\".\"}"}'
+    --message-body='{"argument":"{\"job_name\":\"'"${PREFIX}"'-runner\",\"gcs_bucket\":\"'"${PREFIX}"'-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/another-org/another-repo.git\",\"build_command\":\"python3 -m pip install . && pytest\",\"scan_target\":\".\"}"}'
 ```
 
 --------------------------------------------------------------------------------
