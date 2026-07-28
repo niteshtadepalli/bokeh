@@ -19,6 +19,7 @@ class TestScanRunner(unittest.TestCase):
     self.env_patcher = patch.dict(
         os.environ,
         {
+            "HOME": self.workspace_dir,
             "CODEMENDER_SCAN_ID": "test-scan-123",
             "CODEMENDER_GCS_BUCKET": "test-bucket",
             "WORKSPACE_DIR": self.workspace_dir,
@@ -37,6 +38,7 @@ class TestScanRunner(unittest.TestCase):
   @patch("codemender_agent.runners.scan.generate_signed_url")
   @patch("codemender_agent.runners.scan.run_command")
   @patch("codemender_agent.runners.scan.upload_file_to_gcs")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
   @patch("codemender_agent.runners.scan.check_remote_branch_exists")
   @patch("codemender_agent.runners.scan.get_default_branch")
   @patch("codemender_agent.runners.scan.make_tarfile")
@@ -47,6 +49,7 @@ class TestScanRunner(unittest.TestCase):
       _mock_make_tarfile,
       mock_get_default_branch,
       mock_check_remote_branch_exists,
+      mock_is_duplicate_pr,
       mock_upload_gcs,
       mock_run_cmd,
       mock_generate_signed_url,
@@ -54,6 +57,7 @@ class TestScanRunner(unittest.TestCase):
     mock_which.return_value = "/bin/cm"
     mock_get_default_branch.return_value = "main"
     mock_check_remote_branch_exists.return_value = False
+    mock_is_duplicate_pr.return_value = False
 
     # Mock git rev-parse HEAD
     mock_git_rev = MagicMock()
@@ -151,12 +155,14 @@ class TestScanRunner(unittest.TestCase):
 
   @patch("codemender_agent.runners.scan.run_command")
   @patch("codemender_agent.runners.scan.upload_file_to_gcs")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
   @patch("codemender_agent.runners.scan.get_default_branch")
   @patch("shutil.which")
   def test_scan_pipeline_zero_findings(
       self,
       mock_which,
       mock_get_default_branch,
+      mock_is_duplicate_pr,
       mock_upload_gcs,
       mock_run_cmd,
   ):
@@ -201,6 +207,98 @@ class TestScanRunner(unittest.TestCase):
 
     self.assertTrue(manifest_uploaded)
 
+  @patch("codemender_agent.runners.scan.generate_signed_url")
+  @patch("codemender_agent.runners.scan.run_command")
+  @patch("codemender_agent.runners.scan.upload_file_to_gcs")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  @patch("codemender_agent.runners.scan.get_default_branch")
+  @patch("codemender_agent.runners.scan.make_tarfile")
+  @patch("shutil.which")
+  def test_scan_pipeline_with_skipped_findings(
+      self,
+      mock_which,
+      _mock_make_tarfile,
+      mock_get_default_branch,
+      mock_check_remote_branch_exists,
+      mock_is_duplicate_pr,
+      mock_upload_gcs,
+      mock_run_cmd,
+      mock_generate_signed_url,
+  ):
+    mock_which.return_value = "/bin/cm"
+    mock_get_default_branch.return_value = "main"
+    mock_check_remote_branch_exists.return_value = False
+    
+    # fid-1 will be skipped (db.py), fid-2 will be active (app.py)
+    mock_is_duplicate_pr.side_effect = lambda r, t, f, v, s: f == "db.py"
+
+    mock_git_rev = MagicMock()
+    mock_git_rev.stdout = "abc123commitsha"
+
+    mock_cm_report = MagicMock()
+    mock_cm_report.stdout = json.dumps([
+        {
+            "FindingID": "fid-1",
+            "Status": "DETECTED",
+            "VulnType": "SQL_INJECTION",
+            "FilePath": "db.py",
+        },
+        {
+            "FindingID": "fid-2",
+            "Status": "DETECTED",
+            "VulnType": "XSS",
+            "FilePath": "app.py",
+        },
+    ])
+
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if "rev-parse" in cmd_str:
+        return mock_git_rev
+      elif "report" in cmd_str:
+        return mock_cm_report
+      else:
+        return mock_default
+
+    mock_generate_signed_url.side_effect = lambda b, blob, **kw: f"url/{blob}"
+    mock_run_cmd.side_effect = run_cmd_side_effect
+    mock_upload_gcs.return_value = True
+
+    # Setup fake local state.db
+    import sqlite3
+    db_dir = os.path.join(self.workspace_dir, ".codemender")
+    os.makedirs(db_dir, exist_ok=True)
+    db_path = os.path.join(db_dir, "state.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE findings (id TEXT, status TEXT, muted INTEGER, dismiss_reason TEXT)")
+    conn.execute("INSERT INTO findings VALUES ('fid-1', 'OPEN', 0, '')")
+    conn.execute("INSERT INTO findings VALUES ('fid-2', 'OPEN', 0, '')")
+    conn.commit()
+    conn.close()
+
+    run_scan_pipeline()
+
+    # Check local state.db mutation
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, status, muted, dismiss_reason FROM findings ORDER BY id")
+    rows = cursor.fetchall()
+    conn.close()
+
+    self.assertEqual(rows[0][0], "fid-1")
+    self.assertEqual(rows[0][1], "DISMISSED")
+    self.assertEqual(rows[0][2], 1)
+    self.assertTrue(len(rows[0][3]) > 0)
+    
+    self.assertEqual(rows[1][0], "fid-2")
+    self.assertEqual(rows[1][1], "OPEN")
+    self.assertEqual(rows[1][2], 0)
+
 
 if __name__ == "__main__":
   unittest.main()
+

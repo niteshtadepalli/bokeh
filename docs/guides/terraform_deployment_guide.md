@@ -162,7 +162,8 @@ Build read permissions to it. Upload your compiled `cm-linux` binary directly to
 the bucket created by Terraform:
 
 ```bash
-export RELEASES_BUCKET=$(terraform output -raw releases_bucket_name)
+export PROJECT_ID=$(gcloud config get-value project)
+export RELEASES_BUCKET="codemender-releases-${PROJECT_ID}"
 
 # Upload the compiled binary to latest/cm
 gcloud storage cp /path/to/cm-linux gs://${RELEASES_BUCKET}/latest/cm
@@ -179,9 +180,10 @@ pushes the container to Artifact Registry, and updates the Cloud Run Job):
 ```bash
 cd ../..
 
-export RELEASES_BUCKET="$(cd terraform/gcp && terraform output -raw releases_bucket_name)"
-export REPO_NAME="$(cd terraform/gcp && terraform output -raw runner_job_name 2>/dev/null || echo codemender-runner)"
-export REGION="$(cd terraform/gcp && terraform output -raw region 2>/dev/null || echo us-central1)"
+export PROJECT_ID=$(gcloud config get-value project)
+export RELEASES_BUCKET="codemender-releases-${PROJECT_ID}"
+export REPO_NAME="codemender-runner"
+export REGION="us-central1"
 
 # Build and push container image to Artifact Registry, and deploy to Cloud Run
 gcloud builds submit --config=cloudbuild.yaml \
@@ -240,9 +242,10 @@ data payload.
 
 ```bash
 export REGION="us-central1"
-export REPORTS_BUCKET="$(cd terraform/gcp && terraform output -raw reports_bucket_name 2>/dev/null || echo codemender-reports-${PROJECT_ID})"
-export JOB_NAME="$(cd terraform/gcp && terraform output -raw runner_job_name 2>/dev/null || echo codemender-runner)"
-export WORKFLOW_NAME="$(cd terraform/gcp && terraform output -raw workflow_name 2>/dev/null || echo codemender-coordinator)"
+export PROJECT_ID=$(gcloud config get-value project)
+export REPORTS_BUCKET="codemender-reports-${PROJECT_ID}"
+export JOB_NAME="codemender-runner"
+export WORKFLOW_NAME="codemender-coordinator"
 
 gcloud workflows run ${WORKFLOW_NAME} \
     --location=${REGION} \
@@ -318,7 +321,7 @@ The provisioned Cloud Scheduler job is paused by default. To enable nightly
 automated scanning:
 
 ```bash
-export SCHEDULER_JOB_NAME="$(cd terraform/gcp && terraform output -raw scheduler_job_name 2>/dev/null || echo codemender-nightly-scan)"
+export SCHEDULER_JOB_NAME="codemender-nightly-scan"
 gcloud scheduler jobs resume ${SCHEDULER_JOB_NAME} --location=${REGION}
 ```
 
@@ -329,7 +332,7 @@ To update which repository or build command the default scheduler scans, run
 
 ```bash
 export PROJECT_ID=$(gcloud config get-value project)
-export SCHEDULER_JOB_NAME="$(cd terraform/gcp && terraform output -raw scheduler_job_name 2>/dev/null || echo codemender-nightly-scan)"
+export SCHEDULER_JOB_NAME="codemender-nightly-scan"
 
 # Update payload to point to a new repository
 gcloud scheduler jobs update http ${SCHEDULER_JOB_NAME} \

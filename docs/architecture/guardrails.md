@@ -134,7 +134,10 @@ To build this Minimum Viable Product, we will create the following files in the
         also uses the GitHub API to query open PRs. It checks if an open PR
         exists for the same file and vulnerability type within a 15-line sliding
         window of the new finding's `startLine`. If found, it skips fixing to
-        guarantee true idempotency and zero PR spam.
+        guarantee true idempotency and zero PR spam. Skipped findings are
+        mutated in `state.db` as `status='DISMISSED'` and `muted=1` to retain telemetry
+        and uploaded to GCS in the base workspace tarball, but are explicitly
+        deleted from the database before generating the final HTML report.
     *   Pushing the fixed branch directly to remote and creating the PR via the
         GitHub REST API immediately after each fix is generated using the
         scrubbed token.
