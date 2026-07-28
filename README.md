@@ -83,8 +83,10 @@ graph TD
     remote and PRs opened immediately, delegating merge conflict resolution to
     GitHub's PR mergeability checks.
 -   **PR Spam Prevention**: Branch names are deterministically derived using the
-    stable finding fingerprint (e.g., `codemender/fix-sqli-a1b2c3d4`). If a
-    branch already exists on origin, the orchestrator skips duplicate `cm fix`
+    finding `filePath`, `vulnType`, and `startLine`. To absorb minor LLM line number
+    jitter, the orchestrator queries the GitHub API to check for open PRs with the
+    same file and vulnerability type within a 15-line sliding window. If a
+    branch or open PR already exists, the orchestrator skips duplicate `cm fix`
     operations.
 
 -   **Workspace Reset**: Uses forced branch checkout (`git checkout -f`) when

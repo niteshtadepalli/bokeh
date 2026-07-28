@@ -46,7 +46,8 @@ explicit partition lists.
   └── Run 1 Container (Coordinator)
         ├── Clones repo, runs 'cm init' and 'cm find .' to find all vulnerabilities once
         ├── Records target Git commit SHA
-        ├── Filters out findings whose remote branches already exist (prevents duplicate PRs & idle workers)
+        ├── Filters out findings whose remote branches or open PRs already exist (prevents duplicate PRs & idle workers)
+        ├── Soft-deletes (Dismisses) the skipped findings in local state.db to preserve telemetry without scheduling workers
         ├── Tars baseline ~/.codemender/ directory (contains state.db and identity.key) -> workspace_base.tar.gz
         ├── Extracts active finding IDs and intelligently partitions them into N lists (partition_i.json)
         └── Saves workspace_base.tar.gz, partition files, and manifest.json (findings_count, target_sha) to GCS
@@ -66,6 +67,7 @@ explicit partition lists.
   └── Run 1 Container (Aggregator)
         ├── Downloads workspace_base.tar.gz and all worker_i_state.db files from GCS
         ├── Merges worker databases into base state.db via SQLite UPSERT (using updated_at timestamps)
+        ├── Deletes 'DISMISSED' findings from local state.db to keep the report clean
         ├── Compiles final consolidated HTML report (cm report -f html)
         └── Uploads final report to GCS (generates temporary signed access URL)
 ```
@@ -98,9 +100,10 @@ role and parameters:
 1.  **Dynamic Derivation & Remote Branch Filtering in Stage 1**: When Stage 1
     (Scan Phase) completes, the coordinator extracts discovered findings from
     `state.db`. Unless `CODEMENDER_FORCE_OVERWRITE=true`, it checks
-    `check_remote_branch_exists()` for each finding and **filters out findings
-    whose feature branches already exist on remote**. The remaining active
-    findings count is `active_findings_count`.
+    `check_remote_branch_exists()` and `is_duplicate_pr()` for each finding and
+    **filters out findings whose feature branches or PRs already exist on remote**.
+    The skipped findings are marked as `DISMISSED` with `muted=1` in `state.db`
+    to retain telemetry. The remaining active findings count is `active_findings_count`.
 2.  **Handling Cloud Run Task Limits & Quotas**: GCP Cloud Run Jobs support
     executing up to **10,000 tasks** per job run. While GCP can physically scale
     to thousands of tasks, spinning up hundreds of parallel containers
@@ -304,9 +307,10 @@ structure, we will create or modify the following files:
     *   Clones repo (`git clone --depth 1`) and initializes CodeMender (`cm
         init`, `cm find .` with retries).
     *   Records the target Git commit SHA.
-    *   Checks `check_remote_branch_exists()` for each finding and **filters out
-        findings whose feature branches already exist on remote** (unless
+    *   Checks `check_remote_branch_exists()` and `is_duplicate_pr()` for each finding and
+        **filters out findings whose feature branches or PRs already exist on remote** (unless
         `CODEMENDER_FORCE_OVERWRITE=true`).
+    *   Mutates the filtered findings in `state.db` to `status='DISMISSED'`, `muted=1` for telemetry retention.
     *   Creates `workspace_base.tar.gz` from `~/.codemender/`.
     *   Extracts remaining active finding IDs, partitions them into $N$
         `partition_i.json` files using a round-robin distribution (ensuring
@@ -419,6 +423,7 @@ structure, we will create or modify the following files:
                 created_at = excluded.created_at;
             ```
 
+    *   Deletes all `DISMISSED` findings from the local `state.db` to ensure a clean HTML output.
     *   Generates final consolidated HTML report (`cm report -f html`) and
         uploads to GCS with signed access URL.
 

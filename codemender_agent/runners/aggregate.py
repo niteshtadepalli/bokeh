@@ -376,6 +376,17 @@ def run_aggregate_pipeline() -> None:
 
   # 6. Generate final report and upload
   inject_codemender_config(repo_dir)
+
+  # Delete DISMISSED findings from local db to keep HTML report clean
+  try:
+    conn = sqlite3.connect(base_db_path)
+    conn.execute("DELETE FROM findings WHERE status = 'DISMISSED'")
+    conn.commit()
+    conn.close()
+    logger.info("Removed DISMISSED findings from local state.db for a clean HTML report.")
+  except sqlite3.Error as e:
+    logger.warning("Failed to remove DISMISSED findings from state.db: %s", e)
+
   cm_binary = shutil.which("cm") or "cm"
   _generate_and_upload_report(
       repo_dir,

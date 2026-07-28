@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import sys
 import tarfile
 import time
@@ -203,9 +204,10 @@ def _filter_findings(
     token: str,
     repo_dir: str,
     force_overwrite: bool,
-) -> list[dict[str, any]]:
+) -> tuple[list[dict[str, any]], list[str]]:
   """Filters out findings that already have remote branches (unless forced)."""
   active_findings = []
+  skipped_finding_ids = []
   clean_repo_url = sanitize_git_url(repo_url)
 
   for finding in findings:
@@ -242,6 +244,7 @@ def _filter_findings(
           finding_id,
           branch_name,
       )
+      skipped_finding_ids.append(finding_id)
       continue
 
     if not force_overwrite and is_duplicate_pr(
@@ -251,12 +254,13 @@ def _filter_findings(
           "An open PR covering %s in %s near line %d already exists. Skipping finding %s.",
           vuln_type, file_path, start_line, finding_id
       )
+      skipped_finding_ids.append(finding_id)
       continue
 
     active_findings.append(finding)
 
 
-  return active_findings
+  return active_findings, skipped_finding_ids
 
 
 def _partition_findings(
@@ -433,9 +437,27 @@ def run_scan_pipeline() -> None:
   force_overwrite = (
       os.environ.get("CODEMENDER_FORCE_OVERWRITE", "false").lower() == "true"
   )
-  active_findings = _filter_findings(
+  active_findings, skipped_finding_ids = _filter_findings(
       findings, repo_url, token, repo_dir, force_overwrite
   )
+
+  # Soft-delete skipped findings in local state.db for telemetry before archiving
+  if skipped_finding_ids:
+    db_path = os.path.expanduser("~/.codemender/state.db")
+    if os.path.exists(db_path):
+      try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        for fid in skipped_finding_ids:
+          cursor.execute(
+              "UPDATE findings SET status = 'DISMISSED', muted = 1, dismiss_reason = 'Duplicate PR or branch already exists' WHERE id = ?",
+              (fid,)
+          )
+        conn.commit()
+        conn.close()
+        logger.info("Dismissed %d skipped findings in local state.db.", len(skipped_finding_ids))
+      except Exception as e:
+        logger.warning("Failed to update skipped findings in state.db: %s", e)
   active_findings_count = len(active_findings)
   logger.info("Active findings after filtering: %d", active_findings_count)
 
