@@ -57,8 +57,8 @@ during parallel runs. **You do not need to set these manually.**
 *   `CODEMENDER_SCAN_ID`: Unique identifier for the parallel scan run.
 *   `CODEMENDER_GCS_BUCKET`: GCS bucket used for storing intermediate parallel
     state, workspaces, and manifests.
-*   `CODEMENDER_MAX_TASKS`: Maximum number of findings allowed per worker
-    partition.
+*   `CODEMENDER_MAX_TASKS`: Maximum number of parallel worker tasks (containers)
+    to launch in Stage 2.
 *   `CODEMENDER_TARGET_SHA`: The Git commit SHA representing the point-in-time
     codebase. Ensures all parallel workers branch from the exact same commit.
 *   `CODEMENDER_BASE_WORKSPACE_URL`: GCS URL of the compressed, pre-scanned base

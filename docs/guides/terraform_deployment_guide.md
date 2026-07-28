@@ -292,7 +292,7 @@ JSON Field        | Required | Maps to Environment Variable  | Description
 `scan_target`     | No       | `CODEMENDER_SCAN_TARGET`      | Directory or directories to scan. Defaults to `.` (the whole repo). Examples: `"src/"` or `"src/;lib/;cmd/"`.
 `max_tasks`       | No       | `CODEMENDER_MAX_TASKS`        | Max parallel worker tasks (containers). Defaults to `20`.
 `cleanup_ports`   | No       | `CODEMENDER_CLEANUP_PORTS`    | Comma-separated ports to kill before testing.
-`force_overwrite` | No       | `CODEMENDER_FORCE_OVERWRITE`  | Pass `"true"` to bypass PR spam prevention and force re-run fixes.
+`force_overwrite` | No       | `CODEMENDER_FORCE_OVERWRITE`  | Pass `"true"` to bypass PR spam prevention and force re-run fixes and push PRs.
 
 --------------------------------------------------------------------------------
 
