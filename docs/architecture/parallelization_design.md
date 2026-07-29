@@ -87,6 +87,7 @@ role and parameters:
 | `CODEMENDER_MAX_TASKS` | **Stage 1 (Scan)** | Configurable upper limit cap for parallel worker tasks (default: `10` or `20`). |
 | `CLOUD_RUN_TASK_INDEX`<br/>*(or `CODEMENDER_WORKER_INDEX`)* | **Stage 2 (Worker)** | 0-indexed worker task number. Cloud Run Jobs automatically injects `CLOUD_RUN_TASK_INDEX`. |
 | `CLOUD_RUN_TASK_COUNT`<br/>*(or `CODEMENDER_TOTAL_WORKERS`)* | **Stage 2 (Worker)** | Total parallel worker count $N$. Cloud Run Jobs automatically injects `CLOUD_RUN_TASK_COUNT`. |
+| `CODEMENDER_TARGET_SHA` | **Stage 2 (Worker)** | The Git commit SHA representing the point-in-time codebase. Ensures all parallel workers branch from the exact same commit. |
 | `CODEMENDER_BASE_WORKSPACE_URL` | **Stage 2** | GCP Signed URL to download `workspace_base.tar.gz`. |
 | `CODEMENDER_PARTITION_URLS` | **Stage 2** | JSON-serialized array of signed download URLs for partitions (indexed by task index). |
 | `CODEMENDER_UPLOAD_URLS` | **Stage 2** | JSON-serialized array of signed upload URLs for worker databases (indexed by task index). |
@@ -482,9 +483,24 @@ Located at `scans/[scan_id]/manifest.json`. Records metadata about the scan run.
     "target_sha": {
       "type": "string",
       "description": "The exact Git commit SHA scanned in Stage 1."
+    },
+    "base_workspace_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "GCS Signed URL to download workspace_base.tar.gz."
+    },
+    "partition_urls": {
+      "type": "array",
+      "items": { "type": "string", "format": "uri" },
+      "description": "List of GCS Signed URLs for partition JSON files."
+    },
+    "upload_urls": {
+      "type": "array",
+      "items": { "type": "string", "format": "uri" },
+      "description": "List of GCS Signed URLs for uploading worker DB shards."
     }
   },
-  "required": ["findings_count", "target_sha"]
+  "required": ["findings_count", "target_sha", "base_workspace_url", "partition_urls", "upload_urls"]
 }
 ```
 
