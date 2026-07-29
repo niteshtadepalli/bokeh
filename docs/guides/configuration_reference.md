@@ -14,10 +14,11 @@ when running in Docker or Cloud Run.
 
 *   `GITHUB_REPO_URL`: Full HTTPS URL to the target GitHub repository (e.g.,
     `https://github.com/owner/repo`).
-*   `GITHUB_APP_TOKEN` (or `GITHUB_PAT`, `GITHUB_TOKEN`, `GH_TOKEN`,
-    `GITHUB_SECRET`): The authentication token used for cloning the repository,
-    authenticating with the GitHub REST API, and pushing branches. *Note: These
-    are explicitly scrubbed from child subprocesses for security.*
+*   `GITHUB_APP_TOKEN` (or `GITHUB_PAT`, `GITHUB_TOKEN`): The authentication token
+    used for cloning the repository, authenticating with the GitHub REST API,
+    and pushing branches. *Note: One of these three variables is required by the
+    orchestrator. Additional token variables (`GH_TOKEN`, `GITHUB_SECRET`) are
+    also explicitly scrubbed from child subprocesses for security.*
 
 ### Pipeline Customization
 
@@ -36,6 +37,14 @@ when running in Docker or Cloud Run.
 *   `CODEMENDER_REPORT_BUCKET`: The name of a Google Cloud Storage (GCS) bucket
     where the final HTML summary report should be uploaded (primarily used in
     sequential mode).
+*   `WORKSPACE_DIR`: The local filesystem directory where target repositories
+    are cloned (defaults to current working directory).
+*   `CODEMENDER_STORAGE_MODE`: Storage backend mode for artifacts and reports.
+    Defaults to GCS; set to `"local"` to use local filesystem storage for
+    testing without GCP credentials.
+*   `CODEMENDER_LOCAL_STORAGE_DIR`: The local directory to store mocked GCS
+    blobs when `CODEMENDER_STORAGE_MODE="local"` (defaults to
+    `/tmp/codemender_local_storage`).
 
 ### Execution Modes
 

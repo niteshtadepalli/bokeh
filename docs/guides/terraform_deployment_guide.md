@@ -288,12 +288,19 @@ JSON Field        | Required | Maps to Environment Variable  | Description
 `job_name`        | Yes      | N/A (Cloud Run resource name) | The name of the provisioned Cloud Run job.
 `gcs_bucket`      | Yes      | `CODEMENDER_GCS_BUCKET`       | The GCS bucket to use for state and the final report.
 `repo_url`        | Yes      | `GITHUB_REPO_URL`             | The GitHub HTTPS URL of the repository to scan.
+`region`          | No       | N/A (GCP Region)              | The GCP region where the Cloud Run job resides. Defaults to `"us-central1"`.
 `build_command`   | No       | `CODEMENDER_BUILD_COMMAND`    | Your custom test command. Defaults to `.codemender.yaml` if omitted.
 `scan_target`     | No       | `CODEMENDER_SCAN_TARGET`      | Directory or directories to scan. Defaults to `.` (the whole repo). Examples: `"src/"` or `"src/;lib/;cmd/"`.
 `max_tasks`       | No       | `CODEMENDER_MAX_TASKS`        | Max parallel worker tasks (containers). Defaults to `20`.
-`cleanup_ports`   | No       | `CODEMENDER_CLEANUP_PORTS`    | Comma-separated ports to kill before testing.
-`force_overwrite` | No       | `CODEMENDER_FORCE_OVERWRITE`  | Pass `"true"` to bypass PR spam prevention and force re-run fixes and push PRs.
+`timeout_seconds` | No       | N/A (Job Task Timeout)        | Task timeout duration in seconds for Cloud Run job stages. Defaults to `86400`.
+`cleanup_ports`*  | No       | `CODEMENDER_CLEANUP_PORTS`    | Comma-separated ports to kill before testing.
+`force_overwrite`*| No       | `CODEMENDER_FORCE_OVERWRITE`  | Pass `"true"` to bypass PR spam prevention and force re-run fixes and push PRs.
 
+> [!NOTE]
+> **\*Customizing Advanced Job Parameters (`cleanup_ports` and `force_overwrite`)**:
+> Currently, the default `gcp_parallel_workflow.yaml` does not dynamically parse `cleanup_ports` or `force_overwrite` from the `--data` trigger payload. To use these settings in a parallel workflow execution, you can either:
+> 1.  **Configure on the Cloud Run Job directly (Recommended without redeploying workflow)**: Update the default environment variables on the underlying Cloud Run Job using `gcloud run jobs update ${JOB_NAME} --region=${REGION} --update-env-vars="CODEMENDER_FORCE_OVERWRITE=true,CODEMENDER_CLEANUP_PORTS=3000,8080"`.
+> 2.  **Customize the Workflow YAML**: Modify `workflows/gcp_parallel_workflow.yaml` to include `cleanup_ports` and `force_overwrite` in the `init_variables` block and pass them in `containerOverrides`, then redeploy the workflow (`gcloud workflows deploy`).
 --------------------------------------------------------------------------------
 
 ### Step 6: Monitor Execution & Retrieve Summary Report
@@ -439,7 +446,7 @@ runner job, GCS reports bucket, and Service Account for each repository.
 
 --------------------------------------------------------------------------------
 
-## 5. Deploying Multiple Environments (Advanced)
+## 6. Deploying Multiple Environments (Advanced)
 
 If you need to deploy multiple isolated environments side-by-side (e.g.,
 `codemender-dev` and `codemender-prod`) using the same Terraform configuration,
