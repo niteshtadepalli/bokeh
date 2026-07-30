@@ -274,7 +274,7 @@ class TestScanRunner(unittest.TestCase):
     os.makedirs(db_dir, exist_ok=True)
     db_path = os.path.join(db_dir, "state.db")
     conn = sqlite3.connect(db_path)
-    conn.execute("CREATE TABLE findings (id TEXT, status TEXT, muted INTEGER, dismiss_reason TEXT)")
+    conn.execute("CREATE TABLE findings (finding_id TEXT, status TEXT, muted INTEGER, dismiss_reason TEXT)")
     conn.execute("INSERT INTO findings VALUES ('fid-1', 'OPEN', 0, '')")
     conn.execute("INSERT INTO findings VALUES ('fid-2', 'OPEN', 0, '')")
     conn.commit()
@@ -285,7 +285,7 @@ class TestScanRunner(unittest.TestCase):
     # Check local state.db mutation
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, status, muted, dismiss_reason FROM findings ORDER BY id")
+    cursor.execute("SELECT finding_id, status, muted, dismiss_reason FROM findings ORDER BY finding_id")
     rows = cursor.fetchall()
     conn.close()
 

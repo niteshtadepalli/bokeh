@@ -90,8 +90,8 @@ def get_default_branch(token: str, owner: str, repo: str) -> str:
 
 
 @retry_on_exception(max_tries=3)
-def is_duplicate_pr(repo_url: str, token: str, file_path: str, vuln_type: str, start_line: int) -> bool:
-  """Checks if an open PR already exists for the same vulnerability near the same line."""
+def _check_duplicate_pr_api(repo_url: str, token: str, file_path: str, vuln_type: str, start_line: int) -> bool:
+  """Checks GitHub API for existing duplicate PRs."""
   sanitized_url = sanitize_git_url(repo_url)
   owner, repo = parse_repo_owner_and_name(sanitized_url)
   
@@ -115,6 +115,15 @@ def is_duplicate_pr(repo_url: str, token: str, file_path: str, vuln_type: str, s
           logger.info("Found existing PR (%s) covering %s in %s near line %d.", pr.get("html_url"), vuln_type, file_path, start_line)
           return True
   return False
+
+
+def is_duplicate_pr(repo_url: str, token: str, file_path: str, vuln_type: str, start_line: int) -> bool:
+  """Checks if an open PR already exists for the same vulnerability near the same line."""
+  try:
+    return _check_duplicate_pr_api(repo_url, token, file_path, vuln_type, start_line)
+  except Exception as e:
+    logger.warning("GitHub API check for duplicate PR failed after retries (%s), assuming no duplicate PR.", e)
+    return False
 
 
 
