@@ -450,7 +450,7 @@ def run_scan_pipeline() -> None:
         cursor = conn.cursor()
         for fid in skipped_finding_ids:
           cursor.execute(
-              "UPDATE findings SET status = 'DISMISSED', muted = 1, dismiss_reason = 'Duplicate PR or branch already exists' WHERE id = ?",
+              "UPDATE findings SET status = 'DISMISSED', muted = 1, dismiss_reason = 'Duplicate PR or branch already exists' WHERE finding_id = ?",
               (fid,)
           )
         conn.commit()

@@ -19,6 +19,7 @@ class TestAggregateRunner(unittest.TestCase):
     self.env_patcher = patch.dict(
         os.environ,
         {
+            "HOME": self.workspace_dir,
             "CODEMENDER_SCAN_ID": "test-scan-123",
             "CODEMENDER_GCS_BUCKET": "test-bucket",
             "WORKSPACE_DIR": self.workspace_dir,
@@ -320,7 +321,36 @@ class TestAggregateRunner(unittest.TestCase):
     mock_default.returncode = 0
     mock_run_cmd.return_value = mock_default
 
+    db_path = os.path.join(self.workspace_dir, ".codemender", "state.db")
+
+    def mock_extractall(*_args, **_kwargs):
+      db_dir = os.path.join(self.workspace_dir, ".codemender")
+      os.makedirs(db_dir, exist_ok=True)
+      conn = sqlite3.connect(db_path)
+      conn.execute(
+          "CREATE TABLE findings (finding_id TEXT PRIMARY KEY, status TEXT)"
+      )
+      conn.execute("INSERT INTO findings VALUES ('fid-1', 'OPEN')")
+      conn.execute("INSERT INTO findings VALUES ('fid-2', 'DISMISSED')")
+      conn.commit()
+      conn.close()
+
+    _mock_tarfile_open.return_value.__enter__.return_value.extractall.side_effect = (
+        mock_extractall
+    )
+
     run_aggregate_pipeline()
+
+    # Assert DISMISSED finding was removed from local state.db for clean HTML report
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT finding_id, status FROM findings ORDER BY finding_id")
+    rows = cursor.fetchall()
+    conn.close()
+
+    self.assertEqual(len(rows), 1)
+    self.assertEqual(rows[0][0], "fid-1")
+    self.assertEqual(rows[0][1], "OPEN")
 
     mock_download_gcs.assert_any_call(
         os.path.join(self.workspace_dir, "manifest.json"),

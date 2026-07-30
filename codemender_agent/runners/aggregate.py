@@ -80,7 +80,7 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
             end_line = excluded.end_line,
             dismiss_reason = excluded.dismiss_reason,
             confidence_level = excluded.confidence_level
-        WHERE excluded.updated_at > findings.updated_at OR findings.updated_at = '' OR findings.updated_at IS NULL;
+        WHERE excluded.updated_at >= findings.updated_at OR findings.updated_at = '' OR findings.updated_at IS NULL;
     """)
 
     # 2. Sessions Merge:
@@ -94,7 +94,7 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
         ON CONFLICT(session_id) DO UPDATE SET
             status = excluded.status,
             updated_at = excluded.updated_at
-        WHERE excluded.updated_at > sessions.updated_at;
+        WHERE excluded.updated_at >= sessions.updated_at;
     """)
 
     # 3. Artifacts Merge:
