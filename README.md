@@ -32,8 +32,10 @@ your own secure container:
     holding `orchestrator.py`, the `cm` binary, and your language toolchains
     (Node.js, Go, Java, Python, etc.).
 4.  **Orchestrator Script (`orchestrator.py`) ("The Manager")**: Clones code,
-    runs scans (`cm find`), verifies findings (`cm verify`), applies fixes (`cm
-    fix`), and creates Pull Requests on GitHub.
+    runs scans (`cm find`), verifies findings (`cm find verify`), applies fixes
+    (`cm fix`), and creates Pull Requests on GitHub. Supports both **Parallel
+    Workflow** (multi-stage sharded Cloud Run Jobs via Cloud Workflows) and
+    **Sequential Job** execution modes via `CODEMENDER_RUN_MODE`.
 
 ### Orchestration Flowchart
 
@@ -75,9 +77,10 @@ graph TD
 ## Key Constraints & Operational Rules
 
 -   **Credential Scrubbing**: `orchestrator.py` explicitly scrubs sensitive
-    credentials (`GITHUB_APP_TOKEN`, `GITHUB_PAT`, `GITHUB_TOKEN`) from the
-    subprocess environment before invoking `cm` commands (`cm verify`, `cm fix`)
-    to eliminate remote code execution (RCE) exfiltration risks.
+    credentials (`GITHUB_APP_TOKEN`, `GITHUB_PAT`, `GITHUB_TOKEN`, `GH_TOKEN`,
+    `GITHUB_SECRET`) from the subprocess environment before invoking `cm`
+    commands (`cm find verify`, `cm fix`) to eliminate remote code execution
+    (RCE) exfiltration risks.
 -   **Single-Sync Git Rule**: The orchestrator syncs only once at the beginning
     of the scan (`git clone --depth 1`). Fixed branches are pushed directly to
     remote and PRs opened immediately, delegating merge conflict resolution to
@@ -108,10 +111,17 @@ following dedicated markdown guides in the `docs/` folder:
 *   📖 **[Local Run Guide](docs/guides/local_run.md)**: Steps to configure your
     developer workstation, install dependencies locally, and run the scanner
     manually for validation and quick debugging.
+*   🏭 **[Production Deployment Guide](docs/guides/production_run.md)**:
+    Comprehensive instructions covering both Parallel Workflows and Sequential
+    Jobs on Cloud Run.
 *   🚀
     **[Automated Terraform Deployment Guide](docs/guides/terraform_deployment_guide.md)**:
     Step-by-step instructions to provision GCS buckets, configure IAM roles,
     deploy Cloud Run Jobs, and automate daily scans on GCP using Terraform.
+*   🏗️
+    **[GCP Deployment Automation Plan](docs/architecture/deployment_automation.md)**:
+    Architecture and implementation guardrails for automated Terraform
+    deployment.
 *   🛡️
     **[Implementation Guardrails & Design](docs/architecture/guardrails.md)**:
     Architecture specifications, security constraints, and execution rules.
@@ -189,6 +199,8 @@ and dedicated deployment files:
 │       ├── vpc.tf                  # Serverless VPC Access & Cloud NAT (Optional)
 │       └── tests/                  # Terraform integration and unit tests (`terraform test`)
 └── docs/                           # Architectural specs, guides, and runbooks
+    ├── architecture/               # Design specifications and guardrails
+    └── guides/                     # User, deployment, and configuration guides
 ```
 
 ### Running Unit Tests
@@ -231,10 +243,3 @@ wrappers).
     introduced at startup and shutdown to pull/push the state database,
     preserving historically verified finding statuses (e.g., preserving manually
     flagged `FALSE_POSITIVE` or `RESOLVED` statuses).
--   **Workstation/Runner Command Injection Sandboxing**: Verification
-    agent-generated exploit scripts (`exploit.sh`) are executed directly on the
-    host VM/runner shell. Since these scripts are generated entirely by LLMs,
-    malicious target project code could trigger command injections (exfiltrating
-    Git secrets or accessing metadata services). Future work should isolate
-    exploit verification executions inside an unprivileged Docker container or
-    gVisor sandbox container.
