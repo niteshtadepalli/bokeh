@@ -10,7 +10,7 @@ compatibility with internal/legacy releases within a **single codebase**.
 ## 1. The Problem
 
 Google is releasing **CodeMender Public Preview**, which introduces top-level
-verification commands (`cm verify <FINDING_ID> -y`), mandatory pre-GA
+verification commands (`cm verify -y <FINDING_ID>`), mandatory pre-GA
 interactive safety disclaimers (`--bypass-warning`), granular per-command AI
 model selection (`--model`), and updated YAML configuration schemas. Enterprise
 security teams need to upgrade their automated Cloud Workflows and Cloud Run
@@ -30,37 +30,45 @@ around the `cm` CLI binary and its SQLite state database
 
 1.  **Stage 0: Cloud Workflows Coordinator**: Receives execution requests via
     JSON payloads (`gcloud workflows run ... --data='{...}'`), unpacks
-    parameters, and injects standardized environment variables into Cloud Run
-    job containers.
+    parameters (`cli_version`, `model`, `models`, `skip_exploit_verification`),
+    and injects standardized environment variables into Cloud Run job
+    containers.
 2.  **Stage 1: Scan & Dispatch (`runners/scan.py`)**: Clones/syncs the target
     repository, configures `~/.codemender/config.yaml`, runs codebase
-    vulnerability scans (`cm find`), and partitions discovered findings into
-    individual GCS task buckets.
+    vulnerability scans (`cm find`), partitions discovered findings, and
+    generates signed GCS URLs for task partitions, mutated state DBs, and worker
+    metadata.
 3.  **Stage 2: Parallel Workers (`runners/worker.py`)**: Executes in parallel
     containers across finding partitions. Each worker verifies finding
     exploitability (`cm verify`), generates and applies security patches (`cm
-    fix`), and submits GitHub Pull Requests for confirmed remediations.
+    fix`), submits GitHub Pull Requests for remediations, and uploads partition
+    DB shards and harvested token metadata to GCS.
 4.  **Stage 3: Aggregation (`runners/aggregate.py`)**: Merges SQLite database
-    partitions from all workers, consolidates token consumption metrics,
-    generates final HTML/JSON security reports (`cm report`), and uploads them
-    to Google Cloud Storage.
+    partitions from all workers, aggregates harvested token consumption metadata
+    from worker manifests, generates final HTML/JSON security reports (`cm
+    report`), and uploads them to Google Cloud Storage.
 
 ### Universal Version Gating & Command Building
 
 All version-dependent behavior across the Orchestrator is governed by an
 explicit environment variable: **`CODEMENDER_CLI_VERSION`** (`"preview"` vs.
-`"legacy"`).
+`"legacy"`). If unset, it defaults universally to **`"preview"`** across all
+components, configuration injectors, and documentation.
 
 -   A central command builder (`build_cm_command` in `utils.py`) constructs CLI
-    argument lists dynamically based on `CODEMENDER_CLI_VERSION` and resolved
-    model flags.
+    argument lists dynamically based on `CODEMENDER_CLI_VERSION` (resolving from
+    `os.environ` if omitted/defaulted) and resolved model flags.
+-   In `"preview"` mode, positional targets and finding IDs are always appended
+    at the **end** of the command string (e.g. `cm verify -y --bypass-warning
+    <ID>`).
 -   In `"preview"` mode, the command builder automatically injects mandatory
     pre-GA guardrail bypasses (`--bypass-warning`) strictly on commands that
     prompt for safety disclaimers (`cm verify` and `cm fix`), while injecting
     auto-approve flags (`-y`) across scanning, verification, and patching.
--   Model selection uses a hierarchical precedence engine
-    (`CODEMENDER_<CMD>_MODEL` -> `CODEMENDER_MODEL` -> default), appending
-    `--model <MODEL>` per subcommand.
+-   Model selection uses a hierarchical precedence engine: `CODEMENDER_MODEL`
+    serves as the global default fallback, overridden by granular per-command
+    variables (`CODEMENDER_FIND_MODEL`, `CODEMENDER_VERIFY_MODEL`,
+    `CODEMENDER_FIX_MODEL`) if set.
 
 ### End-to-End System Architecture
 
@@ -71,36 +79,37 @@ graph TD
     end
 
     subgraph CW ["Stage 0: Cloud Workflows Coordinator"]
-        ParsePayload["Unpack Payload -> Inject Env Vars:<br/>CODEMENDER_CLI_VERSION='preview'|'legacy'<br/>CODEMENDER_*_MODEL<br/>CODEMENDER_SKIP_EXPLOIT_VERIFICATION"]
+        ParsePayload["Unpack Payload -> Inject Env Vars:<br/>CODEMENDER_CLI_VERSION='preview' (default)<br/>CODEMENDER_MODEL & CODEMENDER_*_MODEL<br/>CODEMENDER_SKIP_EXPLOIT_VERIFICATION"]
     end
 
     subgraph S1 ["Stage 1: Scan & Dispatch (runners/scan.py)"]
         Init1["inject_codemender_config()<br/>(tools.confirm_commands = false)"]
-        Scan["build_cm_command('find', target)<br/>--> cm find <target> -y [--model $FIND_MODEL]"]
-        Part["Partition state.db Findings -> Signed URLs"]
+        Scan["build_cm_command('find', target)<br/>--> cm find -y [--model $FIND_MODEL] <target>"]
+        Part["Partition state.db Findings -> Signed URLs (DBs & Metadata)"]
     end
 
     subgraph S2 ["Stage 2: Parallel Workers (runners/worker.py)"]
         Init2["inject_codemender_config()"]
-        Verify["build_cm_command('verify', ID)<br/>--> cm verify <ID> -y --bypass-warning [--model $VERIFY_MODEL]"]
+        Verify["build_cm_command('verify', ID)<br/>--> cm verify -y --bypass-warning [--model $VERIFY_MODEL] <ID>"]
         DBCheck["db.py: is_finding_verified(db_path, ID)<br/>(SELECT status FROM findings -> status == 'VERIFIED')"]
-        Fix["build_cm_command('fix', ID)<br/>--> cm fix <ID> -y --bypass-warning [--model $FIX_MODEL]"]
+        Fix["build_cm_command('fix', ID)<br/>--> cm fix -y --bypass-warning [--model $FIX_MODEL] <ID>"]
         PR["Create GitHub PR & Push Branch"]
+        Meta["Upload worker_{i}_metadata.json & worker_{i}_state.db to GCS"]
     end
 
     subgraph S3 ["Stage 3: Aggregator (runners/aggregate.py)"]
-        Merge["Merge Partition DBs & Sum Harvested Token Metrics"]
-        Report["build_cm_command('report', '-f html')<br/>--> cm report -f html"]
+        Merge["Merge Partition DBs & Sum Harvested Token Metrics from Metadata JSONs"]
+        Report["build_cm_command('report', extra_flags=['-f', 'html'])<br/>--> cm report -f html"]
         GCS["Upload Final Consolidated HTML Report to GCS"]
     end
 
     Req --> ParsePayload
     ParsePayload --> Init1
     Init1 --> Scan --> Part
-    Part -->|Signed URL per Task| Init2
+    Part -->|Signed URLs per Task| Init2
     Init2 --> Verify --> DBCheck
     DBCheck -->|Verified == True| Fix --> PR
-    PR --> Merge --> Report --> GCS
+    PR --> Meta --> Merge --> Report --> GCS
 ```
 
 --------------------------------------------------------------------------------
@@ -125,12 +134,13 @@ during engineering discussions:
 
 -   **What was considered:** Executing `cm --version` or probing `cm verify
     --help` at container startup to dynamically decide whether to invoke `cm
-    verify <ID> -y` or legacy `cm find verify <ID> --yes`.
+    verify -y <ID>` or legacy `cm find verify <ID> --yes`.
 -   **Why it was ruled out:** Dynamic probing adds unnecessary startup latency,
     can fail in minimal container environments if version output formats change,
     and obscures deployment intent. Requiring an explicit environment variable
-    (`CODEMENDER_CLI_VERSION="preview"|"legacy"`) makes version gating
-    deterministic, inspectable, and explicit in Terraform/Workflows definitions.
+    (`CODEMENDER_CLI_VERSION="preview"|"legacy"`, defaulting to `"preview"`)
+    makes version gating deterministic, inspectable, and explicit in
+    Terraform/Workflows definitions.
 
 ### 3. Global Injection of `--bypass-warning` Across All CLI Commands
 
@@ -168,9 +178,9 @@ during engineering discussions:
     output is captured by Google Cloud Logging, carriage-return tickers (`\r`)
     cannot overwrite terminal lines. Every update flush produces a brand new log
     entry, flooding log buckets with hundreds of repetitive lines per scan and
-    burying debugging traces. We omit `--compact` and instead regex-harvest the
-    automatic completion line (`✅ Completed X tool steps... | Tokens: 41k in /
-    561 out / 42k total`) upon command exit.
+    burying debugging traces. We omit `--compact` and instead regex-harvest all
+    completion lines (`✅ Completed X tool steps... | Tokens: 41k in / 561 out /
+    42k total`) upon command exit.
 
 --------------------------------------------------------------------------------
 
@@ -183,48 +193,93 @@ with precise rationale and behavioral specifications.
 
 ### 1. `codemender_agent/utils.py`
 
--   **Why change:** This module houses shared subprocess execution and system
-    utilities. It must become the single authority for CLI command argument
-    building, model precedence resolution, and token usage harvesting.
+-   **Why change:** Shared subprocess execution and system utilities. Must
+    become the single authority for CLI command argument building, input
+    validation, model precedence resolution, metric parsing, and token usage
+    harvesting.
 -   **Detailed changes:**
-    1.  Add `resolve_command_model(command_name: str) -> Optional[str]`:
-        -   Implements a strict 3-tier lookup hierarchy:
-        -   Tier 1: Check
+    1.  Add `parse_token_metric(token_str: str) -> int`:
+        -   Converts human-readable metric strings with SI suffixes into
+            standard integers:
+            -   `"41k"` or `"41K"` -> `int(float("41") * 1000)` = `41000`
+            -   `"41.5k"` or `"41.5K"` -> `int(float("41.5") * 1000)` = `41500`
+                (Uses `float()` cast before multiplication to prevent
+                `ValueError` on decimal metrics)
+            -   `"1.2M"` or `"1.2m"` -> `int(float("1.2") * 1000000)` =
+                `1200000`
+            -   `"1.5G"` or `"1.5g"` -> `int(float("1.5") * 1000000000)` =
+                `1500000000` (Giga/Billions support for mega-context pipelines)
+            -   `"561"` -> `561`
+        -   Raises `ValueError` if the format is invalid or non-numeric.
+    2.  Add `resolve_command_model(command_name: str) -> Optional[str]`:
+        -   Implements a strict precedence hierarchy:
+        -   Check granular override:
             `os.environ.get(f"CODEMENDER_{command_name.upper()}_MODEL")`
             (`CODEMENDER_FIND_MODEL`, `CODEMENDER_VERIFY_MODEL`,
             `CODEMENDER_FIX_MODEL`).
-        -   Tier 2: Check global fallback `os.environ.get("CODEMENDER_MODEL")`.
-        -   Tier 3: Return `None` (allowing the CLI binary to use its built-in
-            default model: `gemini-3.5-flash`).
-    2.  Add `build_cm_command(cm_binary: str, action: str, target_or_id:
-        Optional[str] = None, cli_version: str = "preview", extra_flags:
+        -   If unset, fall back to global default:
+            `os.environ.get("CODEMENDER_MODEL")`.
+        -   If neither is set, return `None` (allowing the CLI binary to use its
+            built-in default model).
+    3.  Add `build_cm_command(cm_binary: str, action: str, target_or_id:
+        Optional[str] = None, cli_version: Optional[str] = None, extra_flags:
         Optional[List[str]] = None) -> List[str]`:
         -   Centralizes all CodeMender command argument construction.
-        -   **In `"preview"` mode (`cli_version == "preview"`):**
-        -   For `"find"`: Returns `[cm_binary, "find", target_or_id, "-y"]` +
-            optional `["--model", model]`.
-        -   For `"verify"`: Returns `[cm_binary, "verify", target_or_id, "-y",
-            "--bypass-warning"]` + optional `["--model", model]`. If
-            `os.environ.get("CODEMENDER_SKIP_EXPLOIT_VERIFICATION",
-            "false").lower() == "true"`, appends `--skip-exploit-verification`.
-        -   For `"fix"`: Returns `[cm_binary, "fix", target_or_id, "-y",
-            "--bypass-warning"]` + optional `["--model", model]`.
-        -   For `"report"`, `"init"`, `"clean"`: Returns base command
-            `[cm_binary, action]` without execution guardrail flags.
+        -   **Dynamic Version Resolution:** If `cli_version` is `None` or
+            omitted, `build_cm_command` dynamically resolves `cli_version =
+            os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()`.
+        -   **Input Validation Best Practice:** If `action` is one of `["find",
+            "verify", "fix"]` and `target_or_id` is `None` or empty, raises a
+            descriptive `ValueError(f"Action '{action}' requires a valid target
+            or finding ID.")`. Filters all `None` entries from flag arrays to
+            prevent `TypeError` when passed to `subprocess.Popen`.
+        -   **Model Flag Gating:** `--model` flags are appended **strictly in
+            `"preview"` mode**. In `"legacy"` mode, `--model` is omitted because
+            legacy `cm` binaries do not support command-level `--model` flags
+            and crash with unknown flag errors.
+        -   **Positional Argument Order:** In `"preview"` mode, positional
+            targets and IDs are placed at the **END** of the argument list:
+            -   For `"find"`: Returns `[cm_binary, "find", "-y"]` + optional
+                `["--model", model]` + `[target_or_id]`.
+            -   For `"verify"`: Returns `[cm_binary, "verify", "-y",
+                "--bypass-warning"]` + optional `["--model", model]` + optional
+                `["--skip-exploit-verification"]` (if
+                `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` is `"true"`) +
+                `[target_or_id]`.
+            -   For `"fix"`: Returns `[cm_binary, "fix", "-y",
+                "--bypass-warning"]` + optional `["--model", model]` +
+                `[target_or_id]`.
+            -   For `"init"`: Supports both standard `[cm_binary, "init"]` and
+                `[cm_binary, "init", "--verify"]`.
+            -   For `"report"`, `"clean"`: Appends `extra_flags` to base
+                `[cm_binary, action]`.
         -   **In `"legacy"` mode (`cli_version == "legacy"`):**
-        -   For `"find"`: Returns `[cm_binary, "find", target_or_id]`.
-        -   For `"verify"`: Returns legacy nested syntax `[cm_binary, "find",
-            "verify", target_or_id, "--yes"]`.
-        -   For `"fix"`: Returns legacy syntax `[cm_binary, "fix", target_or_id,
-            "--yes"]`.
-    3.  Update `run_command(...)`:
-        -   After process completion, inspect `process.stdout` using regular
-            expression
-            `r"Tokens:\s*([0-9.kM]+)\s*in\s*/\s*([0-9.kM]+)\s*out\s*/\s*([0-9.kM]+)\s*total"`.
-        -   If matched, attach the parsed tuple `token_usage = (in_tokens,
-            out_tokens, total_tokens)` to the returned
-            `subprocess.CompletedProcess` object so runners can record token
-            consumption without live ticker spam.
+            -   For `"find"`: Returns `[cm_binary, "find", target_or_id]`.
+            -   For `"verify"`: Returns legacy syntax `[cm_binary, "find",
+                "verify", target_or_id, "--yes"]`.
+            -   For `"fix"`: Returns legacy syntax `[cm_binary, "fix",
+                target_or_id, "--yes"]`.
+    4.  Update `run_command(...)` for Token Harvesting:
+        -   **Version-Gated Token Counting:** Check `CODEMENDER_CLI_VERSION`. In
+            `"legacy"` mode, token harvesting is completely disabled
+            (`token_usage = None`). Token counting is omitted entirely to
+            preserve exact legacy output behavior without adding zero-token
+            header noise.
+        -   **Cumulative Multi-Turn Output Semantics:** In `"preview"` mode,
+            during multi-step execution turns, CodeMender outputs completion
+            lines formatted as: `Tokens: 41k in / 561 out / 42k total`. Each
+            printed turn log line represents the **cumulative total usage** up
+            to that point for the current command invocation.
+        -   `run_command` executes: `matches =
+            re.findall(r"Tokens:\s*([0-9.kMgG]+)\s*in\s*/\s*([0-9.kMgG]+)\s*out\s*/\s*([0-9.kMgG]+)\s*total",
+            process.stdout)`
+        -   If `matches` is non-empty, `run_command` parses the **LAST match**
+            (`matches[-1]`) using `parse_token_metric` to capture the final
+            cumulative total usage for that execution turn.
+        -   If `matches` is empty, `token_usage` defaults safely to
+            `{"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}`.
+        -   Attach `token_usage` object to the returned
+            `subprocess.CompletedProcess`.
 
 ### 2. `codemender_agent/config.py`
 
@@ -232,55 +287,69 @@ with precise rationale and behavioral specifications.
     generation (`~/.codemender/config.yaml`). Must inject schemas compatible
     with both Legacy and Public Preview releases.
 -   **Detailed changes:**
-
     1.  In `inject_codemender_config(repo_dir: str)`:
-
-        -   Check `CODEMENDER_CLI_VERSION` from `os.environ`. If unset, default
-            to `"legacy"` to safeguard existing environments, but emit a
-            `logger.warning` advising operators to declare
-            `CODEMENDER_CLI_VERSION="preview"`.
-        -   Always inject nested guardrail flags under `tools`:
-
-        ```yaml
-        tools:
-          confirm_commands: false
-          confirm_writes: false
-        ```
-
-        *(Confirmed natively compatible with Public Preview default
-        `config.yaml`).* - If `os.environ.get("CODEMENDER_MODEL")` is present,
-        inject `model: "<CODEMENDER_MODEL>"` at the root level of `config.yaml`
-        as the workspace fallback model. - Preserve existing `.codemender.yaml`
-        repository-level merge logic so project-specific language whitelists
-        (`scan.extensions.include`) take precedence.
+        -   Check `CODEMENDER_CLI_VERSION` from `os.environ`. Default to
+            `"preview"` if unset across all execution paths.
+        -   Read global config and merge repository-level `.codemender.yaml`
+            first.
+        -   **Execution Order Override:** Force `tools.confirm_commands = false`
+            and `tools.confirm_writes = false` at the very end of
+            `inject_codemender_config` **AFTER** repository `.codemender.yaml`
+            is merged. This guarantees that headless execution safety rules
+            cannot be overridden by repo-level configuration files.
+        -   If `CODEMENDER_MODEL` is present in `os.environ`, inject `model:
+            "<CODEMENDER_MODEL>"` at the root level of `config.yaml` as the
+            workspace fallback model.
 
 ### 3. `codemender_agent/codemender/db.py`
 
--   **Why change:** Contains SQLite database query helpers (`state.db`). Must
-    verify finding verification status accurately across all releases.
+-   **Why change:** SQLite database query helpers (`state.db`).
 -   **Detailed changes:**
     1.  In `is_finding_verified(db_path: str, finding_id: str) -> bool`:
-        -   Continue querying `SELECT status FROM findings WHERE finding_id =
-            ?`.
-        -   Check `return status == "VERIFIED"`.
-        -   *Rationale:* Empirically validated that both Legacy (`cm find
-            verify`) and Public Preview (`cm verify` with or without
-            `--skip-exploit-verification`) explicitly promote `status` to
-            `'VERIFIED'`. No dual-column schema branching is required.
+        -   Query `SELECT status FROM findings WHERE finding_id = ?`.
+        -   Return `status == "VERIFIED"`.
+    2.  **ISO 8601 Timestamp Verification:**
+        -   Empirically verified against SQLite dumps that `created_at` and
+            `updated_at` columns use standardized ISO 8601 UTC strings
+            (`2026-08-05T00:42:19Z`).
+        -   Standard SQLite string comparison (`WHERE excluded.updated_at >=
+            main.updated_at`) operates 100% lexicographically correctly.
 
 ### 4. `codemender_agent/runners/scan.py`
 
 -   **Why change:** Stage 1 runner responsible for initializing the workspace,
-    executing `cm find`, and generating task partitions.
+    executing `cm find`, filtering duplicate findings, uploading Stage 1
+    metadata, and generating task partitions and GCS signed URLs.
 -   **Detailed changes:**
-    1.  In `_init_codemender`: Replace inline command lists with
-        `build_cm_command(cm_binary, "init", cli_version=cli_version)`.
-    2.  In `_scan_repository`: Replace inline scan calls `[cm_binary, "find",
-        target]` with `build_cm_command(cm_binary, "find", target,
-        cli_version=cli_version)`.
-    3.  In `_scan_repository` and `run_scan_pipeline`: Extract harvested
-        `token_usage` metrics from `run_command` results and include them in the
-        generated Stage 1 `manifest.json` uploaded to Google Cloud Storage.
+    1.  In `_init_codemender`: Execute both `build_cm_command(cm_binary, "init",
+        cli_version=cli_version)` and `build_cm_command(cm_binary, "init",
+        extra_flags=["--verify"], cli_version=cli_version)`.
+    2.  In `_scan_repository`: Replace inline scan calls with
+        `build_cm_command(cm_binary, "find", target, cli_version=cli_version)`.
+    3.  In `_filter_findings`:
+        -   **PR Spam Prevention Status Enforcement:** When skipping findings
+            matching existing remote branches or open PRs, set `status =
+            'SKIPPED_DUPLICATE'`, `muted = 1`, and `mute_reason = 'Duplicate PR
+            or branch already exists'` in `state.db`.
+        -   Leaving `status = 'DISMISSED'` completely clean for user/manual
+            dismissals without manual script manipulation.
+    4.  In `_partition_findings`: Cap maximum task worker partitions to
+        $\min(\text{active\_findings}, \text{max\_tasks}, 10000)$ to comply
+        strictly with official GCP Cloud Run Job v2 task limit bounds (up to
+        10,000 tasks max per job execution, as documented in Google Cloud Run
+        Quotas & Limits).
+    5.  In `_save_and_upload_state`:
+        -   **Stage 1 Scan Metadata File:** Upload a dedicated
+            `scan_metadata.json` file to GCS at
+            `scans/{scan_id}/scan_metadata.json` containing Stage 1 scan token
+            usage (`in_tokens`, `out_tokens`, `total_tokens`), total findings
+            count, count of skipped duplicate findings (`SKIPPED_DUPLICATE`),
+            and execution timestamps.
+        -   Generate GET and PUT signed URLs for
+            `scans/{scan_id}/worker_{i}_metadata.json` (`metadata_urls`).
+        -   Include `metadata_urls` inside `manifest.json` alongside
+            `partition_urls` and `upload_urls` so Stage 2 workers can upload
+            execution metadata and harvested token counts to GCS.
 
 ### 5. `codemender_agent/runners/worker.py`
 
@@ -288,85 +357,175 @@ with precise rationale and behavioral specifications.
     verification and remediation.
 -   **Detailed changes:**
     1.  In `_process_finding`:
-        -   Replace inline verification call `[cm_binary, "find", "verify",
-            finding_id, "--yes"]` with `build_cm_command(cm_binary, "verify",
+        -   **Early Idempotency & Task Retry Check:** Perform remote branch and
+            open PR checks at the **very beginning** of `_process_finding`,
+            *before* running `cm verify` or `cm fix`. If the remote branch
+            already exists and its SHA matches local default branch HEAD +
+            expected patch commit, or if an open PR already covers the finding,
+            `_process_finding` sets `status = 'SKIPPED_DUPLICATE'` in `state.db`
+            and returns early.
+        -   Replace inline verification call with `build_cm_command(cm_binary,
+            "verify", finding_id, cli_version=cli_version)` (with `finding_id`
+            placed at the end).
+        -   Replace inline fix call with `build_cm_command(cm_binary, "fix",
             finding_id, cli_version=cli_version)`.
-        -   Replace inline fix call `[cm_binary, "fix", finding_id, "--yes"]`
-            with `build_cm_command(cm_binary, "fix", finding_id,
-            cli_version=cli_version)`.
-        -   Ensure `git clean -fd -e .cm_project -e .exploit` is preserved
-            intact, protecting CodeMender's 2-phase verification harness
-            artifact folder (`.exploit/`).
-    2.  In `run_worker_pipeline`: Record harvested token metrics from
-        verification and fix commands into the worker's partition state
-        database/manifest.
+        -   Preserve `git clean -fd -e .cm_project -e .exploit` intact.
+    2.  In `run_worker_pipeline`:
+        -   Safely parse `CODEMENDER_METADATA_URLS` JSON list and validate
+            bounds against `worker_index`.
+        -   After processing partition findings, record total harvested token
+            counts (`in_tokens`, `out_tokens`, `total_tokens`) into a local
+            `worker_{i}_metadata.json` file and upload it to GCS via the signed
+            PUT URL.
 
 ### 6. `codemender_agent/runners/sequential.py`
 
 -   **Why change:** Single-node sequential runner used for local development and
     non-distributed testing.
 -   **Detailed changes:**
-    1.  Replace inline command invocations for `find`, `verify`, and `fix` with
-        `build_cm_command(cm_binary, action, target_or_id,
+    1.  Replace inline command invocations for `init`, `find`, `verify`, and
+        `fix` with `build_cm_command(cm_binary, action, target_or_id,
         cli_version=cli_version)`.
+    2.  Use `status = 'SKIPPED_DUPLICATE'` for skipped duplicate findings during
+        sequential execution.
 
 ### 7. `codemender_agent/runners/aggregate.py`
 
--   **Why change:** Stage 3 aggregator responsible for merging worker databases,
-    producing consolidated HTML/JSON reports, and uploading to GCS.
+-   **Why change:** Stage 3 aggregator responsible for merging worker database
+    shards, aggregating token consumption metadata across Stage 1 and Stage 2
+    workers, producing consolidated HTML/JSON reports, and uploading to GCS.
 -   **Detailed changes:**
-    1.  Replace inline `cm report` execution with `build_cm_command(cm_binary,
+
+    1.  **Dynamic Schema UPSERT in `merge_db`:**
+
+        -   Uses `PRAGMA table_info(table_name)` to inspect columns and primary
+            keys dynamically across all 5 state tables (`sessions`, `findings`,
+            `patches`, `file_hashes`, `artifacts`).
+        -   For tables with defined Primary Keys (`sessions` -> `session_id`,
+            `findings` -> `finding_id`, `patches` -> `patch_id`, `file_hashes`
+            -> `file_path`), constructs dynamic UPSERT queries:
+
+            ```sql
+            INSERT INTO main.table (col1, col2, ...)
+            SELECT col1, col2, ... FROM worker.table AS w
+            WHERE EXISTS (SELECT 1 FROM main.findings AS m WHERE m.finding_id = w.finding_id) -- (if finding-dependent)
+            ON CONFLICT(pk_col) DO UPDATE SET
+                col_i = excluded.col_i
+            WHERE excluded.updated_at >= table.updated_at OR table.updated_at = '' OR table.updated_at IS NULL;
+            ```
+
+        -   For `artifacts` (which uses `artifact_id INTEGER PRIMARY KEY
+            AUTOINCREMENT`), omits `ON CONFLICT` and uses deduplication
+            insertion:
+
+            ```sql
+            INSERT INTO main.artifacts (session_id, filename, original_path, purpose, finding_id, created_at)
+            SELECT session_id, filename, original_path, purpose, finding_id, created_at
+            FROM worker.artifacts AS w
+            WHERE NOT EXISTS (
+                SELECT 1 FROM main.artifacts AS m
+                WHERE m.session_id = w.session_id AND m.filename = w.filename
+            );
+            ```
+
+    2.  **Excluding PR Spam Duplicates from Final Report:**
+
+        -   Before running `cm report`, execute `DELETE FROM findings WHERE
+            status = 'SKIPPED_DUPLICATE'` on `base_db_path`.
+        -   This guarantees that PR-spam skipped findings are excluded from the
+            final HTML/JSON report generated by `cm report`, while leaving
+            genuine `DISMISSED` findings clean and untouched.
+
+    3.  Replace inline `cm report` execution with `build_cm_command(cm_binary,
         "report", extra_flags=["-f", "html"], cli_version=cli_version)`.
-    2.  Add token metric aggregation: Read harvested token usage counts across
-        all Stage 1 and Stage 2 worker partition manifests, compute cumulative
-        totals (`total_in`, `total_out`, `total_combined`), and log/prepend a
-        prominent usage summary header into the consolidated reporting metadata
-        before uploading to GCS.
 
-### 8. `tests/test_cli.py` & `tests/test_config.py` (or new `tests/test_command_builder.py`)
+    4.  Add token metric aggregation: Check `CODEMENDER_CLI_VERSION`. In
+        `"legacy"` mode, skip token metric aggregation entirely (do not download
+        metadata JSONs, log token metrics, or inject token headers). In
+        `"preview"` mode, download `scan_metadata.json` and all worker
+        `worker_{i}_metadata.json` files from GCS. Sum cumulative totals across
+        all stages (`total_in`, `total_out`, `total_combined`), and log/prepend
+        a prominent usage summary header into the report metadata.
 
--   **Why change:** Ensures zero regression and rigorous automated verification
-    of the multi-version adapter logic.
+    5.  **Report Signed URL Expiration:** Ensure GCS signed URLs for the
+        consolidated HTML report use the standard **3-day expiration duration**
+        (`expiration_days=3`, i.e., `expiration=datetime.timedelta(days=3)` as
+        implemented in `storage.py`) to guarantee links in Cloud Logging logs
+        remain valid during security triage.
+
+### 8. `workflows/gcp_parallel_workflow.yaml`
+
+-   **Why change:** Cloud Workflows coordinator YAML controlling container
+    environment variable injection for all 3 pipeline stages.
 -   **Detailed changes:**
-    1.  Add unit tests for `resolve_command_model(command_name)` verifying that
-        granular variables (`CODEMENDER_FIND_MODEL`) override global variables
-        (`CODEMENDER_MODEL`), which override default empty fallbacks.
-    2.  Add unit tests for `build_cm_command(...)` verifying:
-        -   In `"preview"` mode: `-y` is injected on `find`, `verify`, and
-            `fix`; `--bypass-warning` is injected **only** on `verify` and
-            `fix`; `--model` is appended correctly;
-            `--skip-exploit-verification` is appended when
-            `CODEMENDER_SKIP_EXPLOIT_VERIFICATION="true"`.
-        -   In `"legacy"` mode: Legacy `find verify` syntax is produced without
-            `--bypass-warning` or unsupported flags.
-    3.  Add unit tests for `is_finding_verified(...)` verifying `status ==
-        "VERIFIED"` against SQLite database test fixtures.
+    1.  In `init_variables`: Unpack trigger parameters from `args`:
+        -   `cli_version`: `${default(map.get(args, "cli_version"), "preview")}`
+        -   `model`: `${default(map.get(args, "model"), "")}`
+        -   `models`: `${default(map.get(args, "models"), {})}`
+        -   `skip_exploit_verification`: `${default(map.get(args,
+            "skip_exploit_verification"), false)}`
+        -   Extract granular models:
+            -   `find_model`: `${default(map.get(models, "find"), model)}`
+            -   `verify_model`: `${default(map.get(models, "verify"), model)}`
+            -   `fix_model`: `${default(map.get(models, "fix"), model)}`
+    2.  In `run_stage1_scan`, `run_stage2_workers`, and `run_stage3_aggregate`:
+        Inject unpacked variables into `containerOverrides.env`:
+        -   `CODEMENDER_CLI_VERSION`
+        -   `CODEMENDER_MODEL`
+        -   `CODEMENDER_FIND_MODEL`
+        -   `CODEMENDER_VERIFY_MODEL`
+        -   `CODEMENDER_FIX_MODEL`
+        -   `CODEMENDER_SKIP_EXPLOIT_VERIFICATION`
+        -   `CODEMENDER_METADATA_URLS` (Stage 2 workers)
 
-### 9. `docs/guides/terraform_deployment_guide.md`
+### 9. `tests/dummy_cm.py` & Test Suite Suite (`tests/test_runners_*.py`)
 
--   **Why change:** Documentation serving as deployment guidance for
-    infrastructure and DevOps teams.
+-   **Why change:** Mock CLI script and runner test suites must support both
+    Public Preview and Legacy CLI invocation modes seamlessly.
 -   **Detailed changes:**
-    1.  Update Step 5 execution payload examples to document the new Cloud
-        Workflows execution data fields:
-        -   `"cli_version": "preview"` (or `"legacy"`)
-        -   `"model": "gemini-3.5-flash"` (global default)
-        -   `"models": { "find": "gemini-3-flash-preview", "verify":
-            "gemini-3.5-flash", "fix": "gemini-3.1-pro-preview" }` (granular
-            per-command override)
-        -   `"skip_exploit_verification": true` (for safe containerized
-            verification without active live database payloads).
+    1.  Update `tests/dummy_cm.py` to handle top-level `"preview"` commands:
+        -   `cm verify`: Matches top-level `cmd == "verify"` OR legacy `cmd ==
+            "find"` with `args[1] == "verify"`. Parses `-y`, `--bypass-warning`,
+            `--model`, `--skip-exploit-verification`, and positional
+            `finding_id` at the end. Updates `findings` table setting
+            `verified = 1, status = 'VERIFIED'`.
+        -   `cm fix`: Matches top-level `cmd == "fix"`. Parses `-y`,
+            `--bypass-warning`, `--model`, and positional `finding_id` at the
+            end. Updates `findings` table setting `status = 'FIXED'` and inserts
+            fix artifact.
+        -   `cm find`: Matches `cmd == "find"`. Parses `-y`, `--model`, and
+            positional `target` path at the end.
+        -   **Token Logging Simulation:** In `"preview"` mode, print simulated
+            token log lines (`Tokens: 10k in / 500 out / 10.5k total`) to
+            `stdout` so unit and E2E tests validate token parsing logic.
+    2.  Add `tests/test_command_builder.py`:
+        -   Test `parse_token_metric("41k") == 41000` and
+            `parse_token_metric("1.2M") == 1200000`.
+        -   Test `build_cm_command` raises `ValueError` when `target_or_id` is
+            `None` on `verify`/`fix`.
+        -   Test `build_cm_command` places `finding_id` at the end in preview
+            mode: `['cm', 'verify', '-y', '--bypass-warning', 'id-123']`.
+        -   Test `resolve_command_model` hierarchy (`FIND_MODEL` overriding
+            `MODEL`).
+
+### 10. `docs/guides/terraform_deployment_guide.md`
+
+-   **Why change:** Update deployment guide examples with updated Cloud
+    Workflows execution payloads documenting `cli_version`, `model`, `models`,
+    and `skip_exploit_verification`.
 
 --------------------------------------------------------------------------------
 
 ## 5. Behavioral Reference Summary Table
 
-Operation / Component   | `CODEMENDER_CLI_VERSION == "preview"` (Default for New Deployments)                                   | `CODEMENDER_CLI_VERSION == "legacy"` (Backward Compatibility Mode)
-:---------------------- | :---------------------------------------------------------------------------------------------------- | :-----------------------------------------------------------------
-**Scan (`find`)**       | `cm find <target> -y [--model $CODEMENDER_FIND_MODEL]`                                                | `cm find <target>`
-**Verify (`verify`)**   | `cm verify <ID> -y --bypass-warning [--skip-exploit-verification] [--model $CODEMENDER_VERIFY_MODEL]` | `cm find verify <ID> --yes`
-**Fix (`fix`)**         | `cm fix <ID> -y --bypass-warning [--model $CODEMENDER_FIX_MODEL]`                                     | `cm fix <ID> --yes`
-**Report (`report`)**   | `cm report --format json`                                                                             | `cm report --format json`
-**Guardrails Config**   | `tools.confirm_commands: false`<br/>`tools.confirm_writes: false`                                     | `tools.confirm_commands: false`<br/>`tools.confirm_writes: false`
-**SQLite Verify Check** | `SELECT status FROM findings WHERE finding_id = ?`<br/>True if `status == "VERIFIED"`                 | `SELECT status FROM findings WHERE finding_id = ?`<br/>True if `status == "VERIFIED"`
-**Token Logging**       | Omit `--compact`; regex-harvest exit line (`✅ Completed...                                            | Tokens: ...`)
+Operation / Component   | `CODEMENDER_CLI_VERSION == "preview"` (Universal Default)                                  | `CODEMENDER_CLI_VERSION == "legacy"` (Backward Compatibility Mode)
+:---------------------- | :----------------------------------------------------------------------------------------- | :-----------------------------------------------------------------
+**Scan (`find`)**       | `cm find -y [--model $FIND_MODEL] <target>`                                                | `cm find <target>`
+**Verify (`verify`)**   | `cm verify -y --bypass-warning [--skip-exploit-verification] [--model $VERIFY_MODEL] <ID>` | `cm find verify <ID> --yes`
+**Fix (`fix`)**         | `cm fix -y --bypass-warning [--model $FIX_MODEL] <ID>`                                     | `cm fix <ID> --yes`
+**Init (`init`)**       | `cm init` AND `cm init --verify`                                                           | `cm init` AND `cm init --verify`
+**Report (`report`)**   | `cm report -f html` / `cm report --format json`                                            | `cm report -f html` / `cm report --format json`
+**Guardrails Config**   | `tools.confirm_commands: false`<br/>`tools.confirm_writes: false`                          | `tools.confirm_commands: false`<br/>`tools.confirm_writes: false`
+**SQLite Verify Check** | `SELECT status FROM findings WHERE finding_id = ?`<br/>True if `status == "VERIFIED"`      | `SELECT status FROM findings WHERE finding_id = ?`<br/>True if `status == "VERIFIED"`
+**PR Spam Status**      | `status = 'SKIPPED_DUPLICATE'` (deleted from SQLite before `cm report`)                    | `status = 'SKIPPED_DUPLICATE'` (deleted from SQLite before `cm report`)
+**Token Logging**       | Parse **last match** of `Tokens: ...` via `re.findall`; parse `k`/`M` suffixes             | Dropped entirely (`token_usage = None`, no report header)
