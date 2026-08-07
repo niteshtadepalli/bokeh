@@ -108,6 +108,13 @@ resource "google_project_iam_member" "service_accounts_log_writer" {
   member   = each.value
 }
 
+# Agent Platform / Vertex AI IAM for Runner SA (required for CodeMender LLM interactions)
+resource "google_project_iam_member" "runner_aiplatform_user" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.runner_sa.email}"
+}
+
 # Project-level IAM binding for Workflow SA to run jobs, poll operations, and monitor executions
 resource "google_project_iam_member" "workflow_job_runner_binding" {
   project = var.project_id
