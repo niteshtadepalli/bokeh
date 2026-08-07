@@ -33,8 +33,18 @@ resource "google_service_account" "scheduler_sa" {
   depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
+# Random ID suffix to prevent 409 Conflict errors when re-creating custom IAM roles.
+# GCP IAM custom roles enter a 7-day soft-delete tombstone state upon deletion.
+# Appending a random hex suffix ensures role recreations generate a fresh role ID.
+resource "random_id" "role_suffix" {
+  byte_length = 4
+  keepers = {
+    resource_prefix = var.resource_prefix
+  }
+}
+
 resource "google_project_iam_custom_role" "workflow_job_runner" {
-  role_id     = replace("${var.resource_prefix}WorkflowJobRunner", "-", "")
+  role_id     = "${replace(var.resource_prefix, "-", "")}WorkflowJobRunner_${random_id.role_suffix.hex}"
   title       = "CodeMender Workflow Job Runner (${var.resource_prefix})"
   description = "Allows Cloud Workflows to run and monitor Cloud Run Jobs for CodeMender (${var.resource_prefix})"
   project     = var.project_id

@@ -22,6 +22,7 @@ import sqlite3
 import sys
 import tarfile
 import time
+from typing import Optional
 
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.config import get_github_credentials
@@ -29,6 +30,7 @@ from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
 from codemender_agent.storage import generate_signed_url
 from codemender_agent.storage import upload_file_to_gcs
+from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import run_command
 from codemender_agent.vcs.git import generate_branch_name
 from codemender_agent.vcs.git import get_git_auth_header
@@ -42,10 +44,27 @@ from codemender_agent.vcs.github import is_duplicate_pr
 logger = logging.getLogger("codemender-orchestrator")
 
 
+EXCLUDED_TAR_PATTERNS = {
+    ".git",
+    "__pycache__",
+    ".venv",
+    "node_modules",
+    ".pytest_cache",
+}
+
+
+def tar_filter(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+  """Filters out heavy/unnecessary metadata directories during workspace archiving."""
+  base_name = os.path.basename(tarinfo.name)
+  if base_name in EXCLUDED_TAR_PATTERNS or tarinfo.name.endswith(".pyc"):
+    return None
+  return tarinfo
+
+
 def make_tarfile(output_filename: str, source_dir: str) -> None:
-  """Creates a tar.gz archive of a directory."""
+  """Creates a tar.gz archive of a directory excluding heavy cache/VCS paths."""
   with tarfile.open(output_filename, "w:gz") as tar:
-    tar.add(source_dir, arcname=os.path.basename(source_dir))
+    tar.add(source_dir, arcname=os.path.basename(source_dir), filter=tar_filter)
 
 
 def _sync_repository(
@@ -138,11 +157,13 @@ def _init_codemender(
     cm_binary: str,
 ) -> None:
   """Initializes CodeMender CLI in the repository."""
+  cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
   logger.info("Initializing CodeMender CLI...")
   try:
     # Run basic init to create .cm_project
+    init_cmd = build_cm_command(cm_binary, "init", cli_version=cli_version)
     run_command(
-        [cm_binary, "init"],
+        init_cmd,
         cwd=repo_dir,
         env=scrubbed_env,
         check=True,
@@ -150,8 +171,11 @@ def _init_codemender(
     # Inject config before verifying
     inject_codemender_config(repo_dir)
     # Verify the initialization (runs build command)
+    verify_init_cmd = build_cm_command(
+        cm_binary, "init", extra_flags=["--verify"], cli_version=cli_version
+    )
     run_command(
-        [cm_binary, "init", "--verify"],
+        verify_init_cmd,
         cwd=repo_dir,
         env=scrubbed_env,
         check=True,
@@ -166,30 +190,41 @@ def _scan_repository(
     scrubbed_env: dict[str, str],
     cm_binary: str,
     targets: list[str],
-) -> list[dict[str, any]]:
+) -> tuple[list[dict[str, any]], dict[str, int]]:
   """Runs scan on targets with retries if no findings are found."""
+  cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
   max_scan_attempts = 3
   findings = []
+  scan_token_usage = {"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}
 
   for attempt in range(1, max_scan_attempts + 1):
     logger.info("Running scan attempt %d/%d...", attempt, max_scan_attempts)
     # Run find command for each target folder
     for target in targets:
       try:
-        run_command(
-            [cm_binary, "find", target],
+        find_cmd = build_cm_command(cm_binary, "find", target, cli_version=cli_version)
+        res = run_command(
+            find_cmd,
             cwd=repo_dir,
             env=scrubbed_env,
             check=True,
         )
+        token_usage = getattr(res, "token_usage", None)
+        if isinstance(token_usage, dict):
+          scan_token_usage["in_tokens"] += token_usage.get("in_tokens", 0)
+          scan_token_usage["out_tokens"] += token_usage.get("out_tokens", 0)
+          scan_token_usage["total_tokens"] += token_usage.get("total_tokens", 0)
       except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Scan failed for target %s: %s", target, e)
         sys.exit(1)
 
     # Retrieve finding report in JSON format
     try:
+      report_cmd = build_cm_command(
+          cm_binary, "report", extra_flags=["--format", "json"], cli_version=cli_version
+      )
       report_res = run_command(
-          [cm_binary, "report", "--format", "json"],
+          report_cmd,
           cwd=repo_dir,
           env=scrubbed_env,
           check=True,
@@ -209,7 +244,7 @@ def _scan_repository(
       if attempt < max_scan_attempts:
         time.sleep(5)
 
-  return findings
+  return findings, scan_token_usage
 
 
 def _filter_findings(
@@ -243,7 +278,7 @@ def _filter_findings(
     )
 
     branch_name = generate_branch_name(vuln_type, fingerprint)
-    
+
     file_path = finding.get("FilePath") or "unknown_file"
     try:
       start_line = int(finding.get("StartLine") or 0)
@@ -273,7 +308,6 @@ def _filter_findings(
 
     active_findings.append(finding)
 
-
   return active_findings, skipped_finding_ids
 
 
@@ -283,7 +317,10 @@ def _partition_findings(
 ) -> list[list[str]]:
   """Partitions active finding IDs into N worker buckets."""
   active_findings_count = len(active_findings)
-  num_workers = min(active_findings_count, max_tasks)
+  num_workers = min(active_findings_count, max_tasks, 10000)
+  if num_workers <= 0:
+    return []
+
   logger.info(
       "Partitioning %d active findings into %d workers (max_tasks=%d)",
       active_findings_count,
@@ -319,8 +356,28 @@ def _save_and_upload_state(
     workspace_dir: str,
     bucket_name: str,
     scan_id: str,
+    scan_token_usage: dict[str, int],
+    skipped_duplicate_count: int,
 ) -> None:
   """Saves partitions and manifest, generates signed URLs, and uploads to GCS."""
+  scan_metadata = {
+      "scan_id": scan_id,
+      "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+      "token_usage": scan_token_usage,
+      "total_findings_count": active_findings_count + skipped_duplicate_count,
+      "active_findings_count": active_findings_count,
+      "skipped_duplicate_count": skipped_duplicate_count,
+  }
+  scan_meta_path = os.path.join(workspace_dir, "scan_metadata.json")
+  with open(scan_meta_path, "w") as f:
+    json.dump(scan_metadata, f, indent=2)
+
+  if not upload_file_to_gcs(
+      scan_meta_path, bucket_name, f"scans/{scan_id}/scan_metadata.json"
+  ):
+    logger.critical("Failed to upload scan_metadata.json to GCS.")
+    sys.exit(1)
+
   # Tar ~/.codemender
   codemender_home = os.path.expanduser("~/.codemender")
   tarball_path = os.path.join(workspace_dir, "workspace_base.tar.gz")
@@ -342,6 +399,7 @@ def _save_and_upload_state(
 
   partition_urls = []
   upload_urls = []
+  metadata_urls = []
 
   # Save and upload each partition file
   for i, part_ids in enumerate(partitions):
@@ -379,6 +437,21 @@ def _save_and_upload_state(
       sys.exit(1)
     upload_urls.append(upload_url)
 
+    # Worker metadata GET/PUT signed URL
+    worker_meta_blob = f"scans/{scan_id}/worker_{i}_metadata.json"
+    meta_put_url = generate_signed_url(
+        bucket_name,
+        worker_meta_blob,
+        method="PUT",
+        content_type="application/json",
+    )
+    if not meta_put_url:
+      logger.critical(
+          "Failed to generate PUT signed URL for worker %d metadata.", i
+      )
+      sys.exit(1)
+    metadata_urls.append(meta_put_url)
+
   # Write and upload manifest with all Signed URLs included
   manifest = {
       "findings_count": active_findings_count,
@@ -386,6 +459,7 @@ def _save_and_upload_state(
       "base_workspace_url": base_workspace_url,
       "partition_urls": partition_urls,
       "upload_urls": upload_urls,
+      "metadata_urls": metadata_urls,
   }
   manifest_path = os.path.join(workspace_dir, "manifest.json")
   with open(manifest_path, "w") as f:
@@ -431,7 +505,7 @@ def run_scan_pipeline() -> None:
     targets = ["."]
 
   # 4. Scan repository
-  findings = _scan_repository(repo_dir, scrubbed_env, cm_binary, targets)
+  findings, scan_token_usage = _scan_repository(repo_dir, scrubbed_env, cm_binary, targets)
 
   # Handle zero findings case
   if not findings:
@@ -464,7 +538,7 @@ def run_scan_pipeline() -> None:
         cursor = conn.cursor()
         for fid in skipped_finding_ids:
           cursor.execute(
-              "UPDATE findings SET status = 'DISMISSED', muted = 1, dismiss_reason = 'Duplicate PR or branch already exists' WHERE finding_id = ?",
+              "UPDATE findings SET status = 'SKIPPED_DUPLICATE', muted = 1, mute_reason = 'Duplicate PR or branch already exists' WHERE finding_id = ?",
               (fid,)
           )
         conn.commit()
@@ -501,6 +575,9 @@ def run_scan_pipeline() -> None:
       workspace_dir,
       bucket_name,
       scan_id,
+      scan_token_usage,
+      len(skipped_finding_ids),
   )
 
   logger.info("Stage 1 (Scan) completed successfully.")
+

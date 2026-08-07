@@ -136,7 +136,7 @@ class TestWorkerRunner(unittest.TestCase):
     for call in mock_run_cmd.call_args_list:
       cmd = call[0][0]
       cmd_str = " ".join(cmd)
-      if "find" in cmd_str and "verify" in cmd_str and "fid-1" in cmd_str:
+      if "verify" in cmd_str and "fid-1" in cmd_str:
         verify_called = True
       elif "fix" in cmd_str and "fid-1" in cmd_str:
         fix_called = True

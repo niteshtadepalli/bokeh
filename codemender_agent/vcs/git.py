@@ -19,7 +19,7 @@ import logging
 
 import os
 import re
-from typing import Tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -76,6 +76,19 @@ def generate_branch_name(vuln_type: str, fingerprint: str) -> str:
   return f"codemender/fix-{vuln_clean}-{suffix}"
 
 
+
+
+def clean_workspace(repo_dir: str, exclude_dirs: Optional[Tuple[str, ...]] = None) -> None:
+  """Resets working directory and cleans untracked files while preserving CLI metadata directories."""
+  if exclude_dirs is None:
+    exclude_dirs = (".cm_project", ".exploit")
+
+  cmd = ["git", "clean", "-fd"]
+  for ex in exclude_dirs:
+    cmd.extend(["-e", ex])
+
+  from codemender_agent.utils import run_command
+  run_command(cmd, cwd=repo_dir, check=False)
 
 
 def setup_local_git_excludes(repo_dir: str) -> None:

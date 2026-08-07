@@ -27,6 +27,13 @@ main:
           - max_tasks: ${int(default(map.get(args, "max_tasks"), 20))}
           - timeout_seconds: ${int(default(map.get(args, "timeout_seconds"), 86400))}
           - scan_id: ${"scan-" + sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+          - cli_version: ${default(map.get(args, "cli_version"), "preview")}
+          - model: ${default(map.get(args, "model"), "")}
+          - models: ${default(map.get(args, "models"), {})}
+          - skip_exploit_verification: ${default(map.get(args, "skip_exploit_verification"), false)}
+          - find_model: ${default(map.get(models, "find"), model)}
+          - verify_model: ${default(map.get(models, "verify"), model)}
+          - fix_model: ${default(map.get(models, "fix"), model)}
 
     - log_start:
         call: sys.log
@@ -59,6 +66,18 @@ main:
                         value: ${scan_target}
                       - name: CODEMENDER_MAX_TASKS
                         value: ${string(max_tasks)}
+                      - name: CODEMENDER_CLI_VERSION
+                        value: ${cli_version}
+                      - name: CODEMENDER_MODEL
+                        value: ${model}
+                      - name: CODEMENDER_FIND_MODEL
+                        value: ${find_model}
+                      - name: CODEMENDER_VERIFY_MODEL
+                        value: ${verify_model}
+                      - name: CODEMENDER_FIX_MODEL
+                        value: ${fix_model}
+                      - name: CODEMENDER_SKIP_EXPLOIT_VERIFICATION
+                        value: ${string(skip_exploit_verification)}
             connector_params:
               skip_polling: true
           result: stage1_operation
@@ -78,12 +97,20 @@ main:
         result: stage1_execution
 
     - read_manifest:
-        call: googleapis.storage.v1.objects.get
-        args:
-          bucket: ${gcs_bucket}
-          object: ${text.url_encode("scans/" + scan_id + "/manifest.json")}
-          alt: "media"
-        result: manifest_response
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${gcs_bucket}
+            object: ${text.url_encode("scans/" + scan_id + "/manifest.json")}
+            alt: "media"
+          result: manifest_response
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 5
+            max_delay: 20
+            multiplier: 2
 
     - parse_manifest:
         assign:
@@ -101,7 +128,9 @@ main:
           - base_workspace_url: ${manifest.base_workspace_url}
           - partition_urls_str: ${json.encode_to_string(manifest.partition_urls)}
           - upload_urls_str: ${json.encode_to_string(manifest.upload_urls)}
-          - num_workers: ${len(manifest.partition_urls)}
+          - metadata_urls_str: ${json.encode_to_string(default(map.get(manifest, "metadata_urls"), []))}
+          - total_partitions: ${len(manifest.partition_urls)}
+          - num_workers: ${int(total_partitions > max_tasks ? max_tasks : total_partitions)}
 
     - run_stage2_workers:
         call: googleapis.run.v2.projects.locations.jobs.run
@@ -131,6 +160,20 @@ main:
                       value: ${partition_urls_str}
                     - name: CODEMENDER_UPLOAD_URLS
                       value: ${upload_urls_str}
+                    - name: CODEMENDER_METADATA_URLS
+                      value: ${metadata_urls_str}
+                    - name: CODEMENDER_CLI_VERSION
+                      value: ${cli_version}
+                    - name: CODEMENDER_MODEL
+                      value: ${model}
+                    - name: CODEMENDER_FIND_MODEL
+                      value: ${find_model}
+                    - name: CODEMENDER_VERIFY_MODEL
+                      value: ${verify_model}
+                    - name: CODEMENDER_FIX_MODEL
+                      value: ${fix_model}
+                    - name: CODEMENDER_SKIP_EXPLOIT_VERIFICATION
+                      value: ${string(skip_exploit_verification)}
           connector_params:
             skip_polling: true
         result: stage2_operation
@@ -164,6 +207,18 @@ main:
                       value: ${build_command}
                     - name: CODEMENDER_TOTAL_WORKERS
                       value: ${string(num_workers)}
+                    - name: CODEMENDER_CLI_VERSION
+                      value: ${cli_version}
+                    - name: CODEMENDER_MODEL
+                      value: ${model}
+                    - name: CODEMENDER_FIND_MODEL
+                      value: ${find_model}
+                    - name: CODEMENDER_VERIFY_MODEL
+                      value: ${verify_model}
+                    - name: CODEMENDER_FIX_MODEL
+                      value: ${fix_model}
+                    - name: CODEMENDER_SKIP_EXPLOIT_VERIFICATION
+                      value: ${string(skip_exploit_verification)}
           connector_params:
             skip_polling: true
         result: stage3_operation
