@@ -130,7 +130,7 @@ main:
           - base_workspace_url: ${manifest.base_workspace_url}
           - partition_urls_str: ${json.encode_to_string(manifest.partition_urls)}
           - upload_urls_str: ${json.encode_to_string(manifest.upload_urls)}
-          - metadata_urls_str: ${json.encode_to_string(default(manifest.metadata_urls, []))}
+          - metadata_urls_str: ${json.encode_to_string(default(map.get(manifest, "metadata_urls"), []))}
           - total_partitions: ${len(manifest.partition_urls)}
 
     - determine_num_workers:
@@ -257,7 +257,7 @@ wait_for_operation:
         result: operation
     - check_status:
         switch:
-          - condition: ${default(operation.done, false) == true}
+          - condition: ${default(map.get(operation, "done"), false) == true}
             next: check_operation_result
           - condition: ${elapsed >= timeout_seconds}
             raise: '${"Operation " + operation_name + " timed out after " + string(timeout_seconds) + " seconds."}'
@@ -275,7 +275,7 @@ wait_for_operation:
         switch:
           - condition: ${"error" in operation}
             raise: '${"Operation failed: " + operation.error.message}'
-          - condition: ${int(default(operation.response.failedCount, 0)) > 0}
+          - condition: ${int(default(map.get(operation, ["response", "failedCount"]), 0)) > 0}
             raise: '${"Job execution failed with " + string(operation.response.failedCount) + " failed tasks."}'
     - return_result:
         return: ${operation.response}
