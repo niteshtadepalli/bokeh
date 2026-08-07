@@ -71,11 +71,36 @@ def _get_local_storage_path(bucket_name: str, blob_name: str) -> str:
   return os.path.join(storage_dir, bucket_name, blob_name)
 
 
-def generate_signed_url(
+def _resolve_service_account_email(client) -> Optional[str]:
+  """Resolves active service account email for GCS signed URL generation."""
+  env_email = os.environ.get("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+  if env_email:
+    return env_email
+
+  creds_email = getattr(getattr(client, "_credentials", None), "service_account_email", None)
+  if creds_email and creds_email != "default":
+    return creds_email
+
+  # In Compute Engine / Cloud Run token-only environments, resolve 'default' via Metadata Server
+  try:
+    resp = requests.get(
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email",
+        headers={"Metadata-Flavor": "Google"},
+        timeout=2,
+    )
+    if resp.status_code == 200 and resp.text.strip():
+      return resp.text.strip()
+  except Exception:
+    pass
+
+  return None
+
+
+def generate_gcs_signed_url(
     bucket_name: str,
     blob_name: str,
-    method: str = "GET",
     expiration_days: int = 3,
+    method: str = "GET",
     content_type: Optional[str] = None,
 ) -> Optional[str]:
   """Generates a temporary Signed URL for a GCS blob (supports GET/PUT)."""
@@ -98,10 +123,8 @@ def generate_signed_url(
 
     # Wrap in Impersonated Credentials for token-only environments (e.g. Cloud Run)
     if hasattr(client, "_credentials"):
-      sa_email = os.environ.get("GOOGLE_SERVICE_ACCOUNT_EMAIL") or getattr(
-          client._credentials, "service_account_email", None
-      )
-      if sa_email and sa_email != "default":
+      sa_email = _resolve_service_account_email(client)
+      if sa_email:
         try:
           from google.auth import credentials as auth_credentials
 
@@ -140,6 +163,9 @@ def generate_signed_url(
         e,
     )
   return None
+
+
+generate_signed_url = generate_gcs_signed_url
 
 
 def upload_and_sign_report(
