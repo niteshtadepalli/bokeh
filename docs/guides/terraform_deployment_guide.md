@@ -19,8 +19,7 @@ provision:
     (`${PREFIX}-github-token`).
 *   **Service Accounts & Custom IAM**: Ephemeral, least-privilege access for
     Cloud Run, Cloud Workflows, and Cloud Build.
-*   **Cloud Run v2 Job**: Ephemeral runner container pool for `scan`, `worker`,
-    and `aggregate` modes.
+*   **Cloud Run v2 Jobs**: Ephemeral orchestrator container pool (`runner`) for `scan` and `aggregate` modes, and a dedicated unprivileged `worker` container pool for executing untrusted tests.
 *   **Cloud Workflows**: Coordinator workflow orchestrating multi-stage parallel
     tasks without container timeouts.
 *   **Cloud Scheduler**: Nightly trigger for automated repository scanning.
@@ -35,11 +34,11 @@ If you deploy multiple pipelines in the same GCP project using different
 *   **Shared Resources (Project-wide)**:
     *   **GCP APIs**: APIs enabled for the project are shared by all pipelines.
 *   **Isolated Resources (Unique per prefix)**:
-    *   **Compute & Workflow**: Cloud Run Job (`${prefix}-runner`) and Cloud
+    *   **Compute & Workflow**: Cloud Run Jobs (`${prefix}-runner`, `${prefix}-worker`) and Cloud
         Workflow (`${prefix}-coordinator`).
     *   **Storage & Secret**: GCS Reports/Releases buckets, Artifact Registry
         repository, and Secret Manager GitHub secret (`${prefix}-github-token`).
-    *   **Security**: Service Accounts (`${prefix}-runner-sa`, etc.) and Custom
+    *   **Security**: Service Accounts (`${prefix}-runner-sa`, `${prefix}-worker-sa`, etc.) and Custom
         IAM Role bindings (suffixed with `random_id` to prevent 7-day GCP IAM soft-delete tombstone conflicts).
     *   **VPC & Networking**: Dedicated VPC Connector (`${prefix}-vpc-conn`) and
         Router (requires setting distinct `vpc_connector_cidr` ranges).
@@ -47,14 +46,14 @@ If you deploy multiple pipelines in the same GCP project using different
 ```mermaid
 graph TD
     Scheduler[Cloud Scheduler] -->|Nightly Trigger| Workflow[Cloud Workflows: Coordinator]
-    Workflow -->|1. Run Stage 1 Scan| CR_Job[Cloud Run Job: Runner Pool]
-    CR_Job -->|Write manifest.json| GCS[(GCS Reports Bucket)]
+    Workflow -->|1. Run Stage 1 Scan| CR_Job_Runner[Cloud Run Job: Orchestrator]
+    CR_Job_Runner -->|Write manifest.json| GCS[(GCS Reports Bucket)]
     Workflow -->|2. Read partitions| GCS
-    Workflow -->|3. Run Stage 2 Workers| CR_Job
-    CR_Job -->|Push PR Fixes| GitHub[GitHub Repository]
-    CR_Job -->|Write Shard DBs| GCS
-    Workflow -->|4. Run Stage 3 Aggregate| CR_Job
-    CR_Job -->|Generate Signed HTML Report| GCS
+    Workflow -->|3. Run Stage 2 Workers| CR_Job_Worker[Cloud Run Job: Worker]
+    CR_Job_Worker -->|Push PR Fixes| GitHub[GitHub Repository]
+    CR_Job_Worker -->|Write Shard DBs| GCS
+    Workflow -->|4. Run Stage 3 Aggregate| CR_Job_Runner
+    CR_Job_Runner -->|Generate Signed HTML Report| GCS
 ```
 
 --------------------------------------------------------------------------------
@@ -245,12 +244,14 @@ export REGION="us-central1"
 export PROJECT_ID=$(gcloud config get-value project)
 export REPORTS_BUCKET="${PREFIX}-reports-${PROJECT_ID}"
 export JOB_NAME="${PREFIX}-runner"
+export WORKER_JOB_NAME="${PREFIX}-worker"
 export WORKFLOW_NAME="${PREFIX}-coordinator"
 
 gcloud workflows run ${WORKFLOW_NAME} \
     --location=${REGION} \
     --data='{
       "job_name": "'"${JOB_NAME}"'",
+      "worker_job_name": "'"${WORKER_JOB_NAME}"'",
       "gcs_bucket": "'"${REPORTS_BUCKET}"'",
       "repo_url": "https://github.com/your-org/your-repo.git",
       "build_command": "npm install && npm test",
@@ -269,6 +270,7 @@ gcloud workflows run ${WORKFLOW_NAME} \
     --location=${REGION} \
     --data='{
       "job_name": "'"${JOB_NAME}"'",
+      "worker_job_name": "'"${WORKER_JOB_NAME}"'",
       "gcs_bucket": "'"${REPORTS_BUCKET}"'",
       "repo_url": "https://github.com/your-org/flask-api.git",
       "build_command": "pip install -r requirements.txt && pytest",
@@ -285,7 +287,8 @@ the Cloud Run jobs:
 
 JSON Field                  | Required | Maps to Environment Variable          | Description
 :-------------------------- | :------- | :------------------------------------ | :----------
-`job_name`                  | Yes      | N/A (Cloud Run resource name)         | The name of the provisioned Cloud Run job.
+`job_name`                  | Yes      | N/A (Cloud Run resource name)         | The name of the provisioned Cloud Run job for the orchestrator (`scan` and `aggregate`).
+`worker_job_name`           | No       | N/A (Cloud Run resource name)         | The name of the provisioned Cloud Run job for the `worker` stage. Defaults to `${job_name}-worker`.
 `gcs_bucket`                | Yes      | `CODEMENDER_GCS_BUCKET`               | The GCS bucket to use for state and the final report.
 `repo_url`                  | Yes      | `GITHUB_REPO_URL`                     | The GitHub HTTPS URL of the repository to scan.
 `region`                    | No       | N/A (GCP Region)                      | The GCP region where the Cloud Run job resides. Defaults to `"us-central1"`.
@@ -350,7 +353,7 @@ export SCHEDULER_JOB_NAME="${PREFIX}-nightly-scan"
 # Update payload to point to a new repository
 gcloud scheduler jobs update http ${SCHEDULER_JOB_NAME} \
     --location=${REGION} \
-    --message-body='{"argument":"{\"job_name\":\"'"${PREFIX}"'-runner\",\"gcs_bucket\":\"'"${PREFIX}"'-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/new-org/new-repo.git\",\"build_command\":\"npm install && npm test\",\"scan_target\":\".\"}"}'
+    --message-body='{"argument":"{\"job_name\":\"'"${PREFIX}"'-runner\",\"worker_job_name\":\"'"${PREFIX}"'-worker\",\"gcs_bucket\":\"'"${PREFIX}"'-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/new-org/new-repo.git\",\"build_command\":\"npm install && npm test\",\"scan_target\":\".\"}"}'
 ```
 
 #### B. How to Add a New Scheduled Job for a different Repository
@@ -376,7 +379,7 @@ gcloud scheduler jobs create http ${PREFIX}-second-repo-nightly \
     --http-method="POST" \
     --headers="Content-Type=application/json" \
     --oauth-service-account-email=${SCHEDULER_SA} \
-    --message-body='{"argument":"{\"job_name\":\"'"${PREFIX}"'-runner\",\"gcs_bucket\":\"'"${PREFIX}"'-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/another-org/another-repo.git\",\"build_command\":\"python3 -m pip install . && pytest\",\"scan_target\":\".\"}"}'
+    --message-body='{"argument":"{\"job_name\":\"'"${PREFIX}"'-runner\",\"worker_job_name\":\"'"${PREFIX}"'-worker\",\"gcs_bucket\":\"'"${PREFIX}"'-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/another-org/another-repo.git\",\"build_command\":\"python3 -m pip install . && pytest\",\"scan_target\":\".\"}"}'
 ```
 
 --------------------------------------------------------------------------------

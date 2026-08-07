@@ -18,22 +18,23 @@ main:
     - init_variables:
         assign:
           - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
-          - region: ${default(map.get(args, "region"), "us-central1")}
+          - region: ${"region" in args ? args.region : "us-central1"}
           - job_name: ${args.job_name}
+          - worker_job_name: ${"worker_job_name" in args ? args.worker_job_name : args.job_name + "-worker"}
           - gcs_bucket: ${args.gcs_bucket}
           - repo_url: ${args.repo_url}
           - build_command: ${args.build_command}
-          - scan_target: ${default(map.get(args, "scan_target"), ".")}
-          - max_tasks: ${int(default(map.get(args, "max_tasks"), 20))}
-          - timeout_seconds: ${int(default(map.get(args, "timeout_seconds"), 86400))}
+          - scan_target: ${"scan_target" in args ? args.scan_target : "."}
+          - max_tasks: ${int("max_tasks" in args ? args.max_tasks : 20)}
+          - timeout_seconds: ${int("timeout_seconds" in args ? args.timeout_seconds : 86400)}
           - scan_id: ${"scan-" + sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
-          - cli_version: ${default(map.get(args, "cli_version"), "preview")}
-          - model: ${default(map.get(args, "model"), "")}
-          - models: ${default(map.get(args, "models"), {})}
-          - skip_exploit_verification: ${default(map.get(args, "skip_exploit_verification"), false)}
-          - find_model: ${default(map.get(models, "find"), model)}
-          - verify_model: ${default(map.get(models, "verify"), model)}
-          - fix_model: ${default(map.get(models, "fix"), model)}
+          - cli_version: ${"cli_version" in args ? args.cli_version : "preview"}
+          - model: ${"model" in args ? args.model : ""}
+          - models: ${"models" in args ? args.models : {}}
+          - skip_exploit_verification: ${"skip_exploit_verification" in args ? args.skip_exploit_verification : false}
+          - find_model: ${"find" in models ? models.find : model}
+          - verify_model: ${"verify" in models ? models.verify : model}
+          - fix_model: ${"fix" in models ? models.fix : model}
 
     - log_start:
         call: sys.log
@@ -128,14 +129,14 @@ main:
           - base_workspace_url: ${manifest.base_workspace_url}
           - partition_urls_str: ${json.encode_to_string(manifest.partition_urls)}
           - upload_urls_str: ${json.encode_to_string(manifest.upload_urls)}
-          - metadata_urls_str: ${json.encode_to_string(default(map.get(manifest, "metadata_urls"), []))}
+          - metadata_urls_str: ${json.encode_to_string("metadata_urls" in manifest ? manifest.metadata_urls : [])}
           - total_partitions: ${len(manifest.partition_urls)}
           - num_workers: ${int(total_partitions > max_tasks ? max_tasks : total_partitions)}
 
     - run_stage2_workers:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + job_name}
+          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + worker_job_name}
           body:
             overrides:
               taskCount: ${num_workers}
@@ -247,7 +248,7 @@ wait_for_operation:
         result: operation
     - check_status:
         switch:
-          - condition: ${default(map.get(operation, "done"), false) == true}
+          - condition: ${("done" in operation ? operation.done : false) == true}
             next: check_operation_result
           - condition: ${elapsed >= timeout_seconds}
             raise: '${"Operation " + operation_name + " timed out after " + string(timeout_seconds) + " seconds."}'
@@ -263,9 +264,9 @@ wait_for_operation:
 
     - check_operation_result:
         switch:
-          - condition: ${map.get(operation, "error") != null}
+          - condition: ${"error" in operation}
             raise: '${"Operation failed: " + operation.error.message}'
-          - condition: ${int(default(map.get(operation.response, "failedCount"), 0)) > 0}
+          - condition: ${int("failedCount" in operation.response ? operation.response.failedCount : 0) > 0}
             raise: '${"Job execution failed with " + string(operation.response.failedCount) + " failed tasks."}'
     - return_result:
         return: ${operation.response}

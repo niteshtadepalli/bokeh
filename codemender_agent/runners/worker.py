@@ -34,7 +34,6 @@ from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
 from codemender_agent.storage import download_from_url
-from codemender_agent.storage import generate_signed_url
 from codemender_agent.storage import upload_to_url
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import free_port
@@ -390,15 +389,8 @@ def run_worker_pipeline() -> None:
   )
   logger.info("Starting Worker %d", worker_index)
 
-  bucket_name = os.environ.get("CODEMENDER_GCS_BUCKET")
-  scan_id = os.environ.get("CODEMENDER_SCAN_ID")
-
   # 1. Base Workspace GET Signed URL
   base_workspace_url = os.environ.get("CODEMENDER_BASE_WORKSPACE_URL")
-  if not base_workspace_url and bucket_name and scan_id:
-    base_workspace_url = generate_signed_url(
-        bucket_name, f"scans/{scan_id}/workspace_base.tar.gz", method="GET"
-    )
 
   # 2. Partition GET Signed URL
   partition_url = None
@@ -410,10 +402,6 @@ def run_worker_pipeline() -> None:
         partition_url = p_urls[worker_index]
     except Exception:  # pylint: disable=broad-exception-caught
       pass
-  if not partition_url and bucket_name and scan_id:
-    partition_url = generate_signed_url(
-        bucket_name, f"scans/{scan_id}/partition_{worker_index}.json", method="GET"
-    )
 
   # 3. Worker Shard Database PUT Signed URL
   upload_url = None
@@ -425,13 +413,6 @@ def run_worker_pipeline() -> None:
         upload_url = u_urls[worker_index]
     except Exception:  # pylint: disable=broad-exception-caught
       pass
-  if not upload_url and bucket_name and scan_id:
-    upload_url = generate_signed_url(
-        bucket_name,
-        f"scans/{scan_id}/worker_{worker_index}_state.db",
-        method="PUT",
-        content_type="application/octet-stream",
-    )
 
   # 4. Worker Token Usage Metadata PUT Signed URL
   metadata_url = None
@@ -443,17 +424,11 @@ def run_worker_pipeline() -> None:
         metadata_url = m_urls[worker_index]
     except Exception:  # pylint: disable=broad-exception-caught
       pass
-  if not metadata_url and bucket_name and scan_id:
-    metadata_url = generate_signed_url(
-        bucket_name,
-        f"scans/{scan_id}/worker_{worker_index}_metadata.json",
-        method="PUT",
-        content_type="application/json",
-    )
 
   if not base_workspace_url or not partition_url or not upload_url:
     logger.critical(
-        "Failed to resolve required signed URLs for worker %d.", worker_index
+        "Failed to resolve required signed URLs for worker %d.",
+        worker_index
     )
     sys.exit(1)
 
