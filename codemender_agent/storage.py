@@ -323,7 +323,9 @@ def download_from_url(url: str, dest_path: str) -> bool:
     return False
 
 
-def upload_to_url(local_path: str, url: str) -> bool:
+def upload_to_url(
+    local_path: str, url: str, content_type: Optional[str] = None
+) -> bool:
   """Uploads a local file to a given URL (e.g., Signed PUT URL)."""
   if not os.path.exists(local_path):
     logger.error("Local file not found for upload: %s", local_path)
@@ -337,13 +339,22 @@ def upload_to_url(local_path: str, url: str) -> bool:
     except Exception as e:
       logger.error("Failed to copy local file to %s: %s", url, e)
       return False
+
+  if not content_type:
+    if local_path.endswith(".json"):
+      content_type = "application/json"
+    else:
+      content_type = "application/octet-stream"
+
   try:
-    logger.info("Uploading %s to URL...", local_path)
+    logger.info(
+        "Uploading %s to URL (Content-Type: %s)...", local_path, content_type
+    )
     with open(local_path, "rb") as f:
       response = requests.put(
           url,
           data=f,
-          headers={"Content-Type": "application/octet-stream"},
+          headers={"Content-Type": content_type},
           timeout=60,
       )
     response.raise_for_status()

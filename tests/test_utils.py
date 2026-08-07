@@ -51,5 +51,29 @@ class TestUtils(unittest.TestCase):
     )
 
 
+  @patch("subprocess.Popen")
+  def test_run_command_accumulates_multiple_retry_tokens(self, mock_popen):
+    """Verify run_command sums tokens from multiple retries/turns in stdout."""
+    stdout_lines = [
+        "Attempt 1 failed. Tokens: 10k in / 500 out / 10.5k total\n",
+        "Attempt 2 retrying. Tokens: 5k in / 200 out / 5.2k total\n",
+        "Attempt 3 succeeded. Tokens: 2.5k in / 100 out / 2.6k total\n",
+    ]
+    mock_process = MagicMock()
+    mock_stdout = MagicMock()
+    mock_stdout.__iter__.return_value = stdout_lines
+    mock_process.stdout = mock_stdout
+    mock_process.wait.return_value = 0
+    mock_popen.return_value = mock_process
+
+    with patch.dict("os.environ", {"CODEMENDER_CLI_VERSION": "preview"}):
+      res = run_command(["cm", "find"])
+      # Expected sum: (10000 + 5000 + 2500) = 17500 in, (500 + 200 + 100) = 800 out, (10500 + 5200 + 2600) = 18300 total
+      self.assertEqual(
+          res.token_usage,
+          {"in_tokens": 17500, "out_tokens": 800, "total_tokens": 18300},
+      )
+
+
 if __name__ == "__main__":
   unittest.main()

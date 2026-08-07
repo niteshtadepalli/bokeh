@@ -343,6 +343,37 @@ def _process_finding(
     clean_workspace(repo_dir)
 
 
+def _save_and_upload_worker_metadata(
+    workspace_dir: str,
+    worker_index: int,
+    worker_token_usage: dict[str, int],
+    metadata_url: Optional[str],
+) -> None:
+  """Saves worker metadata JSON and uploads it to GCS signed URL if provided."""
+  if not metadata_url:
+    logger.warning(
+        "No metadata signed URL provided for worker %d, skipping metadata upload.",
+        worker_index,
+    )
+    return
+
+  logger.info("Uploading worker metadata to GCS signed URL...")
+  worker_metadata = {
+      "worker_index": worker_index,
+      "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+      "token_usage": worker_token_usage,
+  }
+  meta_path = os.path.join(
+      workspace_dir, f"worker_{worker_index}_metadata.json"
+  )
+  try:
+    with open(meta_path, "w") as f:
+      json.dump(worker_metadata, f, indent=2)
+    upload_to_url(meta_path, metadata_url)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.error("Failed to save or upload worker metadata: %s", e)
+
+
 def run_worker_pipeline() -> None:
   """Executes Stage 2: Download state, run verify/fix on partition, upload mutated state."""
   worker_index = int(
@@ -418,6 +449,7 @@ def run_worker_pipeline() -> None:
   state_db_path = os.path.join(codemender_home, "state.db")
   worker_token_usage = {"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}
 
+
   # If partition has no findings, upload unmodified base DB and exit
   if not finding_ids:
     logger.info("No findings in partition. Exiting.")
@@ -425,19 +457,9 @@ def run_worker_pipeline() -> None:
       logger.critical("Failed to upload unmodified database.")
       sys.exit(1)
 
-    if metadata_url:
-      worker_metadata = {
-          "worker_index": worker_index,
-          "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-          "token_usage": worker_token_usage,
-      }
-      meta_path = os.path.join(
-          workspace_dir, f"worker_{worker_index}_metadata.json"
-      )
-      with open(meta_path, "w") as f:
-        json.dump(worker_metadata, f, indent=2)
-      upload_to_url(meta_path, metadata_url)
-
+    _save_and_upload_worker_metadata(
+        workspace_dir, worker_index, worker_token_usage, metadata_url
+    )
     sys.exit(0)
 
   inject_codemender_config(repo_dir)
@@ -493,19 +515,9 @@ def run_worker_pipeline() -> None:
     logger.error("Failed to upload mutated database.")
     sys.exit(1)
 
-  if metadata_url:
-    logger.info("Uploading worker metadata to GCS signed URL...")
-    worker_metadata = {
-        "worker_index": worker_index,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "token_usage": worker_token_usage,
-    }
-    meta_path = os.path.join(
-        workspace_dir, f"worker_{worker_index}_metadata.json"
-    )
-    with open(meta_path, "w") as f:
-      json.dump(worker_metadata, f, indent=2)
-    upload_to_url(meta_path, metadata_url)
+  _save_and_upload_worker_metadata(
+      workspace_dir, worker_index, worker_token_usage, metadata_url
+  )
 
   logger.info("Stage 2 (Worker) completed successfully.")
 

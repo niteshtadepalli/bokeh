@@ -233,15 +233,21 @@ def run_command(
         full_stdout,
     )
     if matches:
-      last_match = matches[-1]
-      try:
-        token_usage = {
-            "in_tokens": parse_token_metric(last_match[0]),
-            "out_tokens": parse_token_metric(last_match[1]),
-            "total_tokens": parse_token_metric(last_match[2]),
-        }
-      except ValueError:
-        token_usage = {"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}
+      in_tokens = 0
+      out_tokens = 0
+      total_tokens = 0
+      for m in matches:
+        try:
+          in_tokens += parse_token_metric(m[0])
+          out_tokens += parse_token_metric(m[1])
+          total_tokens += parse_token_metric(m[2])
+        except ValueError:
+          pass
+      token_usage = {
+          "in_tokens": in_tokens,
+          "out_tokens": out_tokens,
+          "total_tokens": total_tokens,
+      }
     else:
       token_usage = {"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}
 
