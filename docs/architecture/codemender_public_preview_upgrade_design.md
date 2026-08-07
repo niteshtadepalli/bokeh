@@ -334,7 +334,7 @@ with precise rationale and behavioral specifications.
         -   Leaving `status = 'DISMISSED'` completely clean for user/manual
             dismissals without manual script manipulation.
     4.  In `_partition_findings`: Cap maximum task worker partitions to
-        $\min(\text{active\_findings}, \text{max\_tasks}, 10000)$ to comply
+        `min(active_findings, max_tasks, 10000)` to comply
         strictly with official GCP Cloud Run Job v2 task limit bounds (up to
         10,000 tasks max per job execution, as documented in Google Cloud Run
         Quotas & Limits).
