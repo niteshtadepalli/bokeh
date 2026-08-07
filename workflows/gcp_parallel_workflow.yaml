@@ -17,6 +17,7 @@ main:
   steps:
     - init_variables:
         assign:
+          - default_empty_map: {}
           - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
           - region: ${default(args.region, "us-central1")}
           - job_name: ${args.job_name}
@@ -30,7 +31,7 @@ main:
           - scan_id: ${"scan-" + sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
           - cli_version: ${default(args.cli_version, "preview")}
           - model: ${default(args.model, "")}
-          - models: ${default(args.models, {})}
+          - models: ${default(args.models, default_empty_map)}
           - skip_exploit_verification: ${default(args.skip_exploit_verification, false)}
           - find_model: ${default(models.find, model)}
           - verify_model: ${default(models.verify, model)}
