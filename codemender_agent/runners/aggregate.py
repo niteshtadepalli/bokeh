@@ -75,22 +75,33 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
       cols_str = ", ".join(common_cols)
       update_cols = [c for c in common_cols if c != "finding_id"]
       if update_cols:
-        update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
-        where_clause = ""
+        set_clause = ", ".join([
+            f"{c} = (SELECT {c} FROM worker.findings WHERE finding_id ="
+            " main.findings.finding_id)"
+            for c in update_cols
+        ])
+        where_cond = ""
         if "updated_at" in common_cols:
-          where_clause = "WHERE excluded.updated_at >= findings.updated_at OR findings.updated_at = '' OR findings.updated_at IS NULL"
-        conflict_clause = f"ON CONFLICT(finding_id) DO UPDATE SET {update_sets} {where_clause}"
-      else:
-        conflict_clause = "ON CONFLICT(finding_id) DO NOTHING"
+          where_cond = (
+              " AND ((SELECT updated_at FROM worker.findings WHERE finding_id ="
+              " main.findings.finding_id) >= main.findings.updated_at OR"
+              " main.findings.updated_at = '' OR main.findings.updated_at IS"
+              " NULL)"
+          )
+        cursor.execute(f"""
+            UPDATE main.findings
+            SET {set_clause}
+            WHERE finding_id IN (SELECT finding_id FROM worker.findings)
+            {where_cond};
+        """)
 
       cursor.execute(f"""
-          INSERT INTO main.findings ({cols_str})
+          INSERT OR IGNORE INTO main.findings ({cols_str})
           SELECT {cols_str} FROM worker.findings AS w
           WHERE EXISTS (
               SELECT 1 FROM main.findings AS m
               WHERE m.finding_id = w.finding_id
-          )
-          {conflict_clause};
+          );
       """)
 
     # 2. Sessions Merge:
@@ -102,19 +113,20 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
       cols_str = ", ".join(common_cols)
       update_cols = [c for c in common_cols if c != "session_id"]
       if update_cols:
-        update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
-        where_clause = ""
-        if "updated_at" in common_cols:
-          where_clause = "WHERE excluded.updated_at >= sessions.updated_at OR sessions.updated_at = '' OR sessions.updated_at IS NULL"
-        conflict_clause = f"ON CONFLICT(session_id) DO UPDATE SET {update_sets} {where_clause}"
-      else:
-        conflict_clause = "ON CONFLICT(session_id) DO NOTHING"
+        set_clause = ", ".join([
+            f"{c} = (SELECT {c} FROM worker.sessions WHERE session_id ="
+            " main.sessions.session_id)"
+            for c in update_cols
+        ])
+        cursor.execute(f"""
+            UPDATE main.sessions
+            SET {set_clause}
+            WHERE session_id IN (SELECT session_id FROM worker.sessions);
+        """)
 
       cursor.execute(f"""
-          INSERT INTO main.sessions ({cols_str})
-          SELECT {cols_str} FROM worker.sessions
-          WHERE true
-          {conflict_clause};
+          INSERT OR IGNORE INTO main.sessions ({cols_str})
+          SELECT {cols_str} FROM worker.sessions;
       """)
 
     # 3. Artifacts Merge:
@@ -125,7 +137,7 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
     if common_cols:
       cols_str = ", ".join(common_cols)
       cursor.execute(f"""
-          INSERT INTO main.artifacts ({cols_str})
+          INSERT OR IGNORE INTO main.artifacts ({cols_str})
           SELECT {cols_str} FROM worker.artifacts AS w
           WHERE (w.finding_id IS NULL OR EXISTS (
               SELECT 1 FROM main.findings AS m
@@ -143,21 +155,13 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
 
     if common_cols and "patch_id" in common_cols:
       cols_str = ", ".join(common_cols)
-      update_cols = [c for c in common_cols if c != "patch_id"]
-      if update_cols:
-        update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
-        conflict_clause = f"ON CONFLICT(patch_id) DO UPDATE SET {update_sets}"
-      else:
-        conflict_clause = "ON CONFLICT(patch_id) DO NOTHING"
-
       cursor.execute(f"""
-          INSERT INTO main.patches ({cols_str})
+          INSERT OR REPLACE INTO main.patches ({cols_str})
           SELECT {cols_str} FROM worker.patches AS w
           WHERE EXISTS (
               SELECT 1 FROM main.findings AS m
               WHERE m.finding_id = w.finding_id
-          )
-          {conflict_clause};
+          );
       """)
 
     # 5. File Hashes Merge:
@@ -169,17 +173,9 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
 
       if common_cols and "file_path" in common_cols:
         cols_str = ", ".join(common_cols)
-        update_cols = [c for c in common_cols if c != "file_path"]
-        if update_cols:
-          update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
-          conflict_clause = f"ON CONFLICT(file_path) DO UPDATE SET {update_sets}"
-        else:
-          conflict_clause = "ON CONFLICT(file_path) DO NOTHING"
-
         cursor.execute(f"""
-            INSERT INTO main.file_hashes ({cols_str})
-            SELECT {cols_str} FROM worker.file_hashes AS w
-            {conflict_clause};
+            INSERT OR REPLACE INTO main.file_hashes ({cols_str})
+            SELECT {cols_str} FROM worker.file_hashes;
         """)
 
     conn.commit()

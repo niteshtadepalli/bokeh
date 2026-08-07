@@ -301,6 +301,38 @@ class TestAggregateRunner(unittest.TestCase):
 
     conn.close()
 
+  def test_merge_db_file_hashes(self):
+    base_db = os.path.join(self.workspace_dir, "base_hashes.db")
+    worker_db = os.path.join(self.workspace_dir, "worker_hashes.db")
+
+    conn1 = sqlite3.connect(base_db)
+    conn1.execute(
+        "CREATE TABLE file_hashes (file_path TEXT PRIMARY KEY, hash TEXT)"
+    )
+    conn1.execute("INSERT INTO file_hashes VALUES ('main.py', 'hash1')")
+    conn1.commit()
+    conn1.close()
+
+    conn2 = sqlite3.connect(worker_db)
+    conn2.execute(
+        "CREATE TABLE file_hashes (file_path TEXT PRIMARY KEY, hash TEXT)"
+    )
+    conn2.execute("INSERT INTO file_hashes VALUES ('main.py', 'updated_hash1')")
+    conn2.execute("INSERT INTO file_hashes VALUES ('utils.py', 'hash2')")
+    conn2.commit()
+    conn2.close()
+
+    merge_db(base_db, worker_db)
+
+    conn = sqlite3.connect(base_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT file_path, hash FROM file_hashes ORDER BY file_path")
+    rows = cursor.fetchall()
+    self.assertEqual(len(rows), 2)
+    self.assertEqual(rows[0], ("main.py", "updated_hash1"))
+    self.assertEqual(rows[1], ("utils.py", "hash2"))
+    conn.close()
+
   @patch("codemender_agent.runners.aggregate.run_command")
   @patch("codemender_agent.runners.aggregate.download_file_from_gcs")
   @patch("codemender_agent.runners.aggregate.list_gcs_blobs")
