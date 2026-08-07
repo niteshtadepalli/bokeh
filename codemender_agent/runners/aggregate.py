@@ -269,9 +269,13 @@ def _aggregate_token_metrics(
     except Exception as e:  # pylint: disable=broad-exception-caught
       logger.warning("Failed to parse scan_metadata.json: %s", e)
 
-  # 2. Download Stage 2 worker metadata JSONs
-  for blob in worker_db_blobs:
-    meta_blob = blob.replace("_state.db", "_metadata.json")
+  # 2. Discover and download Stage 2 worker metadata JSONs
+  all_blobs = list_gcs_blobs(bucket_name, prefix=f"scans/{scan_id}/worker_")
+  meta_blobs = sorted(list(set(
+      [b for b in all_blobs if b.endswith("_metadata.json")]
+      + [b.replace("_state.db", "_metadata.json") for b in worker_db_blobs]
+  )))
+  for meta_blob in meta_blobs:
     local_meta = os.path.join(workspace_dir, os.path.basename(meta_blob))
     if download_file_from_gcs(local_meta, bucket_name, meta_blob):
       try:
@@ -542,9 +546,10 @@ def run_aggregate_pipeline() -> None:
   )
 
   # Aggregate Token Metrics (Preview Mode only)
+  token_totals = None
   cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
   if cli_version == "preview":
-    _aggregate_token_metrics(
+    token_totals = _aggregate_token_metrics(
         workspace_dir, bucket_name, scan_id, worker_db_blobs
     )
 
@@ -575,6 +580,7 @@ def run_aggregate_pipeline() -> None:
       bucket_name,
       owner,
       repo_name,
+      token_totals=token_totals,
   )
 
   logger.info("Stage 3 (Aggregate) completed successfully.")

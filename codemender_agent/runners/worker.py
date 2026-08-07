@@ -34,6 +34,7 @@ from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
 from codemender_agent.storage import download_from_url
+from codemender_agent.storage import generate_signed_url
 from codemender_agent.storage import upload_to_url
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import free_port
@@ -351,13 +352,13 @@ def _save_and_upload_worker_metadata(
 ) -> None:
   """Saves worker metadata JSON and uploads it to GCS signed URL if provided."""
   if not metadata_url:
-    logger.warning(
-        "No metadata signed URL provided for worker %d, skipping metadata upload.",
+    logger.error(
+        "Failed to resolve metadata signed URL for worker %d; token usage statistics will be incomplete!",
         worker_index,
     )
     return
 
-  logger.info("Uploading worker metadata to GCS signed URL...")
+  logger.info("Uploading worker %d metadata to GCS signed URL...", worker_index)
   worker_metadata = {
       "worker_index": worker_index,
       "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -369,9 +370,15 @@ def _save_and_upload_worker_metadata(
   try:
     with open(meta_path, "w") as f:
       json.dump(worker_metadata, f, indent=2)
-    upload_to_url(meta_path, metadata_url)
+    if not upload_to_url(meta_path, metadata_url, content_type="application/json"):
+      logger.error(
+          "Failed to upload worker %d metadata to GCS signed URL; token usage statistics will be incomplete!",
+          worker_index,
+      )
+    else:
+      logger.info("Successfully uploaded worker %d metadata to GCS.", worker_index)
   except Exception as e:  # pylint: disable=broad-exception-caught
-    logger.error("Failed to save or upload worker metadata: %s", e)
+    logger.error("Failed to save or upload worker %d metadata: %s", worker_index, e)
 
 
 def run_worker_pipeline() -> None:
@@ -383,39 +390,72 @@ def run_worker_pipeline() -> None:
   )
   logger.info("Starting Worker %d", worker_index)
 
+  bucket_name = os.environ.get("CODEMENDER_GCS_BUCKET")
+  scan_id = os.environ.get("CODEMENDER_SCAN_ID")
+
+  # 1. Base Workspace GET Signed URL
   base_workspace_url = os.environ.get("CODEMENDER_BASE_WORKSPACE_URL")
+  if not base_workspace_url and bucket_name and scan_id:
+    base_workspace_url = generate_signed_url(
+        bucket_name, f"scans/{scan_id}/workspace_base.tar.gz", method="GET"
+    )
+
+  # 2. Partition GET Signed URL
+  partition_url = None
   partition_urls_json = os.environ.get("CODEMENDER_PARTITION_URLS")
+  if partition_urls_json:
+    try:
+      p_urls = json.loads(partition_urls_json)
+      if worker_index < len(p_urls):
+        partition_url = p_urls[worker_index]
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+  if not partition_url and bucket_name and scan_id:
+    partition_url = generate_signed_url(
+        bucket_name, f"scans/{scan_id}/partition_{worker_index}.json", method="GET"
+    )
+
+  # 3. Worker Shard Database PUT Signed URL
+  upload_url = None
   upload_urls_json = os.environ.get("CODEMENDER_UPLOAD_URLS")
+  if upload_urls_json:
+    try:
+      u_urls = json.loads(upload_urls_json)
+      if worker_index < len(u_urls):
+        upload_url = u_urls[worker_index]
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+  if not upload_url and bucket_name and scan_id:
+    upload_url = generate_signed_url(
+        bucket_name,
+        f"scans/{scan_id}/worker_{worker_index}_state.db",
+        method="PUT",
+        content_type="application/octet-stream",
+    )
+
+  # 4. Worker Token Usage Metadata PUT Signed URL
+  metadata_url = None
   metadata_urls_json = os.environ.get("CODEMENDER_METADATA_URLS")
+  if metadata_urls_json:
+    try:
+      m_urls = json.loads(metadata_urls_json)
+      if worker_index < len(m_urls):
+        metadata_url = m_urls[worker_index]
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+  if not metadata_url and bucket_name and scan_id:
+    metadata_url = generate_signed_url(
+        bucket_name,
+        f"scans/{scan_id}/worker_{worker_index}_metadata.json",
+        method="PUT",
+        content_type="application/json",
+    )
 
-  if not base_workspace_url or not partition_urls_json or not upload_urls_json:
-    logger.critical("Missing required signed URLs in environment.")
-    sys.exit(1)
-
-  try:
-    partition_urls = json.loads(partition_urls_json)
-    upload_urls = json.loads(upload_urls_json)
-    metadata_urls = json.loads(metadata_urls_json) if metadata_urls_json else []
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logger.critical("Failed to parse partition, upload, or metadata URLs JSON: %s", e)
-    sys.exit(1)
-
-  if worker_index >= len(partition_urls) or worker_index >= len(upload_urls):
+  if not base_workspace_url or not partition_url or not upload_url:
     logger.critical(
-        "Worker index %d out of bounds for URLs (partitions: %d, uploads: %d)",
-        worker_index,
-        len(partition_urls),
-        len(upload_urls),
+        "Failed to resolve required signed URLs for worker %d.", worker_index
     )
     sys.exit(1)
-
-  partition_url = partition_urls[worker_index]
-  upload_url = upload_urls[worker_index]
-  metadata_url = (
-      metadata_urls[worker_index]
-      if (metadata_urls and worker_index < len(metadata_urls))
-      else None
-  )
 
   workspace_dir = os.environ.get("WORKSPACE_DIR", os.getcwd())
   repo_url, token = get_github_credentials()

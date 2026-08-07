@@ -427,5 +427,66 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertIn("⚡ LLM Token Usage Summary", content)
 
 
+  @patch("codemender_agent.runners.aggregate._generate_and_upload_report")
+  @patch("codemender_agent.runners.aggregate._aggregate_token_metrics")
+  @patch("codemender_agent.runners.aggregate._download_and_merge_worker_dbs")
+  @patch("codemender_agent.runners.aggregate.list_gcs_blobs")
+  @patch("codemender_agent.runners.aggregate.download_file_from_gcs")
+  @patch("codemender_agent.runners.aggregate.run_command")
+  @patch("tarfile.open")
+  def test_run_aggregate_pipeline_passes_token_totals_to_report(
+      self,
+      mock_tarfile_open,
+      mock_run_cmd,
+      mock_download_gcs,
+      mock_list_gcs,
+      mock_download_merge,
+      mock_aggregate_tokens,
+      mock_generate_report,
+  ):
+    manifest_data = {
+        "findings_count": 2,
+        "target_sha": "abc123sha",
+        "partition_urls": ["http://url1", "http://url2"],
+        "upload_urls": ["http://u1", "http://u2"],
+    }
+    manifest_path = os.path.join(self.workspace_dir, "manifest.json")
+    with open(manifest_path, "w") as f:
+      json.dump(manifest_data, f)
+
+    mock_download_gcs.return_value = True
+    mock_list_gcs.return_value = [
+        "scans/test-scan-123/worker_0_state.db",
+        "scans/test-scan-123/worker_1_state.db",
+    ]
+    mock_aggregate_tokens.return_value = {
+        "in_tokens": 15000,
+        "out_tokens": 900,
+        "total_tokens": 15900,
+    }
+
+    with patch.dict(os.environ, {"CODEMENDER_CLI_VERSION": "preview"}):
+      run_aggregate_pipeline()
+
+    mock_aggregate_tokens.assert_called_once_with(
+        self.workspace_dir,
+        "test-bucket",
+        "test-scan-123",
+        [
+            "scans/test-scan-123/worker_0_state.db",
+            "scans/test-scan-123/worker_1_state.db",
+        ],
+    )
+    mock_generate_report.assert_called_once()
+    self.assertEqual(
+        mock_generate_report.call_args.kwargs.get("token_totals"),
+        {
+            "in_tokens": 15000,
+            "out_tokens": 900,
+            "total_tokens": 15900,
+        },
+    )
+
+
 if __name__ == "__main__":
   unittest.main()
