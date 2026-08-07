@@ -18,6 +18,7 @@ from contextlib import closing
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -73,10 +74,14 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
     if common_cols and "finding_id" in common_cols:
       cols_str = ", ".join(common_cols)
       update_cols = [c for c in common_cols if c != "finding_id"]
-      update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
-      where_clause = ""
-      if "updated_at" in common_cols:
-        where_clause = "WHERE excluded.updated_at >= findings.updated_at OR findings.updated_at = '' OR findings.updated_at IS NULL"
+      if update_cols:
+        update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
+        where_clause = ""
+        if "updated_at" in common_cols:
+          where_clause = "WHERE excluded.updated_at >= findings.updated_at OR findings.updated_at = '' OR findings.updated_at IS NULL"
+        conflict_clause = f"ON CONFLICT(finding_id) DO UPDATE SET {update_sets} {where_clause}"
+      else:
+        conflict_clause = "ON CONFLICT(finding_id) DO NOTHING"
 
       cursor.execute(f"""
           INSERT INTO main.findings ({cols_str})
@@ -85,9 +90,7 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
               SELECT 1 FROM main.findings AS m
               WHERE m.finding_id = w.finding_id
           )
-          ON CONFLICT(finding_id) DO UPDATE SET
-              {update_sets}
-          {where_clause};
+          {conflict_clause};
       """)
 
     # 2. Sessions Merge:
@@ -98,18 +101,20 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
     if common_cols and "session_id" in common_cols:
       cols_str = ", ".join(common_cols)
       update_cols = [c for c in common_cols if c != "session_id"]
-      update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
-      where_clause = ""
-      if "updated_at" in common_cols:
-        where_clause = "WHERE excluded.updated_at >= sessions.updated_at OR sessions.updated_at = '' OR sessions.updated_at IS NULL"
+      if update_cols:
+        update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
+        where_clause = ""
+        if "updated_at" in common_cols:
+          where_clause = "WHERE excluded.updated_at >= sessions.updated_at OR sessions.updated_at = '' OR sessions.updated_at IS NULL"
+        conflict_clause = f"ON CONFLICT(session_id) DO UPDATE SET {update_sets} {where_clause}"
+      else:
+        conflict_clause = "ON CONFLICT(session_id) DO NOTHING"
 
       cursor.execute(f"""
           INSERT INTO main.sessions ({cols_str})
           SELECT {cols_str} FROM worker.sessions
           WHERE true
-          ON CONFLICT(session_id) DO UPDATE SET
-              {update_sets}
-          {where_clause};
+          {conflict_clause};
       """)
 
     # 3. Artifacts Merge:
@@ -139,7 +144,11 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
     if common_cols and "patch_id" in common_cols:
       cols_str = ", ".join(common_cols)
       update_cols = [c for c in common_cols if c != "patch_id"]
-      update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
+      if update_cols:
+        update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
+        conflict_clause = f"ON CONFLICT(patch_id) DO UPDATE SET {update_sets}"
+      else:
+        conflict_clause = "ON CONFLICT(patch_id) DO NOTHING"
 
       cursor.execute(f"""
           INSERT INTO main.patches ({cols_str})
@@ -148,8 +157,7 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
               SELECT 1 FROM main.findings AS m
               WHERE m.finding_id = w.finding_id
           )
-          ON CONFLICT(patch_id) DO UPDATE SET
-              {update_sets};
+          {conflict_clause};
       """)
 
     # 5. File Hashes Merge:
@@ -162,13 +170,16 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
       if common_cols and "file_path" in common_cols:
         cols_str = ", ".join(common_cols)
         update_cols = [c for c in common_cols if c != "file_path"]
-        update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
+        if update_cols:
+          update_sets = ", ".join([f"{c} = excluded.{c}" for c in update_cols])
+          conflict_clause = f"ON CONFLICT(file_path) DO UPDATE SET {update_sets}"
+        else:
+          conflict_clause = "ON CONFLICT(file_path) DO NOTHING"
 
         cursor.execute(f"""
             INSERT INTO main.file_hashes ({cols_str})
             SELECT {cols_str} FROM worker.file_hashes AS w
-            ON CONFLICT(file_path) DO UPDATE SET
-                {update_sets};
+            {conflict_clause};
         """)
 
     conn.commit()
@@ -288,6 +299,77 @@ def _aggregate_token_metrics(
   return totals
 
 
+def _inject_token_metrics_into_html(
+    html_path: str, token_totals: Optional[dict[str, int]]
+) -> None:
+  """Injects a Token Usage Summary card between the report title and finding count section."""
+  if not os.path.exists(html_path) or not token_totals:
+    return
+
+  in_tokens = token_totals.get("in_tokens", 0)
+  out_tokens = token_totals.get("out_tokens", 0)
+  total_tokens = token_totals.get("total_tokens", 0)
+
+  banner_html = f"""
+  <div id="codemender-token-metrics-banner" style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 25px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+    <h3 style="margin-bottom: 12px; font-size: 0.95rem; color: #16213e; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 8px;">
+      ⚡ LLM Token Usage Summary
+    </h3>
+    <div style="display: flex; gap: 40px; flex-wrap: wrap;">
+      <div>
+        <span style="font-size: 0.8rem; text-transform: uppercase; color: #6c757d; font-weight: 600; display: block; margin-bottom: 4px;">Input Tokens</span>
+        <span style="font-size: 1.5rem; font-weight: 700; color: #0d6efd;">{in_tokens:,}</span>
+      </div>
+      <div>
+        <span style="font-size: 0.8rem; text-transform: uppercase; color: #6c757d; font-weight: 600; display: block; margin-bottom: 4px;">Output Tokens</span>
+        <span style="font-size: 1.5rem; font-weight: 700; color: #198754;">{out_tokens:,}</span>
+      </div>
+      <div>
+        <span style="font-size: 0.8rem; text-transform: uppercase; color: #6c757d; font-weight: 600; display: block; margin-bottom: 4px;">Total Tokens</span>
+        <span style="font-size: 1.5rem; font-weight: 700; color: #212529;">{total_tokens:,}</span>
+      </div>
+    </div>
+  </div>
+"""
+  try:
+    with open(html_path, "r", encoding="utf-8") as f:
+      content = f.read()
+
+    # 1. Target right before <div class="cards"> (inside main container, above count cards)
+    match = re.search(r"(<div\s+class=[\"']cards[\"'][^>]*>)", content, re.IGNORECASE)
+    if not match:
+      # 2. Fallback: right after </header>
+      match = re.search(r"(</header>)", content, re.IGNORECASE)
+    if not match:
+      # 3. Fallback: right after <h1> title tag
+      match = re.search(
+          r"(<h1[^>]*>.*?CodeMender Security Report.*?</h1>)",
+          content,
+          re.IGNORECASE | re.DOTALL,
+      )
+    if not match:
+      # 4. Fallback to <body> tag
+      match = re.search(r"(<body[^>]*>)", content, re.IGNORECASE)
+
+    if match:
+      if match.group(1).lower().startswith("<div"):
+        # Insert BEFORE <div class="cards">
+        pos = match.start()
+        new_content = content[:pos] + banner_html + "\n  " + content[pos:]
+      else:
+        # Insert AFTER match tag
+        pos = match.end()
+        new_content = content[:pos] + "\n" + banner_html + content[pos:]
+    else:
+      new_content = banner_html + "\n" + content
+
+    with open(html_path, "w", encoding="utf-8") as f:
+      f.write(new_content)
+    logger.info("Successfully injected Token Usage Summary into HTML report.")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Failed to inject token usage into HTML report: %s", e)
+
+
 def _generate_and_upload_report(
     repo_dir: str,
     scrubbed_env: dict[str, str],
@@ -296,6 +378,7 @@ def _generate_and_upload_report(
     bucket_name: str,
     owner: str,
     repo_name: str,
+    token_totals: Optional[dict[str, int]] = None,
 ) -> None:
   """Generates final HTML report using cm CLI and uploads it to GCS."""
   cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
@@ -312,6 +395,7 @@ def _generate_and_upload_report(
 
   if report_res.returncode == 0:
     local_report_path = os.path.join(codemender_home, "reports/report.html")
+    _inject_token_metrics_into_html(local_report_path, token_totals)
     report_bucket = os.environ.get("CODEMENDER_REPORT_BUCKET") or bucket_name
     dest_blob = (
         f"reports/{owner}_{repo_name}/"

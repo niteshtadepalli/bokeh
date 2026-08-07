@@ -21,7 +21,11 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from codemender_agent.runners.aggregate import merge_db, run_aggregate_pipeline
+from codemender_agent.runners.aggregate import (
+    _inject_token_metrics_into_html,
+    merge_db,
+    run_aggregate_pipeline,
+)
 
 
 class TestAggregateRunner(unittest.TestCase):
@@ -399,6 +403,28 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertTrue(report_called)
 
     mock_upload_and_sign_report.assert_called_once()
+
+  def test_inject_token_metrics_into_html(self):
+    html_path = os.path.join(self.workspace_dir, "report.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+      f.write("<!DOCTYPE html><html><head><title>Report</title></head><body><h1>Scan Summary</h1></body></html>")
+
+    token_totals = {
+        "in_tokens": 12500,
+        "out_tokens": 800,
+        "total_tokens": 13300,
+    }
+
+    _inject_token_metrics_into_html(html_path, token_totals)
+
+    with open(html_path, "r", encoding="utf-8") as f:
+      content = f.read()
+
+    self.assertIn("codemender-token-metrics-banner", content)
+    self.assertIn("12,500", content)
+    self.assertIn("800", content)
+    self.assertIn("13,300", content)
+    self.assertIn("⚡ LLM Token Usage Summary", content)
 
 
 if __name__ == "__main__":
