@@ -171,3 +171,30 @@ resource "google_project_iam_member" "worker_aiplatform_user" {
   role    = "roles/aiplatform.user"
   member  = "serviceAccount:${google_service_account.worker_sa.email}"
 }
+
+
+
+# Grant Cloud Run Developer to Cloud Build SAs so they can update the Cloud Run Job image
+resource "google_project_iam_member" "cloudbuild_run_developer" {
+  for_each   = local.cloudbuild_service_accounts
+  project    = var.project_id
+  role       = "roles/run.developer"
+  member     = each.value
+  depends_on = [google_project_service.enabled_services["iam.googleapis.com"]]
+}
+
+# Grant Service Account User to Cloud Build SAs on the Runner SA
+resource "google_service_account_iam_member" "cloudbuild_runner_sa_user" {
+  for_each           = local.cloudbuild_service_accounts
+  service_account_id = google_service_account.runner_sa.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = each.value
+}
+
+# Grant Service Account User to Cloud Build SAs on the Worker SA
+resource "google_service_account_iam_member" "cloudbuild_worker_sa_user" {
+  for_each           = local.cloudbuild_service_accounts
+  service_account_id = google_service_account.worker_sa.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = each.value
+}
