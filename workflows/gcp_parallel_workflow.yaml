@@ -21,7 +21,7 @@ main:
           - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
           - region: ${default(map.get(args, "region"), "us-central1")}
           - job_name: ${args.job_name}
-          - worker_job_name: ${default(map.get(args, "worker_job_name"), args.job_name + "-worker")}
+          - worker_job_name: ${default(map.get(args, "worker_job_name"), text.replace_all(args.job_name, "-runner", "") + "-worker")}
           - gcs_bucket: ${args.gcs_bucket}
           - repo_url: ${args.repo_url}
           - build_command: ${args.build_command}
