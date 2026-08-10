@@ -34,9 +34,9 @@ your own secure containers across a scalable, 3-stage pipeline orchestrated by
 2.  **Stage 2: Parallel Workers (Verify & Fix)**: Ephemeral, unprivileged Cloud
     Run Job tasks spin up concurrently (up to 100+ parallel tasks). Using the
     **Valet Key Pattern**, they download their assigned work via temporary
-    Signed URLs. Each worker verifies findings (`cm find verify`), applies
-    patches (`cm fix`), opens GitHub PRs for successful fixes, and uploads its
-    local SQLite state database shard back to GCS.
+    Signed URLs. Each worker verifies findings (`cm verify`), applies patches
+    (`cm fix`), opens GitHub PRs for successful fixes, and uploads its local
+    SQLite state database shard back to GCS.
 3.  **Stage 3: Aggregator (Report)**: The coordinator job wakes back up,
     downloads all worker database shards, securely merges them using `SQLite
     ATTACH`, and generates a consolidated, interactive HTML vulnerability
@@ -89,8 +89,8 @@ graph TD
 -   **Credential Scrubbing**: `orchestrator.py` explicitly scrubs sensitive
     credentials (`GITHUB_APP_TOKEN`, `GITHUB_PAT`, `GITHUB_TOKEN`, `GH_TOKEN`,
     `GITHUB_SECRET`) from the subprocess environment before invoking `cm`
-    commands (`cm find verify`, `cm fix`) to eliminate remote code execution
-    (RCE) exfiltration risks.
+    commands (`cm verify`, `cm fix`) to eliminate remote code execution (RCE)
+    exfiltration risks.
 -   **Single-Sync Git Rule**: The orchestrator syncs only once at the beginning
     of Stage 1 (`git clone --depth 1`). Workers operate on exactly the same
     codebase snapshot. Fixed branches are pushed directly to remote and PRs
@@ -102,10 +102,13 @@ graph TD
     the same file and vulnerability type within a 15-line sliding window. If a
     branch or open PR already exists, the worker skips duplicate `cm fix`
     operations.
--   **GCS Summary Reports**: At the end of the pipeline, the aggregator
-    automatically compiles an interactive HTML summary report (`cm report -f
-    html`) and generates a secure, temporary Signed URL (valid for 3 days)
-    printed in the job output logs for easy developer review.
+-   **GCS Summary Reports & Token Metrics**: At the end of the pipeline, the
+    aggregator automatically compiles an interactive HTML summary report (`cm
+    report -f html`). When running in Public Preview mode, it dynamically
+    aggregates LLM token usage metrics (input and output tokens) from all worker
+    shards and injects a summary banner into the final report. It then generates
+    a secure, temporary Signed URL (valid for 3 days) printed in the job output
+    logs for easy developer review.
 
 --------------------------------------------------------------------------------
 
