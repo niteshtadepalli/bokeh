@@ -314,13 +314,18 @@ JSON Field                  | Required | Maps to Environment Variable           
 > `force_overwrite`)**: Currently, the default `gcp_parallel_workflow.yaml` does
 > not dynamically parse `cleanup_ports` or `force_overwrite` from the `--data`
 > trigger payload. To use these settings in a parallel workflow execution, you
-> can either: 1. **Configure on the Cloud Run Job directly (Recommended without
-> redeploying workflow)**: Update the default environment variables on the
-> underlying Cloud Run Job using `gcloud run jobs update ${JOB_NAME}
-> --region=${REGION}
-> --update-env-vars="CODEMENDER_FORCE_OVERWRITE=true,CODEMENDER_CLEANUP_PORTS=3000,8080"`.
+> can either:
 >
-> ## 2. **Customize the Workflow YAML**: Modify `workflows/gcp_parallel_workflow.yaml` to include `cleanup_ports` and `force_overwrite` in the `init_variables` block and pass them in `containerOverrides`, then redeploy the workflow (`gcloud workflows deploy`).
+> 1.  **Configure on the Cloud Run Job directly (Recommended without redeploying
+>     workflow)**: Update the default environment variables on the underlying
+>     Cloud Run Job using `gcloud run jobs update ${JOB_NAME} --region=${REGION}
+>     --update-env-vars="CODEMENDER_FORCE_OVERWRITE=true,CODEMENDER_CLEANUP_PORTS=3000,8080"`.
+>
+> 2.  **Customize the Workflow YAML**: Modify
+>     `workflows/gcp_parallel_workflow.yaml` to include `cleanup_ports` and
+>     `force_overwrite` in the > `init_variables` block and pass them in
+>     `containerOverrides`, then redeploy the workflow (`gcloud workflows
+>     deploy`).
 
 ### Step 6: Monitor Execution & Retrieve Summary Report
 
