@@ -12,14 +12,78 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CodeMender CLI output parsing utilities for CodeMender Agent."""
-
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+import shutil
+import subprocess
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+from codemender_agent.utils import build_cm_command, run_command
 
 logger = logging.getLogger("codemender-orchestrator")
+
+
+@dataclass
+class TokenUsage:
+  """Container for accumulated token usage metrics."""
+
+  in_tokens: int = 0
+  out_tokens: int = 0
+  total_tokens: int = 0
+
+  def add(self, other: "TokenUsage") -> None:
+    self.in_tokens += other.in_tokens
+    self.out_tokens += other.out_tokens
+    self.total_tokens += other.total_tokens
+
+  def to_dict(self) -> Dict[str, int]:
+    return {
+        "in_tokens": self.in_tokens,
+        "out_tokens": self.out_tokens,
+        "total_tokens": self.total_tokens,
+    }
+
+
+class CodeMenderCLIAdapter:
+  """Adapter isolating CodeMender CLI command construction, execution, and output harvesting."""
+
+  def __init__(
+      self, binary_path: Optional[str] = None, cli_version: str = "preview"
+  ):
+    self.binary_path = binary_path or shutil.which("cm") or "cm"
+    self.cli_version = cli_version
+
+  def execute(
+      self,
+      action: str,
+      target_or_id: Optional[str] = None,
+      extra_flags: Optional[List[str]] = None,
+      cwd: Optional[str] = None,
+      env: Optional[Dict[str, str]] = None,
+      check: bool = True,
+      capture_stderr: bool = True,
+  ) -> Tuple[subprocess.CompletedProcess, TokenUsage]:
+    """Builds and executes a CodeMender CLI command, extracting token usage metrics."""
+    cmd = build_cm_command(
+        self.binary_path,
+        action,
+        target_or_id=target_or_id,
+        extra_flags=extra_flags,
+        cli_version=self.cli_version,
+    )
+    res = run_command(
+        cmd, cwd=cwd, env=env, check=check, capture_stderr=capture_stderr
+    )
+    usage = TokenUsage()
+    if hasattr(res, "token_usage") and isinstance(res.token_usage, dict):
+      usage = TokenUsage(
+          in_tokens=res.token_usage.get("in_tokens", 0),
+          out_tokens=res.token_usage.get("out_tokens", 0),
+          total_tokens=res.token_usage.get("total_tokens", 0),
+      )
+    return res, usage
 
 
 def parse_findings_json(json_str: str) -> List[Dict[str, Any]]:

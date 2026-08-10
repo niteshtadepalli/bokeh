@@ -1,105 +1,114 @@
-# CodeMender Orchestrator
+# CodeMender Orchestrator (Public Preview)
 
 The CodeMender Orchestrator is an automated execution runner designed to run
-within an engineering team's own infrastructure (e.g., as a Google Cloud Run
-Job). It automates local vulnerability scanning, validation, automated patching
+within an engineering team's own infrastructure (e.g., as Google Cloud Run
+Jobs). It automates local vulnerability scanning, validation, automated patching
 via the CodeMender CLI (`cm`), and Pull Request generation on GitHub.
 
 > [!IMPORTANT]
-> **CodeMender Compatibility Warning**: This orchestrator was built
-> and validated on top of **CodeMender CLI version
-> `codemender-cli-v0.1.0-20260515-vMvg-916238397.zip`**. Since the CodeMender
-> CLI and its internal state database schema are actively under development,
-> upgrading the `cm` binary to a newer version may introduce database schema or
-> CLI output changes. If that occurs, modifications may be required to the
-> orchestrator's parsers (`codemender_agent/codemender/`) and database merger
-> (`codemender_agent/runners/aggregate.py`) to remain functional.
+> **CodeMender Compatibility Warning**: This orchestrator was built and
+> validated on top of **CodeMender CLI version
+> `codemender-cli-v0.1.0-20260515-vMvg-916238397.zip`** and now officially
+> supports the **CodeMender Public Preview** versions. Since the CodeMender CLI
+> and its internal state database schema are actively under development,
+> upgrading the `cm` binary to future unvalidated versions may introduce
+> database schema or CLI output changes. If that occurs, modifications may be
+> required to the orchestrator's parsers (`codemender_agent/codemender/`) and
+> database merger (`codemender_agent/runners/aggregate.py`) to remain
+> functional.
 
 --------------------------------------------------------------------------------
 
-## Architecture Overview (Bring Your Own Project - BYOP)
+## Architecture Overview (Parallel Pipeline)
 
 To validate and fix code vulnerabilities, CodeMender must run your codebase's
 specific compilers, linters, and test suites. Because a central backend cannot
 securely host thousands of custom environments, the orchestrator executes inside
-your own secure container:
+your own secure containers across a scalable, 3-stage pipeline orchestrated by
+**Google Cloud Workflows**:
 
-1.  **CodeMender Backend ("The Brain")**: Central LLM service that analyzes
-    vulnerabilities and reasons about fixes.
-2.  **CodeMender CLI (`cm`) ("The Translator")**: Local CLI tool handling server
-    communication, workspace edits, and local test validation.
-3.  **Custom Container Environment ("The Workshop")**: Cloud Run Job container
-    holding `orchestrator.py`, the `cm` binary, and your language toolchains
-    (Node.js, Go, Java, Python, etc.).
-4.  **Orchestrator Script (`orchestrator.py`) ("The Manager")**: Clones code,
-    runs scans (`cm find`), verifies findings (`cm find verify`), applies fixes
-    (`cm fix`), and creates Pull Requests on GitHub. Supports both **Parallel
-    Workflow** (multi-stage sharded Cloud Run Jobs via Cloud Workflows) and
-    **Sequential Job** execution modes via `CODEMENDER_RUN_MODE`.
+1.  **Stage 1: Coordinator (Scan)**: A privileged Cloud Run Job clones the
+    repository, runs a full vulnerability scan (`cm find .`), partitions the
+    findings into logical shards, and uploads the compressed workspace and a
+    work manifest to a secure Google Cloud Storage (GCS) bucket.
+2.  **Stage 2: Parallel Workers (Verify & Fix)**: Ephemeral, unprivileged Cloud
+    Run Job tasks spin up concurrently (up to 100+ parallel tasks). Using the
+    **Valet Key Pattern**, they download their assigned work via temporary
+    Signed URLs. Each worker verifies findings (`cm verify`), applies patches
+    (`cm fix`), opens GitHub PRs for successful fixes, and uploads its local
+    SQLite state database shard back to GCS.
+3.  **Stage 3: Aggregator (Report)**: The coordinator job wakes back up,
+    downloads all worker database shards, securely merges them using `SQLite
+    ATTACH`, and generates a consolidated, interactive HTML vulnerability
+    report.
 
 ### Orchestration Flowchart
 
 ```mermaid
 graph TD
-    Start[Start Orchestrator] --> Sync[1. Clone / Pull Repository]
-    Sync --> Init[2. Initialize CodeMender]
-    Init --> Scan[3. Scan Codebase<br/>'cm find .']
-    Scan --> Report[4. Get Findings Report<br/>'cm report']
-    Report --> LoopStart{5. Loop: Each Finding}
+    Start((Trigger Workflow)) --> Stage1
 
-    LoopStart --> CheckBranch{Branch Exists on GitHub?}
-    CheckBranch -->|"Yes & --force not set"| Skip[Skip Finding]
-    CheckBranch -->|"No OR --force set"| Verify[6. Verify Finding<br/>'cm find verify']
+    subgraph "Stage 1: Coordinator (Scan)"
+    Stage1[1. Clone Repository] --> S1Scan[2. Scan Codebase<br/>'cm find .']
+    S1Scan --> S1Part[3. Partition Findings & Archive Workspace]
+    S1Part --> S1Upload[4. Upload to GCS & Generate Signed URLs]
+    end
 
-    Verify --> IsVerified{Verified in DB?<br/>'VERIFIED'}
-    IsVerified -->|"No (after 3 tries)"| Skip
-    IsVerified -->|Yes| ApplyFix[7. Apply Fix on Default Branch<br/>'cm fix']
+    S1Upload --> Stage2
 
-    ApplyFix --> IsFixed{Fix Succeeded?<br/>'FIXED'}
-    IsFixed -->|No| ResetDefault[Reset default branch]
-    ResetDefault --> Skip
+    subgraph "Stage 2: Parallel Workers (Verify & Fix)"
+    Stage2[5. Start N Parallel Tasks] --> WDL[6. Download Workspace & Partition via Signed URL]
+    WDL --> WLoop{7. For each Finding in Partition}
+    WLoop --> WVerify[8. Verify Finding<br/>'cm verify']
+    WVerify --> WFix[9. Apply Fix<br/>'cm fix']
+    WFix --> WPR[10. Open Pull Request]
+    WPR --> WLoop
+    WLoop -- Done --> WUpload[11. Upload SQLite DB Shard via Signed URL]
+    end
 
-    IsFixed -->|Yes| HasChanges{Uncommitted Changes?}
-    HasChanges -->|No| ResetDefault
-    HasChanges -->|Yes| SwitchBranch[8. Checkout Feature Branch]
+    WUpload --> Stage3
 
-    SwitchBranch --> Commit[9. Commit Changes]
-    Commit --> Push[10. Push Branch]
-    Push --> PR[11. Open Pull Request]
-    PR --> ResetDefault2[Reset default branch]
-    ResetDefault2 --> NextFinding[Next Finding]
-    Skip --> NextFinding
-    NextFinding --> LoopStart
+    subgraph "Stage 3: Aggregator (Report)"
+    Stage3[12. Download all Worker DB Shards] --> S3Merge[13. Merge Shards via SQLite ATTACH]
+    S3Merge --> S3Report[14. Generate HTML Report<br/>'cm report -f html']
+    S3Report --> S3Upload[15. Upload Final Report to GCS]
+    end
+
+    S3Upload --> Finish((Pipeline Complete))
 ```
 
 --------------------------------------------------------------------------------
 
 ## Key Constraints & Operational Rules
 
+-   **Secure Sandboxing (Valet Key Pattern)**: To protect your infrastructure
+    from potentially malicious repository code executed during `cm verify`,
+    Worker tasks have *zero* native IAM permissions to Cloud Storage. They
+    interact with GCS strictly through temporary, cryptographically signed URLs
+    generated by the Coordinator.
 -   **Credential Scrubbing**: `orchestrator.py` explicitly scrubs sensitive
     credentials (`GITHUB_APP_TOKEN`, `GITHUB_PAT`, `GITHUB_TOKEN`, `GH_TOKEN`,
     `GITHUB_SECRET`) from the subprocess environment before invoking `cm`
-    commands (`cm find verify`, `cm fix`) to eliminate remote code execution
-    (RCE) exfiltration risks.
+    commands (`cm verify`, `cm fix`) to eliminate remote code execution (RCE)
+    exfiltration risks.
 -   **Single-Sync Git Rule**: The orchestrator syncs only once at the beginning
-    of the scan (`git clone --depth 1`). Fixed branches are pushed directly to
-    remote and PRs opened immediately, delegating merge conflict resolution to
-    GitHub's PR mergeability checks.
+    of Stage 1 (`git clone --depth 1`). Workers operate on exactly the same
+    codebase snapshot. Fixed branches are pushed directly to remote and PRs
+    opened immediately, delegating merge conflict resolution to GitHub's PR
+    mergeability checks.
 -   **PR Spam Prevention**: Branch names are deterministically derived using the
-    finding `filePath`, `vulnType`, and `startLine`. To absorb minor LLM line number
-    jitter, the orchestrator queries the GitHub API to check for open PRs with the
-    same file and vulnerability type within a 15-line sliding window. If a
-    branch or open PR already exists, the orchestrator skips duplicate `cm fix`
+    finding `filePath`, `vulnType`, and `startLine`. To absorb minor LLM line
+    number jitter, the workers query the GitHub API to check for open PRs with
+    the same file and vulnerability type within a 15-line sliding window. If a
+    branch or open PR already exists, the worker skips duplicate `cm fix`
     operations.
-
--   **Workspace Reset**: Uses forced branch checkout (`git checkout -f`) when
-    switching branches between findings.
-
--   **GCS Summary Reports**: At the end of the orchestrator run, it
-    automatically compiles an interactive HTML summary report (`cm report -f
-    html`). If `CODEMENDER_REPORT_BUCKET` is configured, the report is uploaded
-    to GCS and a secure, temporary Signed URL (valid for 3 days) is printed in
-    the job output logs for easy developer review.
+-   **GCS Summary Reports & Token Metrics**: At the end of the pipeline, the
+    aggregator automatically compiles an interactive HTML summary report (`cm
+    report -f html`). When running in Public Preview mode, it dynamically
+    aggregates LLM token usage metrics (input and output tokens) from all worker
+    shards and injects a summary banner into the final report. It then generates
+    a secure, temporary Signed URL (valid for 3 days) printed in the job output
+    logs for easy developer review.
 
 --------------------------------------------------------------------------------
 
@@ -125,13 +134,17 @@ following dedicated markdown guides in the `docs/` folder:
 *   🛡️
     **[Implementation Guardrails & Design](docs/architecture/guardrails.md)**:
     Architecture specifications, security constraints, and execution rules.
-*   ⚙️
-    **[Configuration Reference](docs/guides/configuration_reference.md)**:
-    Comprehensive list of all environment variables, flags, and `codemender.yaml` settings.
+*   ⚙️ **[Configuration Reference](docs/guides/configuration_reference.md)**:
+    Comprehensive list of all environment variables, flags, and
+    `codemender.yaml` settings.
 *   ⚡
     **[Parallelization Design Specification](docs/architecture/parallelization_design.md)**:
     Source of Truth for multi-stage sharded parallel scanning across GCP and
     GitHub Actions.
+*   🆕
+    **[Public Preview Upgrade Specification](docs/architecture/codemender_public_preview_upgrade_design.md)**:
+    Architectural guardrails and backwards-compatibility specifications for the
+    CodeMender Public Preview release.
 
 --------------------------------------------------------------------------------
 
@@ -177,6 +190,7 @@ and dedicated deployment files:
 │   ├── test_storage.py             # GCS upload/download unit tests
 │   ├── test_codemender_cli.py      # cm CLI parsing unit tests
 │   ├── test_codemender_db.py       # Local database status checker unit tests
+│   ├── test_command_builder.py     # Command builder & metric parsing unit tests
 │   ├── test_vcs_git.py             # Git CLI wrapper and branch naming unit tests
 │   ├── test_vcs_github.py          # GitHub API integration unit tests
 │   ├── test_runners_scan.py        # Stage 1 Scan coordinator unit tests
@@ -231,6 +245,15 @@ wrappers).
 
 ## Future Work
 
+-   **Support for Alternate VCS Frameworks**: The current orchestrator is
+    heavily coupled to Git and GitHub APIs. Future iterations should abstract
+    the version control layer (`codemender_agent/vcs/`) to support Mercurial
+    (hg) and other source control systems or Git-based hosting providers (e.g.,
+    GitLab).
+-   **Automated Deployment via GitHub Actions**: While comprehensive Terraform
+    support exists for Google Cloud deployment, providing a native, automated
+    setup pipeline using GitHub Actions would simplify onboarding for
+    repositories that already use GitHub as their primary CI/CD platform.
 -   **Automatic PR Re-opening on Force-Push**: When running in overwrite mode
     (`CODEMENDER_FORCE_OVERWRITE=true`), force-pushing new commits to a branch
     with a closed/unmerged PR is successful, but creating a new PR fails on

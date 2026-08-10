@@ -154,6 +154,14 @@ export CODEMENDER_REPORT_BUCKET="my-gcs-reports-bucket"
 # Multiple directories can be specified as a semicolon-separated or comma-separated list (e.g. "api;server/shared").
 # Defaults to "." (the entire repository) if not specified.
 export CODEMENDER_SCAN_TARGET="api;server/shared"
+
+# (Optional) CodeMender CLI Version mode ("preview" or "legacy")
+export CODEMENDER_CLI_VERSION="preview"
+
+# (Optional) Custom LLM model selection overrides
+export CODEMENDER_MODEL="gemini-2.5-flash"
+# export CODEMENDER_FIND_MODEL="gemini-2.5-pro"
+# export CODEMENDER_SKIP_EXPLOIT_VERIFICATION="true"
 ```
 
 > [!NOTE]

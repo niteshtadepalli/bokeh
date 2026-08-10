@@ -136,7 +136,7 @@ class TestWorkerRunner(unittest.TestCase):
     for call in mock_run_cmd.call_args_list:
       cmd = call[0][0]
       cmd_str = " ".join(cmd)
-      if "find" in cmd_str and "verify" in cmd_str and "fid-1" in cmd_str:
+      if "verify" in cmd_str and "fid-1" in cmd_str:
         verify_called = True
       elif "fix" in cmd_str and "fid-1" in cmd_str:
         fix_called = True
@@ -238,6 +238,58 @@ class TestWorkerRunner(unittest.TestCase):
 
     mock_create_pr.assert_not_called()
     mock_upload_to_url.assert_called_once()
+
+  @unittest.mock.patch("codemender_agent.runners.worker.run_command")
+  @unittest.mock.patch("codemender_agent.runners.worker.generate_signed_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.download_from_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.upload_to_url")
+  @unittest.mock.patch("tarfile.open")
+  def test_worker_pipeline_self_resolution_generate_signed_url(
+      self, mock_tarfile_open, mock_upload_to_url, mock_download_from_url, mock_generate_signed_url, mock_run_command
+  ):
+    mock_download_from_url.return_value = True
+    mock_upload_to_url.return_value = True
+    mock_generate_signed_url.return_value = "http://signed-url/self_resolved.json"
+    mock_run_command.return_value.returncode = 0
+    mock_run_command.return_value.stdout = ""
+
+    # Set up empty partition file dict
+    part_file = os.path.join(self.workspace_dir, "partition_0.json")
+    with open(part_file, "w") as f:
+      json.dump({"finding_ids": []}, f)
+
+    def download_side_effect(url, dest):
+      os.makedirs(os.path.dirname(dest), exist_ok=True)
+      if dest.endswith(".json"):
+        with open(dest, "w") as f:
+          json.dump({"finding_ids": []}, f)
+      return True
+
+    mock_download_from_url.side_effect = download_side_effect
+
+    with unittest.mock.patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_GCS_BUCKET": "my-test-bucket",
+            "CODEMENDER_SCAN_ID": "scan-xyz-123",
+        },
+    ):
+      with self.assertRaises(SystemExit) as cm:
+        run_worker_pipeline()
+      self.assertEqual(cm.exception.code, 0)
+
+    # Verify self-resolution generated metadata URL directly inside worker
+    mock_generate_signed_url.assert_any_call(
+        "my-test-bucket",
+        "scans/scan-xyz-123/worker_0_metadata.json",
+        method="PUT",
+        content_type="application/json",
+    )
+    mock_upload_to_url.assert_any_call(
+        unittest.mock.ANY,
+        "http://signed-url/self_resolved.json",
+        content_type="application/json",
+    )
 
 
 if __name__ == "__main__":

@@ -27,12 +27,13 @@ resource "google_cloud_scheduler_job" "nightly_scan" {
 
     body = base64encode(jsonencode({
       argument = jsonencode({
-        job_name      = google_cloud_run_v2_job.runner.name
-        gcs_bucket    = google_storage_bucket.reports.name
-        region        = var.region
-        repo_url      = ""   # Update manually before running
-        build_command = ""   # Update manually before running
-        scan_target   = "."  # Update manually before running
+        job_name        = google_cloud_run_v2_job.runner.name
+        worker_job_name = google_cloud_run_v2_job.worker.name
+        gcs_bucket      = google_storage_bucket.reports.name
+        region          = var.region
+        repo_url        = ""   # Update manually before running
+        build_command   = ""   # Update manually before running
+        scan_target     = "."  # Update manually before running
       })
     }))
 

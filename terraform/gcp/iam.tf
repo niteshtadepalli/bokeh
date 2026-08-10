@@ -14,7 +14,14 @@
 
 resource "google_service_account" "runner_sa" {
   account_id   = "${var.resource_prefix}-runner-sa"
-  display_name = "CodeMender Runner Service Account (${var.resource_prefix})"
+  display_name = "CodeMender Orchestrator Service Account (${var.resource_prefix})"
+  project      = var.project_id
+  depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
+}
+
+resource "google_service_account" "worker_sa" {
+  account_id   = "${var.resource_prefix}-worker-sa"
+  display_name = "CodeMender Worker Service Account (${var.resource_prefix})"
   project      = var.project_id
   depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
@@ -33,8 +40,18 @@ resource "google_service_account" "scheduler_sa" {
   depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
+# Random ID suffix to prevent 409 Conflict errors when re-creating custom IAM roles.
+# GCP IAM custom roles enter a 7-day soft-delete tombstone state upon deletion.
+# Appending a random hex suffix ensures role recreations generate a fresh role ID.
+resource "random_id" "role_suffix" {
+  byte_length = 4
+  keepers = {
+    resource_prefix = var.resource_prefix
+  }
+}
+
 resource "google_project_iam_custom_role" "workflow_job_runner" {
-  role_id     = replace("${var.resource_prefix}WorkflowJobRunner", "-", "")
+  role_id     = "${replace(var.resource_prefix, "-", "")}WorkflowJobRunner_${random_id.role_suffix.hex}"
   title       = "CodeMender Workflow Job Runner (${var.resource_prefix})"
   description = "Allows Cloud Workflows to run and monitor Cloud Run Jobs for CodeMender (${var.resource_prefix})"
   project     = var.project_id
@@ -85,6 +102,7 @@ resource "google_service_account_iam_member" "runner_token_creator" {
 locals {
   log_writer_service_accounts = {
     "runner"    = "serviceAccount:${google_service_account.runner_sa.email}"
+    "worker"    = "serviceAccount:${google_service_account.worker_sa.email}"
     "workflows" = "serviceAccount:${google_service_account.workflow_sa.email}"
     "scheduler" = "serviceAccount:${google_service_account.scheduler_sa.email}"
   }
@@ -96,6 +114,13 @@ resource "google_project_iam_member" "service_accounts_log_writer" {
   project  = var.project_id
   role     = "roles/logging.logWriter"
   member   = each.value
+}
+
+# Agent Platform / Vertex AI IAM for Runner SA (required for CodeMender LLM interactions)
+resource "google_project_iam_member" "runner_aiplatform_user" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.runner_sa.email}"
 }
 
 # Project-level IAM binding for Workflow SA to run jobs, poll operations, and monitor executions
@@ -112,9 +137,64 @@ resource "google_service_account_iam_member" "workflow_runner_sa_user" {
   member             = "serviceAccount:${google_service_account.workflow_sa.email}"
 }
 
+# Service Account User IAM for Workflow SA on Worker SA
+resource "google_service_account_iam_member" "workflow_worker_sa_user" {
+  service_account_id = google_service_account.worker_sa.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.workflow_sa.email}"
+}
+
 # Workflow Invoker IAM for Scheduler SA at Project Level
 resource "google_project_iam_member" "scheduler_workflow_invoker" {
   project = var.project_id
   role    = "roles/workflows.invoker"
   member  = "serviceAccount:${google_service_account.scheduler_sa.email}"
+}
+
+# Secret Manager IAM for Worker SA (for Github token)
+resource "google_secret_manager_secret_iam_member" "worker_secret_accessor" {
+  secret_id = google_secret_manager_secret.github_app_token.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.worker_sa.email}"
+}
+
+# Releases Bucket Viewer for Worker SA (to download CM binary)
+resource "google_storage_bucket_iam_member" "worker_releases_viewer" {
+  bucket = google_storage_bucket.releases.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.worker_sa.email}"
+}
+
+# Agent Platform / Vertex AI IAM for Worker SA (required for CodeMender LLM interactions)
+resource "google_project_iam_member" "worker_aiplatform_user" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.worker_sa.email}"
+}
+
+
+
+# Grant Cloud Run Developer to Cloud Build SAs so they can update the Cloud Run Job image
+resource "google_project_iam_member" "cloudbuild_run_developer" {
+  for_each   = local.cloudbuild_service_accounts
+  project    = var.project_id
+  role       = "roles/run.developer"
+  member     = each.value
+  depends_on = [google_project_service.enabled_services["iam.googleapis.com"]]
+}
+
+# Grant Service Account User to Cloud Build SAs on the Runner SA
+resource "google_service_account_iam_member" "cloudbuild_runner_sa_user" {
+  for_each           = local.cloudbuild_service_accounts
+  service_account_id = google_service_account.runner_sa.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = each.value
+}
+
+# Grant Service Account User to Cloud Build SAs on the Worker SA
+resource "google_service_account_iam_member" "cloudbuild_worker_sa_user" {
+  for_each           = local.cloudbuild_service_accounts
+  service_account_id = google_service_account.worker_sa.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = each.value
 }

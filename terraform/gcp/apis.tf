@@ -24,6 +24,7 @@ locals {
     "iamcredentials.googleapis.com",
     "storage.googleapis.com",
     "cloudbuild.googleapis.com",
+    "aiplatform.googleapis.com",
   ]
 }
 

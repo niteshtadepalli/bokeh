@@ -405,6 +405,15 @@ To solve this:
     This allows the CodeMender agent to explore and read imported files in
     sibling directories during targeted validations.
 
+### CodeMender Public Preview CLI & Model Overrides
+
+The orchestrator defaults to `CODEMENDER_CLI_VERSION="preview"`, enabling Public Preview CLI syntax (`cm find -y`, `cm verify -y --bypass-warning`, `cm fix -y --bypass-warning`).
+
+You can override LLM models per stage when executing jobs or triggering Workflows:
+*   **Global Model Override**: `--update-env-vars="CODEMENDER_MODEL=gemini-2.5-flash"`
+*   **Stage-Specific Overrides**: `--update-env-vars="CODEMENDER_FIND_MODEL=gemini-2.5-pro,CODEMENDER_FIX_MODEL=gemini-2.5-flash"`
+*   **Skip Exploit Verification**: `--update-env-vars="CODEMENDER_SKIP_EXPLOIT_VERIFICATION=true"` (bypasses compilation/execution of exploits during verification phase).
+
 ### Scaling Storage Beyond 10GB
 
 Cloud Run Gen 2 jobs provision `10GB` of ephemeral root disk space by default.

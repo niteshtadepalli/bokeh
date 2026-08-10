@@ -156,6 +156,90 @@ class TestStorage(unittest.TestCase):
             credentials=mock_signing_creds,
         )
 
+  @patch("codemender_agent.storage.requests.get")
+  @patch("codemender_agent.storage.storage.Client")
+  def test_upload_and_sign_report_with_cloud_run_default_service_account_metadata_fallback(
+      self, mock_client_cls, mock_requests_get
+  ):
+    """Test GCS URL signing when credentials.service_account_email is 'default' on Cloud Run."""
+    mock_client = MagicMock()
+    mock_bucket = MagicMock()
+    mock_blob = MagicMock()
+    mock_client_cls.return_value = mock_client
+    mock_client.bucket.return_value = mock_bucket
+    mock_bucket.blob.return_value = mock_blob
+
+    # Configure Compute Engine / Cloud Run credentials returning 'default'
+    mock_credentials = MagicMock()
+    mock_credentials.service_account_email = "default"
+    mock_client._credentials = mock_credentials
+
+    # Mock metadata server response
+    mock_meta_resp = MagicMock()
+    mock_meta_resp.status_code = 200
+    mock_meta_resp.text = "cloudrun-runner-sa@xz-cm-agent-demo.iam.gserviceaccount.com"
+    mock_requests_get.return_value = mock_meta_resp
+
+    # Setup mocked google.auth namespaces
+    mock_google = MagicMock()
+    mock_auth = MagicMock()
+    mock_credentials_module = MagicMock()
+
+    class FakeSigning:
+      pass
+
+    mock_credentials_module.Signing = FakeSigning
+    mock_auth.credentials = mock_credentials_module
+    mock_google.auth = mock_auth
+
+    mock_impersonated_module = MagicMock()
+    mock_signing_creds = MagicMock()
+    mock_impersonated_module.Credentials.return_value = mock_signing_creds
+    mock_auth.impersonated_credentials = mock_impersonated_module
+
+    mock_blob.generate_signed_url.return_value = (
+        "https://storage.googleapis.com/signed-url"
+    )
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google": mock_google,
+            "google.auth": mock_auth,
+            "google.auth.credentials": mock_credentials_module,
+            "google.auth.impersonated_credentials": mock_impersonated_module,
+        },
+    ):
+      with tempfile.NamedTemporaryFile(suffix=".html") as temp_file:
+        url = upload_and_sign_report(
+            temp_file.name, "my-bucket", "reports/r.html"
+        )
+        self.assertEqual(url, "https://storage.googleapis.com/signed-url")
+
+        # Verify Metadata server was queried to resolve 'default' email
+        mock_requests_get.assert_called_once_with(
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email",
+            headers={"Metadata-Flavor": "Google"},
+            timeout=2,
+        )
+
+        # Verify impersonated credentials wrapper was constructed using resolved metadata SA email
+        mock_impersonated_module.Credentials.assert_called_once_with(
+            source_credentials=mock_credentials,
+            target_principal="cloudrun-runner-sa@xz-cm-agent-demo.iam.gserviceaccount.com",
+            target_scopes=[
+                "https://www.googleapis.com/auth/devstorage.read_write"
+            ],
+        )
+
+        # Verify generate_signed_url was called with the impersonated signing credentials
+        mock_blob.generate_signed_url.assert_called_once_with(
+            version="v4",
+            expiration=datetime.timedelta(days=3),
+            method="GET",
+            credentials=mock_signing_creds,
+        )
+
 
 if __name__ == "__main__":
   unittest.main()

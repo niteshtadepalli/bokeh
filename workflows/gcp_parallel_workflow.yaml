@@ -17,9 +17,11 @@ main:
   steps:
     - init_variables:
         assign:
+          - default_empty_map: {}
           - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
           - region: ${default(map.get(args, "region"), "us-central1")}
           - job_name: ${args.job_name}
+          - worker_job_name: ${default(map.get(args, "worker_job_name"), text.replace_all(args.job_name, "-runner", "") + "-worker")}
           - gcs_bucket: ${args.gcs_bucket}
           - repo_url: ${args.repo_url}
           - build_command: ${args.build_command}
@@ -27,6 +29,13 @@ main:
           - max_tasks: ${int(default(map.get(args, "max_tasks"), 20))}
           - timeout_seconds: ${int(default(map.get(args, "timeout_seconds"), 86400))}
           - scan_id: ${"scan-" + sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+          - cli_version: ${default(map.get(args, "cli_version"), "preview")}
+          - model: ${default(map.get(args, "model"), "")}
+          - models: ${default(map.get(args, "models"), default_empty_map)}
+          - skip_exploit_verification: ${default(map.get(args, "skip_exploit_verification"), false)}
+          - find_model: ${default(map.get(models, "find"), model)}
+          - verify_model: ${default(map.get(models, "verify"), model)}
+          - fix_model: ${default(map.get(models, "fix"), model)}
 
     - log_start:
         call: sys.log
@@ -59,6 +68,18 @@ main:
                         value: ${scan_target}
                       - name: CODEMENDER_MAX_TASKS
                         value: ${string(max_tasks)}
+                      - name: CODEMENDER_CLI_VERSION
+                        value: ${cli_version}
+                      - name: CODEMENDER_MODEL
+                        value: ${model}
+                      - name: CODEMENDER_FIND_MODEL
+                        value: ${find_model}
+                      - name: CODEMENDER_VERIFY_MODEL
+                        value: ${verify_model}
+                      - name: CODEMENDER_FIX_MODEL
+                        value: ${fix_model}
+                      - name: CODEMENDER_SKIP_EXPLOIT_VERIFICATION
+                        value: ${string(skip_exploit_verification)}
             connector_params:
               skip_polling: true
           result: stage1_operation
@@ -78,12 +99,20 @@ main:
         result: stage1_execution
 
     - read_manifest:
-        call: googleapis.storage.v1.objects.get
-        args:
-          bucket: ${gcs_bucket}
-          object: ${text.url_encode("scans/" + scan_id + "/manifest.json")}
-          alt: "media"
-        result: manifest_response
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${gcs_bucket}
+            object: ${text.url_encode("scans/" + scan_id + "/manifest.json")}
+            alt: "media"
+          result: manifest_response
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 5
+            max_delay: 20
+            multiplier: 2
 
     - parse_manifest:
         assign:
@@ -101,12 +130,22 @@ main:
           - base_workspace_url: ${manifest.base_workspace_url}
           - partition_urls_str: ${json.encode_to_string(manifest.partition_urls)}
           - upload_urls_str: ${json.encode_to_string(manifest.upload_urls)}
-          - num_workers: ${len(manifest.partition_urls)}
+          - metadata_urls_str: ${json.encode_to_string(default(map.get(manifest, "metadata_urls"), []))}
+          - total_partitions: ${len(manifest.partition_urls)}
+
+    - determine_num_workers:
+        switch:
+          - condition: ${total_partitions > max_tasks}
+            assign:
+              - num_workers: ${max_tasks}
+          - condition: true
+            assign:
+              - num_workers: ${total_partitions}
 
     - run_stage2_workers:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + job_name}
+          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + worker_job_name}
           body:
             overrides:
               taskCount: ${num_workers}
@@ -131,6 +170,20 @@ main:
                       value: ${partition_urls_str}
                     - name: CODEMENDER_UPLOAD_URLS
                       value: ${upload_urls_str}
+                    - name: CODEMENDER_METADATA_URLS
+                      value: ${metadata_urls_str}
+                    - name: CODEMENDER_CLI_VERSION
+                      value: ${cli_version}
+                    - name: CODEMENDER_MODEL
+                      value: ${model}
+                    - name: CODEMENDER_FIND_MODEL
+                      value: ${find_model}
+                    - name: CODEMENDER_VERIFY_MODEL
+                      value: ${verify_model}
+                    - name: CODEMENDER_FIX_MODEL
+                      value: ${fix_model}
+                    - name: CODEMENDER_SKIP_EXPLOIT_VERIFICATION
+                      value: ${string(skip_exploit_verification)}
           connector_params:
             skip_polling: true
         result: stage2_operation
@@ -164,6 +217,18 @@ main:
                       value: ${build_command}
                     - name: CODEMENDER_TOTAL_WORKERS
                       value: ${string(num_workers)}
+                    - name: CODEMENDER_CLI_VERSION
+                      value: ${cli_version}
+                    - name: CODEMENDER_MODEL
+                      value: ${model}
+                    - name: CODEMENDER_FIND_MODEL
+                      value: ${find_model}
+                    - name: CODEMENDER_VERIFY_MODEL
+                      value: ${verify_model}
+                    - name: CODEMENDER_FIX_MODEL
+                      value: ${fix_model}
+                    - name: CODEMENDER_SKIP_EXPLOIT_VERIFICATION
+                      value: ${string(skip_exploit_verification)}
           connector_params:
             skip_polling: true
         result: stage3_operation
@@ -208,9 +273,9 @@ wait_for_operation:
 
     - check_operation_result:
         switch:
-          - condition: ${map.get(operation, "error") != null}
+          - condition: ${"error" in operation}
             raise: '${"Operation failed: " + operation.error.message}'
-          - condition: ${int(default(map.get(operation.response, "failedCount"), 0)) > 0}
+          - condition: ${int(default(map.get(operation, ["response", "failedCount"]), 0)) > 0}
             raise: '${"Job execution failed with " + string(operation.response.failedCount) + " failed tasks."}'
     - return_result:
         return: ${operation.response}

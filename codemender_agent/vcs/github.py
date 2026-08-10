@@ -104,30 +104,49 @@ def get_default_branch(token: str, owner: str, repo: str) -> str:
 
 
 @retry_on_exception(max_tries=3)
-def _check_duplicate_pr_api(repo_url: str, token: str, file_path: str, vuln_type: str, start_line: int) -> bool:
-  """Checks GitHub API for existing duplicate PRs."""
+def _check_duplicate_pr_api(
+    repo_url: str, token: str, file_path: str, vuln_type: str, start_line: int
+) -> bool:
+  """Checks GitHub API for existing duplicate PRs traversing pagination headers."""
   sanitized_url = sanitize_git_url(repo_url)
   owner, repo = parse_repo_owner_and_name(sanitized_url)
-  
-  url = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page=100"
+
+  url: Optional[str] = (
+      f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page=100"
+  )
   headers = {
       "Authorization": f"Bearer {token}",
       "Accept": "application/vnd.github+json",
   }
-  resp = requests.get(url, headers=headers, timeout=15)
-  resp.raise_for_status()
-  
-  prs = resp.json()
-  for pr in prs:
-    body = pr.get("body") or ""
-    # Check if this PR is from CodeMender for the same file and vuln type
-    if "CodeMender Security Fix" in body and file_path in body and vuln_type in body:
-      match = re.search(r"\*\*Start Line\*\*:\s*(\d+)", body, re.IGNORECASE)
-      if match:
-        existing_line = int(match.group(1))
-        if abs(existing_line - start_line) <= 15:
-          logger.info("Found existing PR (%s) covering %s in %s near line %d.", pr.get("html_url"), vuln_type, file_path, start_line)
-          return True
+
+  with requests.Session() as session:
+    while url:
+      resp = session.get(url, headers=headers, timeout=15)
+      resp.raise_for_status()
+
+      prs = resp.json()
+      if not isinstance(prs, list):
+        break
+
+      for pr in prs:
+        body = pr.get("body") or ""
+        if "CodeMender Security Fix" in body and file_path in body and vuln_type in body:
+          match = re.search(r"\*\*Start Line\*\*:\s*(\d+)", body, re.IGNORECASE)
+          if match:
+            existing_line = int(match.group(1))
+            if abs(existing_line - start_line) <= 15:
+              logger.info(
+                  "Found existing PR (%s) covering %s in %s near line %d.",
+                  pr.get("html_url"),
+                  vuln_type,
+                  file_path,
+                  start_line,
+              )
+              return True
+
+      # Traverse next page link if present in Link header
+      url = resp.links.get("next", {}).get("url")
+
   return False
 
 

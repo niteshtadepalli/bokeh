@@ -154,6 +154,15 @@ class TestScanRunner(unittest.TestCase):
                   "?method=PUT",
               ],
           )
+          self.assertEqual(
+              manifest_data["metadata_urls"],
+              [
+                  "http://signed-url/scans/test-scan-123/worker_0_metadata.json"
+                  "?method=PUT",
+                  "http://signed-url/scans/test-scan-123/worker_1_metadata.json"
+                  "?method=PUT",
+              ],
+          )
       elif "partition_" in dest_blob:
         partitions_uploaded += 1
         with open(local_path, "r") as f:
@@ -288,9 +297,9 @@ class TestScanRunner(unittest.TestCase):
     os.makedirs(db_dir, exist_ok=True)
     db_path = os.path.join(db_dir, "state.db")
     conn = sqlite3.connect(db_path)
-    conn.execute("CREATE TABLE findings (finding_id TEXT, status TEXT, muted INTEGER, dismiss_reason TEXT)")
-    conn.execute("INSERT INTO findings VALUES ('fid-1', 'OPEN', 0, '')")
-    conn.execute("INSERT INTO findings VALUES ('fid-2', 'OPEN', 0, '')")
+    conn.execute("CREATE TABLE findings (finding_id TEXT, status TEXT, muted INTEGER, mute_reason TEXT, dismiss_reason TEXT)")
+    conn.execute("INSERT INTO findings VALUES ('fid-1', 'OPEN', 0, '', '')")
+    conn.execute("INSERT INTO findings VALUES ('fid-2', 'OPEN', 0, '', '')")
     conn.commit()
     conn.close()
 
@@ -299,12 +308,12 @@ class TestScanRunner(unittest.TestCase):
     # Check local state.db mutation
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute("SELECT finding_id, status, muted, dismiss_reason FROM findings ORDER BY finding_id")
+    cursor.execute("SELECT finding_id, status, muted, mute_reason FROM findings ORDER BY finding_id")
     rows = cursor.fetchall()
     conn.close()
 
     self.assertEqual(rows[0][0], "fid-1")
-    self.assertEqual(rows[0][1], "DISMISSED")
+    self.assertEqual(rows[0][1], "SKIPPED_DUPLICATE")
     self.assertEqual(rows[0][2], 1)
     self.assertTrue(len(rows[0][3]) > 0)
     

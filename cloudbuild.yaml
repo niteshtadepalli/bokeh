@@ -34,7 +34,7 @@ steps:
       - 'push'
       - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest'
 
-  # Step 4: Update the Cloud Run Job with the newly pushed image
+  # Step 4: Update the runner Cloud Run Job with the newly pushed image
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'gcloud'
     args:
@@ -46,6 +46,18 @@ steps:
       - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest'
       - '--region'
       - '${_REGION}'
+
+  # Step 5: Update the worker Cloud Run Job with the newly pushed image
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        REPO_NAME_VAL="${_REPO_NAME}"
+        WORKER_JOB="$${REPO_NAME_VAL/-runner/-worker}"
+        gcloud run jobs update $${WORKER_JOB} \
+          --image ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest \
+          --region ${_REGION}
 
 substitutions:
   _RELEASES_BUCKET: 'codemender-releases'

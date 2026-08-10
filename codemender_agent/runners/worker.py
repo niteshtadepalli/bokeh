@@ -14,11 +14,13 @@
 
 """Stage 2: Parallel Worker runner for CodeMender Agent."""
 
+from contextlib import closing
 import hashlib
 import json
 import logging
 import os
 import shutil
+import sqlite3
 import sys
 import tarfile
 import time
@@ -33,8 +35,10 @@ from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
 from codemender_agent.storage import download_from_url
 from codemender_agent.storage import upload_to_url
+from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import free_port
 from codemender_agent.utils import run_command
+from codemender_agent.vcs.git import clean_workspace
 from codemender_agent.vcs.git import generate_branch_name
 from codemender_agent.vcs.git import get_git_auth_header
 from codemender_agent.vcs.git import parse_repo_owner_and_name
@@ -158,8 +162,10 @@ def _process_finding(
     repo_name: str,
     default_branch: str,
     state_db_path: str,
+    worker_token_usage: dict[str, int],
 ) -> None:
   """Handles verification and fixing loop for a single finding."""
+  cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
   vuln_type = finding.get("VulnType") or "vulnerability"
   file_path = finding.get("FilePath") or "unknown_file"
   title = finding.get("Title") or f"Security Fix for {vuln_type}"
@@ -184,11 +190,24 @@ def _process_finding(
       os.environ.get("CODEMENDER_FORCE_OVERWRITE", "false").lower() == "true"
   )
   if not force_overwrite:
-    if check_remote_branch_exists(clean_repo_url, token, branch_name, cwd=repo_dir):
-      logger.info("Remote branch %s already exists. Skipping verify and fix.", branch_name)
-      return
-    if is_duplicate_pr(clean_repo_url, token, file_path, vuln_type, start_line):
-      logger.info("An open PR covering %s in %s near line %d already exists. Skipping.", vuln_type, file_path, start_line)
+    is_branch_dup = check_remote_branch_exists(clean_repo_url, token, branch_name, cwd=repo_dir)
+    is_pr_dup = is_duplicate_pr(clean_repo_url, token, file_path, vuln_type, start_line)
+    if is_branch_dup or is_pr_dup:
+      logger.info(
+          "Finding %s skipped due to existing duplicate branch/PR.", finding_id
+      )
+      if os.path.exists(state_db_path):
+        try:
+          with closing(sqlite3.connect(state_db_path)) as conn:
+            conn.execute(
+                "UPDATE findings SET status = 'SKIPPED_DUPLICATE', muted = 1,"
+                " mute_reason = 'Duplicate PR or branch already exists' WHERE"
+                " finding_id = ?",
+                (finding_id,),
+            )
+            conn.commit()
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logger.warning("Failed to set SKIPPED_DUPLICATE in worker state.db: %s", e)
       return
 
   # Normal Verify -> Fix loop
@@ -205,19 +224,24 @@ def _process_finding(
     for port in get_cleanup_ports():
       free_port(port)
 
-
     run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
-    run_command(
-        ["git", "clean", "-fd", "-e", ".cm_project", "-e", ".exploit"],
-        cwd=repo_dir,
-    )
+    clean_workspace(repo_dir)
 
+    verify_cmd = build_cm_command(
+        cm_binary, "verify", finding_id, cli_version=cli_version
+    )
     verify_res = run_command(
-        [cm_binary, "find", "verify", finding_id, "--yes"],
+        verify_cmd,
         cwd=repo_dir,
         env=scrubbed_env,
         check=False,
     )
+    token_usage = getattr(verify_res, "token_usage", None)
+    if isinstance(token_usage, dict):
+      worker_token_usage["in_tokens"] += token_usage.get("in_tokens", 0)
+      worker_token_usage["out_tokens"] += token_usage.get("out_tokens", 0)
+      worker_token_usage["total_tokens"] += token_usage.get("total_tokens", 0)
+
     for port in get_cleanup_ports():
       free_port(port)
 
@@ -242,12 +266,21 @@ def _process_finding(
 
   # Run fix
   logger.info("Applying fix for finding %s...", finding_id)
+  fix_cmd = build_cm_command(
+      cm_binary, "fix", finding_id, cli_version=cli_version
+  )
   fix_res = run_command(
-      [cm_binary, "fix", finding_id, "--yes"],
+      fix_cmd,
       cwd=repo_dir,
       env=scrubbed_env,
       check=False,
   )
+  token_usage = getattr(fix_res, "token_usage", None)
+  if isinstance(token_usage, dict):
+    worker_token_usage["in_tokens"] += token_usage.get("in_tokens", 0)
+    worker_token_usage["out_tokens"] += token_usage.get("out_tokens", 0)
+    worker_token_usage["total_tokens"] += token_usage.get("total_tokens", 0)
+
   for port in get_cleanup_ports():
     free_port(port)
 
@@ -307,10 +340,44 @@ def _process_finding(
     logger.error("Error creating branch/PR for finding %s: %s", finding_id, e)
   finally:
     run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
-    run_command(
-        ["git", "clean", "-fd", "-e", ".cm_project", "-e", ".exploit"],
-        cwd=repo_dir,
+    clean_workspace(repo_dir)
+
+
+def _save_and_upload_worker_metadata(
+    workspace_dir: str,
+    worker_index: int,
+    worker_token_usage: dict[str, int],
+    metadata_url: Optional[str],
+) -> None:
+  """Saves worker metadata JSON and uploads it to GCS signed URL if provided."""
+  if not metadata_url:
+    logger.error(
+        "Failed to resolve metadata signed URL for worker %d; token usage statistics will be incomplete!",
+        worker_index,
     )
+    return
+
+  logger.info("Uploading worker %d metadata to GCS signed URL...", worker_index)
+  worker_metadata = {
+      "worker_index": worker_index,
+      "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+      "token_usage": worker_token_usage,
+  }
+  meta_path = os.path.join(
+      workspace_dir, f"worker_{worker_index}_metadata.json"
+  )
+  try:
+    with open(meta_path, "w") as f:
+      json.dump(worker_metadata, f, indent=2)
+    if not upload_to_url(meta_path, metadata_url, content_type="application/json"):
+      logger.error(
+          "Failed to upload worker %d metadata to GCS signed URL; token usage statistics will be incomplete!",
+          worker_index,
+      )
+    else:
+      logger.info("Successfully uploaded worker %d metadata to GCS.", worker_index)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.error("Failed to save or upload worker %d metadata: %s", worker_index, e)
 
 
 def run_worker_pipeline() -> None:
@@ -322,32 +389,48 @@ def run_worker_pipeline() -> None:
   )
   logger.info("Starting Worker %d", worker_index)
 
+  # 1. Base Workspace GET Signed URL
   base_workspace_url = os.environ.get("CODEMENDER_BASE_WORKSPACE_URL")
+
+  # 2. Partition GET Signed URL
+  partition_url = None
   partition_urls_json = os.environ.get("CODEMENDER_PARTITION_URLS")
+  if partition_urls_json:
+    try:
+      p_urls = json.loads(partition_urls_json)
+      if worker_index < len(p_urls):
+        partition_url = p_urls[worker_index]
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+  # 3. Worker Shard Database PUT Signed URL
+  upload_url = None
   upload_urls_json = os.environ.get("CODEMENDER_UPLOAD_URLS")
+  if upload_urls_json:
+    try:
+      u_urls = json.loads(upload_urls_json)
+      if worker_index < len(u_urls):
+        upload_url = u_urls[worker_index]
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
 
-  if not base_workspace_url or not partition_urls_json or not upload_urls_json:
-    logger.critical("Missing required signed URLs in environment.")
-    sys.exit(1)
+  # 4. Worker Token Usage Metadata PUT Signed URL
+  metadata_url = None
+  metadata_urls_json = os.environ.get("CODEMENDER_METADATA_URLS")
+  if metadata_urls_json:
+    try:
+      m_urls = json.loads(metadata_urls_json)
+      if worker_index < len(m_urls):
+        metadata_url = m_urls[worker_index]
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
 
-  try:
-    partition_urls = json.loads(partition_urls_json)
-    upload_urls = json.loads(upload_urls_json)
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logger.critical("Failed to parse partition or upload URLs JSON: %s", e)
-    sys.exit(1)
-
-  if worker_index >= len(partition_urls) or worker_index >= len(upload_urls):
+  if not base_workspace_url or not partition_url or not upload_url:
     logger.critical(
-        "Worker index %d out of bounds for URLs (partitions: %d, uploads: %d)",
-        worker_index,
-        len(partition_urls),
-        len(upload_urls),
+        "Failed to resolve required signed URLs for worker %d.",
+        worker_index
     )
     sys.exit(1)
-
-  partition_url = partition_urls[worker_index]
-  upload_url = upload_urls[worker_index]
 
   workspace_dir = os.environ.get("WORKSPACE_DIR", os.getcwd())
   repo_url, token = get_github_credentials()
@@ -379,6 +462,8 @@ def run_worker_pipeline() -> None:
   )
 
   state_db_path = os.path.join(codemender_home, "state.db")
+  worker_token_usage = {"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}
+
 
   # If partition has no findings, upload unmodified base DB and exit
   if not finding_ids:
@@ -386,15 +471,23 @@ def run_worker_pipeline() -> None:
     if not upload_to_url(state_db_path, upload_url):
       logger.critical("Failed to upload unmodified database.")
       sys.exit(1)
+
+    _save_and_upload_worker_metadata(
+        workspace_dir, worker_index, worker_token_usage, metadata_url
+    )
     sys.exit(0)
 
   inject_codemender_config(repo_dir)
   cm_binary = shutil.which("cm") or "cm"
+  cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
 
   # 3. Retrieve findings from restored state db
   try:
+    report_cmd = build_cm_command(
+        cm_binary, "report", extra_flags=["--format", "json"], cli_version=cli_version
+    )
     report_res = run_command(
-        [cm_binary, "report", "--format", "json"],
+        report_cmd,
         cwd=repo_dir,
         env=scrubbed_env,
         check=True,
@@ -428,12 +521,18 @@ def run_worker_pipeline() -> None:
         repo_name,
         default_branch,
         state_db_path,
+        worker_token_usage,
     )
 
-  # 5. Upload mutated state DB
+  # 5. Upload mutated state DB and metadata
   logger.info("Uploading mutated database to GCS signed URL...")
   if not upload_to_url(state_db_path, upload_url):
     logger.error("Failed to upload mutated database.")
     sys.exit(1)
 
+  _save_and_upload_worker_metadata(
+      workspace_dir, worker_index, worker_token_usage, metadata_url
+  )
+
   logger.info("Stage 2 (Worker) completed successfully.")
+

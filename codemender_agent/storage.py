@@ -71,11 +71,36 @@ def _get_local_storage_path(bucket_name: str, blob_name: str) -> str:
   return os.path.join(storage_dir, bucket_name, blob_name)
 
 
-def generate_signed_url(
+def _resolve_service_account_email(client) -> Optional[str]:
+  """Resolves active service account email for GCS signed URL generation."""
+  env_email = os.environ.get("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+  if env_email:
+    return env_email
+
+  creds_email = getattr(getattr(client, "_credentials", None), "service_account_email", None)
+  if creds_email and creds_email != "default":
+    return creds_email
+
+  # In Compute Engine / Cloud Run token-only environments, resolve 'default' via Metadata Server
+  try:
+    resp = requests.get(
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email",
+        headers={"Metadata-Flavor": "Google"},
+        timeout=2,
+    )
+    if resp.status_code == 200 and resp.text.strip():
+      return resp.text.strip()
+  except Exception:
+    pass
+
+  return None
+
+
+def generate_gcs_signed_url(
     bucket_name: str,
     blob_name: str,
-    method: str = "GET",
     expiration_days: int = 3,
+    method: str = "GET",
     content_type: Optional[str] = None,
 ) -> Optional[str]:
   """Generates a temporary Signed URL for a GCS blob (supports GET/PUT)."""
@@ -96,46 +121,23 @@ def generate_signed_url(
     if content_type:
       signing_kwargs["content_type"] = content_type
 
-    # Wrap in Impersonated Credentials for token-only environments
-    # (e.g. Cloud Run)
-    # pylint: disable=protected-access
+    # Wrap in Impersonated Credentials for token-only environments (e.g. Cloud Run)
     if hasattr(client, "_credentials"):
-      try:
-        from google.auth import credentials as auth_credentials
+      sa_email = _resolve_service_account_email(client)
+      if sa_email:
+        try:
+          from google.auth import credentials as auth_credentials
 
-        is_signing = isinstance(client._credentials, auth_credentials.Signing)
-      except Exception:  # pylint: disable=broad-exception-caught
-        is_signing = False
+          is_signing = isinstance(
+              client._credentials, auth_credentials.Signing
+          )
+        except Exception:  # pylint: disable=broad-exception-caught
+          is_signing = False
 
-      if not is_signing:
-        sa_email = getattr(client._credentials, "service_account_email", None)
-
-        # Fallback metadata check for sa_email if credentials was default
-        if not sa_email or sa_email == "default":
+        if not is_signing:
           try:
-            resp = requests.get(
-                "http://metadata.google.internal/computeMetadata/v1/"
-                "instance/service-accounts/default/email",
-                headers={"Metadata-Flavor": "Google"},
-                timeout=2,
-            )
-            if resp.status_code == 200:
-              sa_email = resp.text.strip()
-              logger.info(
-                  "Automatically fetched service account email: %s",
-                  sa_email,
-              )
-          except Exception:  # pylint: disable=broad-exception-caught
-            pass
-
-        if sa_email:
-          try:
-            # pylint: disable=import-outside-toplevel
             from google.auth import impersonated_credentials
 
-            logger.info(
-                "Using Impersonated Credentials signer for: %s", sa_email
-            )
             signing_creds = impersonated_credentials.Credentials(
                 source_credentials=client._credentials,
                 target_principal=sa_email,
@@ -145,8 +147,11 @@ def generate_signed_url(
             )
             signing_kwargs["credentials"] = signing_creds
           except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.warning("Failed to create impersonated credentials: %s", e)
-    # pylint: enable=protected-access
+            logger.warning(
+                "Failed to create impersonated credentials for %s: %s",
+                sa_email,
+                e,
+            )
 
     url = blob.generate_signed_url(**signing_kwargs)
     return url
@@ -158,6 +163,9 @@ def generate_signed_url(
         e,
     )
   return None
+
+
+generate_signed_url = generate_gcs_signed_url
 
 
 def upload_and_sign_report(
@@ -315,7 +323,9 @@ def download_from_url(url: str, dest_path: str) -> bool:
     return False
 
 
-def upload_to_url(local_path: str, url: str) -> bool:
+def upload_to_url(
+    local_path: str, url: str, content_type: Optional[str] = None
+) -> bool:
   """Uploads a local file to a given URL (e.g., Signed PUT URL)."""
   if not os.path.exists(local_path):
     logger.error("Local file not found for upload: %s", local_path)
@@ -329,13 +339,22 @@ def upload_to_url(local_path: str, url: str) -> bool:
     except Exception as e:
       logger.error("Failed to copy local file to %s: %s", url, e)
       return False
+
+  if not content_type:
+    if local_path.endswith(".json"):
+      content_type = "application/json"
+    else:
+      content_type = "application/octet-stream"
+
   try:
-    logger.info("Uploading %s to URL...", local_path)
+    logger.info(
+        "Uploading %s to URL (Content-Type: %s)...", local_path, content_type
+    )
     with open(local_path, "rb") as f:
       response = requests.put(
           url,
           data=f,
-          headers={"Content-Type": "application/octet-stream"},
+          headers={"Content-Type": content_type},
           timeout=60,
       )
     response.raise_for_status()

@@ -19,8 +19,7 @@ provision:
     (`${PREFIX}-github-token`).
 *   **Service Accounts & Custom IAM**: Ephemeral, least-privilege access for
     Cloud Run, Cloud Workflows, and Cloud Build.
-*   **Cloud Run v2 Job**: Ephemeral runner container pool for `scan`, `worker`,
-    and `aggregate` modes.
+*   **Cloud Run v2 Jobs**: Ephemeral orchestrator container pool (`runner`) for `scan` and `aggregate` modes, and a dedicated unprivileged `worker` container pool for executing untrusted tests.
 *   **Cloud Workflows**: Coordinator workflow orchestrating multi-stage parallel
     tasks without container timeouts.
 *   **Cloud Scheduler**: Nightly trigger for automated repository scanning.
@@ -35,26 +34,26 @@ If you deploy multiple pipelines in the same GCP project using different
 *   **Shared Resources (Project-wide)**:
     *   **GCP APIs**: APIs enabled for the project are shared by all pipelines.
 *   **Isolated Resources (Unique per prefix)**:
-    *   **Compute & Workflow**: Cloud Run Job (`${prefix}-runner`) and Cloud
+    *   **Compute & Workflow**: Cloud Run Jobs (`${prefix}-runner`, `${prefix}-worker`) and Cloud
         Workflow (`${prefix}-coordinator`).
     *   **Storage & Secret**: GCS Reports/Releases buckets, Artifact Registry
         repository, and Secret Manager GitHub secret (`${prefix}-github-token`).
-    *   **Security**: Service Accounts (`${prefix}-runner-sa`, etc.) and Custom
-        IAM Role bindings.
+    *   **Security**: Service Accounts (`${prefix}-runner-sa`, `${prefix}-worker-sa`, etc.) and Custom
+        IAM Role bindings (suffixed with `random_id` to prevent 7-day GCP IAM soft-delete tombstone conflicts).
     *   **VPC & Networking**: Dedicated VPC Connector (`${prefix}-vpc-conn`) and
         Router (requires setting distinct `vpc_connector_cidr` ranges).
 
 ```mermaid
 graph TD
     Scheduler[Cloud Scheduler] -->|Nightly Trigger| Workflow[Cloud Workflows: Coordinator]
-    Workflow -->|1. Run Stage 1 Scan| CR_Job[Cloud Run Job: Runner Pool]
-    CR_Job -->|Write manifest.json| GCS[(GCS Reports Bucket)]
+    Workflow -->|1. Run Stage 1 Scan| CR_Job_Runner[Cloud Run Job: Orchestrator]
+    CR_Job_Runner -->|Write manifest.json| GCS[(GCS Reports Bucket)]
     Workflow -->|2. Read partitions| GCS
-    Workflow -->|3. Run Stage 2 Workers| CR_Job
-    CR_Job -->|Push PR Fixes| GitHub[GitHub Repository]
-    CR_Job -->|Write Shard DBs| GCS
-    Workflow -->|4. Run Stage 3 Aggregate| CR_Job
-    CR_Job -->|Generate Signed HTML Report| GCS
+    Workflow -->|3. Run Stage 2 Workers| CR_Job_Worker[Cloud Run Job: Worker]
+    CR_Job_Worker -->|Push PR Fixes| GitHub[GitHub Repository]
+    CR_Job_Worker -->|Write Shard DBs| GCS
+    Workflow -->|4. Run Stage 3 Aggregate| CR_Job_Runner
+    CR_Job_Runner -->|Generate Signed HTML Report| GCS
 ```
 
 --------------------------------------------------------------------------------
@@ -245,17 +244,25 @@ export REGION="us-central1"
 export PROJECT_ID=$(gcloud config get-value project)
 export REPORTS_BUCKET="${PREFIX}-reports-${PROJECT_ID}"
 export JOB_NAME="${PREFIX}-runner"
+export WORKER_JOB_NAME="${PREFIX}-worker"
 export WORKFLOW_NAME="${PREFIX}-coordinator"
 
 gcloud workflows run ${WORKFLOW_NAME} \
     --location=${REGION} \
     --data='{
+      "cli_version": "preview",
       "job_name": "'"${JOB_NAME}"'",
+      "worker_job_name": "'"${WORKER_JOB_NAME}"'",
       "gcs_bucket": "'"${REPORTS_BUCKET}"'",
       "repo_url": "https://github.com/your-org/your-repo.git",
       "build_command": "npm install && npm test",
       "scan_target": ".",
-      "max_tasks": 20
+      "max_tasks": 20,
+      "models": {
+        "find": "gemini-3.1-pro-preview",
+        "verify": "gemini-3-flash-preview",
+        "fix": "gemini-3-flash-preview"
+      }
     }'
 ```
 
@@ -269,6 +276,7 @@ gcloud workflows run ${WORKFLOW_NAME} \
     --location=${REGION} \
     --data='{
       "job_name": "'"${JOB_NAME}"'",
+      "worker_job_name": "'"${WORKER_JOB_NAME}"'",
       "gcs_bucket": "'"${REPORTS_BUCKET}"'",
       "repo_url": "https://github.com/your-org/flask-api.git",
       "build_command": "pip install -r requirements.txt && pytest",
@@ -283,25 +291,41 @@ When triggering the workflow, you pass a JSON object to the `--data` flag. The
 coordinator unpacks these values and injects them as environment variables into
 the Cloud Run jobs:
 
-JSON Field        | Required | Maps to Environment Variable  | Description
-:---------------- | :------- | :---------------------------- | :----------
-`job_name`        | Yes      | N/A (Cloud Run resource name) | The name of the provisioned Cloud Run job.
-`gcs_bucket`      | Yes      | `CODEMENDER_GCS_BUCKET`       | The GCS bucket to use for state and the final report.
-`repo_url`        | Yes      | `GITHUB_REPO_URL`             | The GitHub HTTPS URL of the repository to scan.
-`region`          | No       | N/A (GCP Region)              | The GCP region where the Cloud Run job resides. Defaults to `"us-central1"`.
-`build_command`   | No       | `CODEMENDER_BUILD_COMMAND`    | Your custom test command. Defaults to `.codemender.yaml` if omitted.
-`scan_target`     | No       | `CODEMENDER_SCAN_TARGET`      | Directory or directories to scan. Defaults to `.` (the whole repo). Examples: `"src/"` or `"src/;lib/;cmd/"`.
-`max_tasks`       | No       | `CODEMENDER_MAX_TASKS`        | Max parallel worker tasks (containers). Defaults to `20`.
-`timeout_seconds` | No       | N/A (Job Task Timeout)        | Task timeout duration in seconds for Cloud Run job stages. Defaults to `86400`.
-`cleanup_ports`*  | No       | `CODEMENDER_CLEANUP_PORTS`    | Comma-separated ports to kill before testing.
-`force_overwrite`*| No       | `CODEMENDER_FORCE_OVERWRITE`  | Pass `"true"` to bypass PR spam prevention and force re-run fixes and push PRs.
+JSON Field                  | Required | Maps to Environment Variable           | Description
+:-------------------------- | :------- | :------------------------------------- | :----------
+`job_name`                  | Yes      | N/A (Cloud Run resource name)          | The name of the provisioned Cloud Run job for the orchestrator (`scan` and `aggregate`).
+`worker_job_name`           | No       | N/A (Cloud Run resource name)          | The name of the provisioned Cloud Run job for the `worker` stage. Defaults to `${job_name}` with `"-runner"` replaced by `"-worker"`.
+`gcs_bucket`                | Yes      | `CODEMENDER_GCS_BUCKET`                | The GCS bucket to use for state and the final report.
+`repo_url`                  | Yes      | `GITHUB_REPO_URL`                      | The GitHub HTTPS URL of the repository to scan.
+`region`                    | No       | N/A (GCP Region)                       | The GCP region where the Cloud Run job resides. Defaults to `"us-central1"`.
+`build_command`             | Yes      | `CODEMENDER_BUILD_COMMAND`             | Your custom test command (e.g., `make test` or `.codemender.yaml`).
+`scan_target`               | No       | `CODEMENDER_SCAN_TARGET`               | Directory or directories to scan. Defaults to `.` (the whole repo). Examples: `"src/"` or `"src/;lib/;cmd/"`.
+`max_tasks`                 | No       | `CODEMENDER_MAX_TASKS`                 | Max parallel worker tasks (containers). Defaults to `20`.
+`timeout_seconds`           | No       | N/A (Job Task Timeout)                 | Task timeout duration in seconds for Cloud Run job stages. Defaults to `86400`.
+`cli_version`               | No       | `CODEMENDER_CLI_VERSION`               | CLI version mode: `"preview"` or `"legacy"`. Defaults to `"preview"`.
+`model`                     | No       | `CODEMENDER_MODEL`                     | Default model override for all CodeMender commands (e.g. `"gemini-3.5-flash"`), check available models in [here](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model).
+`models`                    | No       | `CODEMENDER_<CMD>_MODEL`               | Per-command model selection map: `{"find": "...", "verify": "...", "fix": "..."}`.
+`skip_exploit_verification` | No       | `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | Set to `true` to skip exploit compilation/execution during verify phase.
+`cleanup_ports`*            | No       | `CODEMENDER_CLEANUP_PORTS`             | Comma-separated ports to kill before testing.
+`force_overwrite`*          | No       | `CODEMENDER_FORCE_OVERWRITE`           | Pass `"true"` to bypass PR spam prevention and force re-run fixes and push PRs.
 
 > [!NOTE]
-> **\*Customizing Advanced Job Parameters (`cleanup_ports` and `force_overwrite`)**:
-> Currently, the default `gcp_parallel_workflow.yaml` does not dynamically parse `cleanup_ports` or `force_overwrite` from the `--data` trigger payload. To use these settings in a parallel workflow execution, you can either:
-> 1.  **Configure on the Cloud Run Job directly (Recommended without redeploying workflow)**: Update the default environment variables on the underlying Cloud Run Job using `gcloud run jobs update ${JOB_NAME} --region=${REGION} --update-env-vars="CODEMENDER_FORCE_OVERWRITE=true,CODEMENDER_CLEANUP_PORTS=3000,8080"`.
-> 2.  **Customize the Workflow YAML**: Modify `workflows/gcp_parallel_workflow.yaml` to include `cleanup_ports` and `force_overwrite` in the `init_variables` block and pass them in `containerOverrides`, then redeploy the workflow (`gcloud workflows deploy`).
---------------------------------------------------------------------------------
+> **\*Customizing Advanced Job Parameters (`cleanup_ports` and
+> `force_overwrite`)**: Currently, the default `gcp_parallel_workflow.yaml` does
+> not dynamically parse `cleanup_ports` or `force_overwrite` from the `--data`
+> trigger payload. To use these settings in a parallel workflow execution, you
+> can either:
+>
+> 1.  **Configure on the Cloud Run Job directly (Recommended without redeploying
+>     workflow)**: Update the default environment variables on the underlying
+>     Cloud Run Job using `gcloud run jobs update ${JOB_NAME} --region=${REGION}
+>     --update-env-vars="CODEMENDER_FORCE_OVERWRITE=true,CODEMENDER_CLEANUP_PORTS=3000,8080"`.
+>
+> 2.  **Customize the Workflow YAML**: Modify
+>     `workflows/gcp_parallel_workflow.yaml` to include `cleanup_ports` and
+>     `force_overwrite` in the > `init_variables` block and pass them in
+>     `containerOverrides`, then redeploy the workflow (`gcloud workflows
+>     deploy`).
 
 ### Step 6: Monitor Execution & Retrieve Summary Report
 
@@ -346,7 +370,7 @@ export SCHEDULER_JOB_NAME="${PREFIX}-nightly-scan"
 # Update payload to point to a new repository
 gcloud scheduler jobs update http ${SCHEDULER_JOB_NAME} \
     --location=${REGION} \
-    --message-body='{"argument":"{\"job_name\":\"'"${PREFIX}"'-runner\",\"gcs_bucket\":\"'"${PREFIX}"'-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/new-org/new-repo.git\",\"build_command\":\"npm install && npm test\",\"scan_target\":\".\"}"}'
+    --message-body='{"argument":"{\"job_name\":\"'"${PREFIX}"'-runner\",\"worker_job_name\":\"'"${PREFIX}"'-worker\",\"gcs_bucket\":\"'"${PREFIX}"'-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/new-org/new-repo.git\",\"build_command\":\"npm install && npm test\",\"scan_target\":\".\"}"}'
 ```
 
 #### B. How to Add a New Scheduled Job for a different Repository
@@ -372,7 +396,7 @@ gcloud scheduler jobs create http ${PREFIX}-second-repo-nightly \
     --http-method="POST" \
     --headers="Content-Type=application/json" \
     --oauth-service-account-email=${SCHEDULER_SA} \
-    --message-body='{"argument":"{\"job_name\":\"'"${PREFIX}"'-runner\",\"gcs_bucket\":\"'"${PREFIX}"'-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/another-org/another-repo.git\",\"build_command\":\"python3 -m pip install . && pytest\",\"scan_target\":\".\"}"}'
+    --message-body='{"argument":"{\"job_name\":\"'"${PREFIX}"'-runner\",\"worker_job_name\":\"'"${PREFIX}"'-worker\",\"gcs_bucket\":\"'"${PREFIX}"'-reports-'"${PROJECT_ID}"'\",\"region\":\"'"${REGION}"'\",\"repo_url\":\"https://github.com/another-org/another-repo.git\",\"build_command\":\"python3 -m pip install . && pytest\",\"scan_target\":\".\"}"}'
 ```
 
 --------------------------------------------------------------------------------

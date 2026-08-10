@@ -78,6 +78,60 @@ resource "google_cloud_run_v2_job" "runner" {
   ]
 }
 
+resource "google_cloud_run_v2_job" "worker" {
+  name                = "${var.resource_prefix}-worker"
+  location            = var.region
+  project             = var.project_id
+  deletion_protection = false
+
+  template {
+    template {
+      service_account = google_service_account.worker_sa.email
+
+      containers {
+        # Use a placeholder image initially so Terraform can provision the job before Cloud Build runs.
+        # The actual image is deployed out-of-band via Cloud Build (see cloudbuild.yaml).
+        image = "us-docker.pkg.dev/cloudrun/container/job:latest"
+
+        resources {
+          limits = {
+            cpu    = var.runner_cpu
+            memory = var.runner_memory
+          }
+        }
+
+        env {
+          name = "GITHUB_APP_TOKEN"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.github_app_token.secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+
+      dynamic "vpc_access" {
+        for_each = local.use_vpc_access ? [1] : []
+        content {
+          connector = local.vpc_connector_id
+          egress    = "ALL_TRAFFIC"
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [
+      template[0].template[0].containers[0].image
+    ]
+  }
+
+  depends_on = [
+    time_sleep.wait_for_apis_and_iam
+  ]
+}
+
 resource "google_workflows_workflow" "coordinator" {
   name                = "${var.resource_prefix}-coordinator"
   region              = var.region

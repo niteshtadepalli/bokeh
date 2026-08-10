@@ -21,7 +21,11 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from codemender_agent.runners.aggregate import merge_db, run_aggregate_pipeline
+from codemender_agent.runners.aggregate import (
+    _inject_token_metrics_into_html,
+    merge_db,
+    run_aggregate_pipeline,
+)
 
 
 class TestAggregateRunner(unittest.TestCase):
@@ -297,6 +301,38 @@ class TestAggregateRunner(unittest.TestCase):
 
     conn.close()
 
+  def test_merge_db_file_hashes(self):
+    base_db = os.path.join(self.workspace_dir, "base_hashes.db")
+    worker_db = os.path.join(self.workspace_dir, "worker_hashes.db")
+
+    conn1 = sqlite3.connect(base_db)
+    conn1.execute(
+        "CREATE TABLE file_hashes (file_path TEXT PRIMARY KEY, hash TEXT)"
+    )
+    conn1.execute("INSERT INTO file_hashes VALUES ('main.py', 'hash1')")
+    conn1.commit()
+    conn1.close()
+
+    conn2 = sqlite3.connect(worker_db)
+    conn2.execute(
+        "CREATE TABLE file_hashes (file_path TEXT PRIMARY KEY, hash TEXT)"
+    )
+    conn2.execute("INSERT INTO file_hashes VALUES ('main.py', 'updated_hash1')")
+    conn2.execute("INSERT INTO file_hashes VALUES ('utils.py', 'hash2')")
+    conn2.commit()
+    conn2.close()
+
+    merge_db(base_db, worker_db)
+
+    conn = sqlite3.connect(base_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT file_path, hash FROM file_hashes ORDER BY file_path")
+    rows = cursor.fetchall()
+    self.assertEqual(len(rows), 2)
+    self.assertEqual(rows[0], ("main.py", "updated_hash1"))
+    self.assertEqual(rows[1], ("utils.py", "hash2"))
+    conn.close()
+
   @patch("codemender_agent.runners.aggregate.run_command")
   @patch("codemender_agent.runners.aggregate.download_file_from_gcs")
   @patch("codemender_agent.runners.aggregate.list_gcs_blobs")
@@ -399,6 +435,89 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertTrue(report_called)
 
     mock_upload_and_sign_report.assert_called_once()
+
+  def test_inject_token_metrics_into_html(self):
+    html_path = os.path.join(self.workspace_dir, "report.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+      f.write("<!DOCTYPE html><html><head><title>Report</title></head><body><h1>Scan Summary</h1></body></html>")
+
+    token_totals = {
+        "in_tokens": 12500,
+        "out_tokens": 800,
+        "total_tokens": 13300,
+    }
+
+    _inject_token_metrics_into_html(html_path, token_totals)
+
+    with open(html_path, "r", encoding="utf-8") as f:
+      content = f.read()
+
+    self.assertIn("codemender-token-metrics-banner", content)
+    self.assertIn("12,500", content)
+    self.assertIn("800", content)
+    self.assertIn("13,300", content)
+    self.assertIn("⚡ LLM Token Usage Summary", content)
+
+
+  @patch("codemender_agent.runners.aggregate._generate_and_upload_report")
+  @patch("codemender_agent.runners.aggregate._aggregate_token_metrics")
+  @patch("codemender_agent.runners.aggregate._download_and_merge_worker_dbs")
+  @patch("codemender_agent.runners.aggregate.list_gcs_blobs")
+  @patch("codemender_agent.runners.aggregate.download_file_from_gcs")
+  @patch("codemender_agent.runners.aggregate.run_command")
+  @patch("tarfile.open")
+  def test_run_aggregate_pipeline_passes_token_totals_to_report(
+      self,
+      mock_tarfile_open,
+      mock_run_cmd,
+      mock_download_gcs,
+      mock_list_gcs,
+      mock_download_merge,
+      mock_aggregate_tokens,
+      mock_generate_report,
+  ):
+    manifest_data = {
+        "findings_count": 2,
+        "target_sha": "abc123sha",
+        "partition_urls": ["http://url1", "http://url2"],
+        "upload_urls": ["http://u1", "http://u2"],
+    }
+    manifest_path = os.path.join(self.workspace_dir, "manifest.json")
+    with open(manifest_path, "w") as f:
+      json.dump(manifest_data, f)
+
+    mock_download_gcs.return_value = True
+    mock_list_gcs.return_value = [
+        "scans/test-scan-123/worker_0_state.db",
+        "scans/test-scan-123/worker_1_state.db",
+    ]
+    mock_aggregate_tokens.return_value = {
+        "in_tokens": 15000,
+        "out_tokens": 900,
+        "total_tokens": 15900,
+    }
+
+    with patch.dict(os.environ, {"CODEMENDER_CLI_VERSION": "preview"}):
+      run_aggregate_pipeline()
+
+    mock_aggregate_tokens.assert_called_once_with(
+        self.workspace_dir,
+        "test-bucket",
+        "test-scan-123",
+        [
+            "scans/test-scan-123/worker_0_state.db",
+            "scans/test-scan-123/worker_1_state.db",
+        ],
+    )
+    mock_generate_report.assert_called_once()
+    self.assertEqual(
+        mock_generate_report.call_args.kwargs.get("token_totals"),
+        {
+            "in_tokens": 15000,
+            "out_tokens": 900,
+            "total_tokens": 15900,
+        },
+    )
 
 
 if __name__ == "__main__":

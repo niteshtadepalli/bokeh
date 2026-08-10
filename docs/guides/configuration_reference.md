@@ -46,6 +46,17 @@ when running in Docker or Cloud Run.
     blobs when `CODEMENDER_STORAGE_MODE="local"` (defaults to
     `/tmp/codemender_local_storage`).
 
+### CodeMender Public Preview & Model Configuration
+
+*   `CODEMENDER_CLI_VERSION`: Determines CLI flag compatibility syntax.
+    *   `preview` (default): Uses Public Preview CLI flag syntax (`-y`, `--bypass-warning`, `--skip-exploit-verification`, `--model`).
+    *   `legacy`: Uses legacy CLI flag syntax (`cm find verify <ID> --yes`, `cm fix <ID> --yes`).
+*   `CODEMENDER_MODEL`: Sets the global LLM model selection override across all CodeMender stages (e.g. `"gemini-2.5-flash"`).
+*   `CODEMENDER_FIND_MODEL`: Overrides the LLM model specifically for the Stage 1 scan (`cm find`) phase.
+*   `CODEMENDER_VERIFY_MODEL`: Overrides the LLM model specifically for the Stage 2 verification (`cm verify`) phase.
+*   `CODEMENDER_FIX_MODEL`: Overrides the LLM model specifically for the Stage 2 fix (`cm fix`) phase.
+*   `CODEMENDER_SKIP_EXPLOIT_VERIFICATION`: Set to `"true"` to append `--skip-exploit-verification` during the verification phase, skipping compilation and execution of exploits.
+
 ### Execution Modes
 
 *   `CODEMENDER_RUN_MODE`: Determines the orchestrator's behavior.
