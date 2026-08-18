@@ -32,15 +32,6 @@ output "reports_bucket_name" {
   value       = google_storage_bucket.reports.name
 }
 
-output "releases_bucket_url" {
-  description = "GCS bucket URL for binary releases."
-  value       = google_storage_bucket.releases.url
-}
-
-output "releases_bucket_name" {
-  description = "GCS bucket name for binary releases."
-  value       = google_storage_bucket.releases.name
-}
 
 output "runner_job_name" {
   description = "Cloud Run Job name."

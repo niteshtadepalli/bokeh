@@ -154,39 +154,31 @@ terraform apply -auto-approve
 
 --------------------------------------------------------------------------------
 
-### Step 2: Upload CLI Binary to Terraform-Provisioned Releases Bucket
+### Step 2: CLI Binary Sourcing (Automated via Artifact Registry)
 
-Terraform automatically creates the private GCS Releases Bucket and grants Cloud
-Build read permissions to it. Upload your compiled `cm-linux` binary directly to
-the bucket created by Terraform:
-
-```bash
-export PROJECT_ID=$(gcloud config get-value project)
-export RELEASES_BUCKET="${PREFIX}-releases-${PROJECT_ID}"
-
-# Upload the compiled binary to latest/cm
-gcloud storage cp /path/to/cm-linux gs://${RELEASES_BUCKET}/latest/cm
-```
+In CodeMender Public Preview, the official stable CLI binary is distributed via
+Google Artifact Registry (`cmoc-prod/codemender-cli-production`). Cloud Build
+automatically fetches and extracts the stable `cm` binary during the container
+build step (`cloudbuild.yaml`). No manual binary download or storage bucket upload is required.
 
 --------------------------------------------------------------------------------
 
 ### Step 3: Build, Push & Deploy Base Docker Container Image
 
 Return to the repository root directory (`codemender-agent/`) and build the
-runner container image using Cloud Build (which fetches `cm` from GCS Releases,
-pushes the container to Artifact Registry, and updates the Cloud Run Job):
+runner container image using Cloud Build (which fetches the stable `cm` binary,
+pushes the container to Artifact Registry, and updates the Cloud Run Jobs):
 
 ```bash
 cd ../..
 
 export PROJECT_ID=$(gcloud config get-value project)
-export RELEASES_BUCKET="${PREFIX}-releases-${PROJECT_ID}"
 export REPO_NAME="${PREFIX}-runner"
 export REGION="us-central1"
 
 # Build and push container image to Artifact Registry, and deploy to Cloud Run
 gcloud builds submit --config=cloudbuild.yaml \
-    --substitutions=_RELEASES_BUCKET="${RELEASES_BUCKET}",_REPO_NAME="${REPO_NAME}",_REGION="${REGION}" .
+    --substitutions=_REPO_NAME="${REPO_NAME}",_REGION="${REGION}" .
 ```
 
 --------------------------------------------------------------------------------
@@ -522,14 +514,13 @@ terraform apply -var-file="prod.tfvars"
 ### 4. Repeat Application Setup Steps
 
 Because this is a completely new set of infrastructure, you **must** repeat the
-application setup steps (Steps 2-4) for the new prefix:
+application setup steps (Steps 3-4) for the new prefix:
 
-1.  **Upload the Binary (Step 2)**: Upload your `cm-linux` binary to the new
-    `${PREFIX}-releases-${PROJECT_ID}` bucket.
-2.  **Build and Deploy (Step 3)**: Re-run the `gcloud builds submit` command so
-    the container is built, pushed to the new environment's Artifact Registry,
-    and deployed to the new Cloud Run Job.
-3.  **Populate Secrets (Step 4)**: Add the GitHub Token to the new
+1.  **Build and Deploy (Step 3)**: Re-run the `gcloud builds submit` command so
+    the container is built (fetching the stable `cm` binary from Artifact Registry),
+    pushed to the new environment's Artifact Registry, and deployed to the new
+    Cloud Run Jobs.
+2.  **Populate Secrets (Step 4)**: Add the GitHub Token to the new
     `${PREFIX}-github-token` secret in Secret Manager.
 
 > [!TIP]

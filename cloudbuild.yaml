@@ -13,12 +13,22 @@
 # limitations under the License.
 
 steps:
-  # Step 1: Download the private cm binary from GCS using Cloud Build IAM credentials
+  # Step 1: Download the latest stable cm binary from official Google Artifact Registry
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
-      - 'gcloud storage cp gs://${_RELEASES_BUCKET}/latest/cm ./cm'
+      - |
+        gcloud artifacts generic download \
+          --project=cmoc-prod \
+          --location=us \
+          --repository=codemender-cli-production \
+          --package=cm \
+          --version=stable \
+          --name=cm-linux-amd64.zip \
+          --destination=./
+        python3 -m zipfile -e cm-linux-amd64.zip ./
+        chmod +x cm
 
   # Step 2: Build the container image
   - name: 'gcr.io/cloud-builders/docker'
@@ -60,6 +70,5 @@ steps:
           --region ${_REGION}
 
 substitutions:
-  _RELEASES_BUCKET: 'codemender-releases'
   _REPO_NAME: 'codemender-runner'
   _REGION: 'us-central1'

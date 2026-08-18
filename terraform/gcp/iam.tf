@@ -79,11 +79,6 @@ resource "google_storage_bucket_iam_member" "workflow_reports_viewer" {
   member = "serviceAccount:${google_service_account.workflow_sa.email}"
 }
 
-resource "google_storage_bucket_iam_member" "runner_releases_viewer" {
-  bucket = google_storage_bucket.releases.name
-  role   = "roles/storage.objectViewer"
-  member = "serviceAccount:${google_service_account.runner_sa.email}"
-}
 
 # Secret Manager IAM for Runner SA
 resource "google_secret_manager_secret_iam_member" "runner_secret_accessor" {
@@ -158,12 +153,6 @@ resource "google_secret_manager_secret_iam_member" "worker_secret_accessor" {
   member    = "serviceAccount:${google_service_account.worker_sa.email}"
 }
 
-# Releases Bucket Viewer for Worker SA (to download CM binary)
-resource "google_storage_bucket_iam_member" "worker_releases_viewer" {
-  bucket = google_storage_bucket.releases.name
-  role   = "roles/storage.objectViewer"
-  member = "serviceAccount:${google_service_account.worker_sa.email}"
-}
 
 # Agent Platform / Vertex AI IAM for Worker SA (required for CodeMender LLM interactions)
 resource "google_project_iam_member" "worker_aiplatform_user" {

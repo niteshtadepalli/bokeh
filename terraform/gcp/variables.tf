@@ -35,11 +35,6 @@ variable "reports_bucket_name" {
   default     = ""
 }
 
-variable "releases_bucket_name" {
-  type        = string
-  description = "Name of the GCS bucket for binary releases."
-  default     = ""
-}
 
 variable "runner_cpu" {
   type        = string

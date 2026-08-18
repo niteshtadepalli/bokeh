@@ -82,29 +82,12 @@ git clone https://github.com/your-username/codemender-agent.git
 cd codemender-agent
 ```
 
-### Step 2: Create a GCS Releases Bucket & Upload the CLI Binary
+### Step 2: CLI Binary Sourcing (Automated via Artifact Registry)
 
-Because the `cm` binary is not yet available in a public GCS releases bucket,
-you should create a private releases bucket in your project to host it:
-
-```bash
-export PROJECT_ID=$(gcloud config get-value project)
-export RELEASES_BUCKET="codemender-releases-${PROJECT_ID}"
-
-# Create GCS Releases Bucket in us-central1
-gcloud storage buckets create gs://${RELEASES_BUCKET} \
-    --location=us-central1 \
-    --uniform-bucket-level-access
-
-# Grant the Cloud Build service account permission to read from this private releases bucket
-export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
-gcloud storage buckets add-iam-policy-binding gs://${RELEASES_BUCKET} \
-    --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
-    --role="roles/storage.objectViewer"
-
-# Upload your locally compiled cm-linux binary to the bucket
-gcloud storage cp /path/to/your/cm-linux gs://${RELEASES_BUCKET}/latest/cm
-```
+In CodeMender Public Preview, the official stable CLI binary is distributed via
+Google Artifact Registry (`cmoc-prod/codemender-cli-production`). Cloud Build
+automatically fetches and extracts the stable `cm` binary during the container
+build step (`cloudbuild.yaml`). No manual binary download or storage bucket upload is required.
 
 ### Step 3: Create a GCS Bucket for Summary Reports
 
@@ -200,8 +183,8 @@ gcloud iam service-accounts create ${SA_NAME} \
 ### Step 6: Build and Push the Docker Container
 
 Compile and push the container image to Artifact Registry using Cloud Build
-(which fetches the private `cm` CLI binary and packages it alongside your
-environment):
+(which fetches the stable `cm` CLI binary directly from Google Artifact Registry
+and packages it alongside your environment):
 
 1.  Create a Google Artifact Registry Docker repository (if one does not exist):
 
@@ -214,8 +197,7 @@ environment):
 2.  Compile and push the container image:
 
     ```bash
-    gcloud builds submit --config=cloudbuild.yaml \
-        --substitutions=_RELEASES_BUCKET="codemender-releases-${PROJECT_ID}" .
+    gcloud builds submit --config=cloudbuild.yaml .
     ```
 
 --------------------------------------------------------------------------------

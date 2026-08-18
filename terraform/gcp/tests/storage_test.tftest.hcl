@@ -26,17 +26,11 @@ run "storage_resources_default_names" {
 
   variables {
     reports_bucket_name  = ""
-    releases_bucket_name = ""
   }
 
   assert {
     condition     = google_storage_bucket.reports.name == "test-storage-reports-test-project-123"
     error_message = "Reports bucket default name does not match expected prefix pattern."
-  }
-
-  assert {
-    condition     = google_storage_bucket.releases.name == "test-storage-releases-test-project-123"
-    error_message = "Releases bucket default name does not match expected prefix pattern."
   }
 
   assert {
@@ -50,17 +44,11 @@ run "storage_resources_custom_names" {
 
   variables {
     reports_bucket_name  = "custom-reports-123"
-    releases_bucket_name = "custom-releases-123"
   }
 
   assert {
     condition     = google_storage_bucket.reports.name == "custom-reports-123"
     error_message = "Reports bucket should use provided variable when specified."
-  }
-
-  assert {
-    condition     = google_storage_bucket.releases.name == "custom-releases-123"
-    error_message = "Releases bucket should use provided variable when specified."
   }
 }
 
