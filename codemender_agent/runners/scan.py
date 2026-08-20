@@ -30,7 +30,9 @@ from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
 from codemender_agent.storage import generate_signed_url
 from codemender_agent.storage import upload_file_to_gcs
+from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
+from codemender_agent.utils import resolve_command_model
 from codemender_agent.utils import run_command
 from codemender_agent.vcs.git import generate_branch_name
 from codemender_agent.vcs.git import get_git_auth_header
@@ -190,12 +192,13 @@ def _scan_repository(
     scrubbed_env: dict[str, str],
     cm_binary: str,
     targets: list[str],
-) -> tuple[list[dict[str, any]], dict[str, int]]:
+) -> tuple[list[dict[str, any]], dict[str, dict[str, int]]]:
   """Runs scan on targets with retries if no findings are found."""
   cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
   max_scan_attempts = 3
   findings = []
-  scan_token_usage = {"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}
+  scan_token_usage: dict[str, dict[str, int]] = {}
+  find_model = resolve_command_model("find") or "default"
 
   for attempt in range(1, max_scan_attempts + 1):
     logger.info("Running scan attempt %d/%d...", attempt, max_scan_attempts)
@@ -211,9 +214,7 @@ def _scan_repository(
         )
         token_usage = getattr(res, "token_usage", None)
         if isinstance(token_usage, dict):
-          scan_token_usage["in_tokens"] += token_usage.get("in_tokens", 0)
-          scan_token_usage["out_tokens"] += token_usage.get("out_tokens", 0)
-          scan_token_usage["total_tokens"] += token_usage.get("total_tokens", 0)
+          accumulate_model_token_usage(scan_token_usage, find_model, token_usage)
       except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Scan failed for target %s: %s", target, e)
         sys.exit(1)
@@ -356,7 +357,7 @@ def _save_and_upload_state(
     workspace_dir: str,
     bucket_name: str,
     scan_id: str,
-    scan_token_usage: dict[str, int],
+    scan_token_usage: dict[str, dict[str, int]],
     skipped_duplicate_count: int,
 ) -> None:
   """Saves partitions and manifest, generates signed URLs, and uploads to GCS."""

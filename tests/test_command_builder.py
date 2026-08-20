@@ -16,12 +16,29 @@ import os
 import unittest
 from unittest.mock import patch
 
+from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import parse_token_metric
 from codemender_agent.utils import resolve_command_model
 
 
 class TestCommandBuilder(unittest.TestCase):
+
+  def test_accumulate_model_token_usage(self):
+    usage = {}
+    accumulate_model_token_usage(usage, "gemini-flash", {"in_tokens": 100, "out_tokens": 20, "total_tokens": 120})
+    self.assertEqual(usage, {"gemini-flash": {"in_tokens": 100, "out_tokens": 20, "total_tokens": 120}})
+
+    accumulate_model_token_usage(usage, "gemini-flash", {"in_tokens": 50, "out_tokens": 10, "total_tokens": 60})
+    self.assertEqual(usage, {"gemini-flash": {"in_tokens": 150, "out_tokens": 30, "total_tokens": 180}})
+
+    accumulate_model_token_usage(usage, "gemini-pro", {"in_tokens": 200, "out_tokens": 40, "total_tokens": 240})
+    self.assertEqual(len(usage), 2)
+    self.assertEqual(usage["gemini-pro"], {"in_tokens": 200, "out_tokens": 40, "total_tokens": 240})
+
+    # None or non-dict handling
+    accumulate_model_token_usage(usage, "gemini-pro", None)
+    self.assertEqual(usage["gemini-pro"]["total_tokens"], 240)
 
   def test_parse_token_metric(self):
     self.assertEqual(parse_token_metric("41k"), 41000)

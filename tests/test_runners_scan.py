@@ -171,6 +171,11 @@ class TestScanRunner(unittest.TestCase):
           self.assertIn("finding_ids", part_data)
       elif "workspace_base.tar.gz" in dest_blob:
         workspace_uploaded = True
+      elif "scan_metadata.json" in dest_blob:
+        with open(local_path, "r") as f:
+          meta_data = json.load(f)
+          self.assertIn("token_usage", meta_data)
+          self.assertIsInstance(meta_data["token_usage"], dict)
 
     self.assertTrue(manifest_uploaded)
     self.assertTrue(workspace_uploaded)
