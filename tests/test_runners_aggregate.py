@@ -436,15 +436,17 @@ class TestAggregateRunner(unittest.TestCase):
 
     mock_upload_and_sign_report.assert_called_once()
 
-  def test_inject_token_metrics_into_html(self):
+  def test_inject_token_metrics_into_html_single_model(self):
     html_path = os.path.join(self.workspace_dir, "report.html")
     with open(html_path, "w", encoding="utf-8") as f:
       f.write("<!DOCTYPE html><html><head><title>Report</title></head><body><h1>Scan Summary</h1></body></html>")
 
     token_totals = {
-        "in_tokens": 12500,
-        "out_tokens": 800,
-        "total_tokens": 13300,
+        "gemini-2.5-flash": {
+            "in_tokens": 12500,
+            "out_tokens": 800,
+            "total_tokens": 13300,
+        }
     }
 
     _inject_token_metrics_into_html(html_path, token_totals)
@@ -456,8 +458,67 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertIn("12,500", content)
     self.assertIn("800", content)
     self.assertIn("13,300", content)
-    self.assertIn("⚡ LLM Token Usage Summary", content)
+    self.assertIn("(Model: <code>gemini-2.5-flash</code>)", content)
+    self.assertNotIn("Per-Model Breakdown", content)
 
+  def test_inject_token_metrics_into_html_default_model(self):
+    html_path = os.path.join(self.workspace_dir, "report_default.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+      f.write("<!DOCTYPE html><html><head><title>Report</title></head><body><h1>Scan Summary</h1></body></html>")
+
+    token_totals = {
+        "default": {
+            "in_tokens": 31000,
+            "out_tokens": 651,
+            "total_tokens": 31000,
+        }
+    }
+
+    _inject_token_metrics_into_html(html_path, token_totals)
+
+    with open(html_path, "r", encoding="utf-8") as f:
+      content = f.read()
+
+    self.assertIn("codemender-token-metrics-banner", content)
+    self.assertIn("31,000", content)
+    self.assertIn("651", content)
+    self.assertIn("(Model: <code>default</code>)", content)
+    self.assertNotIn("Per-Model Breakdown", content)
+
+  def test_inject_token_metrics_into_html_multi_model(self):
+    html_path = os.path.join(self.workspace_dir, "report_multi.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+      f.write("<!DOCTYPE html><html><head><title>Report</title></head><body><h1>Scan Summary</h1></body></html>")
+
+    token_totals = {
+        "gemini-2.5-flash": {
+            "in_tokens": 10000,
+            "out_tokens": 500,
+            "total_tokens": 10500,
+        },
+        "gemini-2.5-pro": {
+            "in_tokens": 5000,
+            "out_tokens": 300,
+            "total_tokens": 5300,
+        },
+    }
+
+    _inject_token_metrics_into_html(html_path, token_totals)
+
+    with open(html_path, "r", encoding="utf-8") as f:
+      content = f.read()
+
+    self.assertIn("codemender-token-metrics-banner", content)
+    # Grand totals: 15,000 in, 800 out, 15,800 total
+    self.assertIn("15,000", content)
+    self.assertIn("800", content)
+    self.assertIn("15,800", content)
+    # Table breakdown
+    self.assertIn("Per-Model Breakdown", content)
+    self.assertIn("gemini-2.5-flash", content)
+    self.assertIn("10,000", content)
+    self.assertIn("gemini-2.5-pro", content)
+    self.assertIn("5,000", content)
 
   @patch("codemender_agent.runners.aggregate._generate_and_upload_report")
   @patch("codemender_agent.runners.aggregate._aggregate_token_metrics")
@@ -492,9 +553,11 @@ class TestAggregateRunner(unittest.TestCase):
         "scans/test-scan-123/worker_1_state.db",
     ]
     mock_aggregate_tokens.return_value = {
-        "in_tokens": 15000,
-        "out_tokens": 900,
-        "total_tokens": 15900,
+        "gemini-2.5-flash": {
+            "in_tokens": 15000,
+            "out_tokens": 900,
+            "total_tokens": 15900,
+        }
     }
 
     with patch.dict(os.environ, {"CODEMENDER_CLI_VERSION": "preview"}):
@@ -513,9 +576,11 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertEqual(
         mock_generate_report.call_args.kwargs.get("token_totals"),
         {
-            "in_tokens": 15000,
-            "out_tokens": 900,
-            "total_tokens": 15900,
+            "gemini-2.5-flash": {
+                "in_tokens": 15000,
+                "out_tokens": 900,
+                "total_tokens": 15900,
+            }
         },
     )
 

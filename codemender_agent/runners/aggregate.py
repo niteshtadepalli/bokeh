@@ -32,6 +32,7 @@ from codemender_agent.config import inject_codemender_config
 from codemender_agent.storage import download_file_from_gcs
 from codemender_agent.storage import list_gcs_blobs
 from codemender_agent.storage import upload_and_sign_report
+from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import run_command
 from codemender_agent.vcs.git import get_git_auth_header
@@ -248,9 +249,20 @@ def _aggregate_token_metrics(
     bucket_name: str,
     scan_id: str,
     worker_db_blobs: list[str],
-) -> dict[str, int]:
-  """Downloads scan_metadata.json and all worker metadata files to aggregate total token usage."""
-  totals = {"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}
+) -> dict[str, dict[str, int]]:
+  """Downloads scan_metadata.json and all worker metadata files to aggregate per-model token usage."""
+  token_usage_by_model: dict[str, dict[str, int]] = {}
+
+  def _ingest_token_usage(token_dict: any):
+    if not isinstance(token_dict, dict):
+      return
+    for k, v in token_dict.items():
+      if isinstance(v, dict):
+        accumulate_model_token_usage(token_usage_by_model, k, v)
+      elif isinstance(v, (int, float)):
+        # Fallback if flat dict {"in_tokens": ...} was provided
+        accumulate_model_token_usage(token_usage_by_model, "default", token_dict)
+        break
 
   # 1. Download Stage 1 scan_metadata.json
   scan_meta_local = os.path.join(workspace_dir, "scan_metadata.json")
@@ -258,10 +270,7 @@ def _aggregate_token_metrics(
     try:
       with open(scan_meta_local, "r") as f:
         scan_meta = json.load(f)
-      scan_tokens = scan_meta.get("token_usage", {})
-      totals["in_tokens"] += scan_tokens.get("in_tokens", 0)
-      totals["out_tokens"] += scan_tokens.get("out_tokens", 0)
-      totals["total_tokens"] += scan_tokens.get("total_tokens", 0)
+      _ingest_token_usage(scan_meta.get("token_usage"))
     except Exception as e:  # pylint: disable=broad-exception-caught
       logger.warning("Failed to parse scan_metadata.json: %s", e)
 
@@ -277,58 +286,103 @@ def _aggregate_token_metrics(
       try:
         with open(local_meta, "r") as f:
           w_meta = json.load(f)
-        w_tokens = w_meta.get("token_usage", {})
-        totals["in_tokens"] += w_tokens.get("in_tokens", 0)
-        totals["out_tokens"] += w_tokens.get("out_tokens", 0)
-        totals["total_tokens"] += w_tokens.get("total_tokens", 0)
+        _ingest_token_usage(w_meta.get("token_usage"))
       except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning("Failed to parse worker metadata %s: %s", meta_blob, e)
+
+  total_in = sum(m.get("in_tokens", 0) for m in token_usage_by_model.values())
+  total_out = sum(m.get("out_tokens", 0) for m in token_usage_by_model.values())
+  total_all = sum(m.get("total_tokens", 0) for m in token_usage_by_model.values())
 
   logger.info(
       "\n"
       "======================================================================\n"
-      "⚡ TOTAL AGGREGATED TOKEN USAGE:\n"
-      "   Input Tokens:  %d\n"
-      "   Output Tokens: %d\n"
-      "   Total Tokens:  %d\n"
+      "⚡ AGGREGATED TOKEN USAGE:\n"
+      "   Total Input Tokens:  %d\n"
+      "   Total Output Tokens: %d\n"
+      "   Grand Total Tokens:  %d\n"
+      "   Breakdown: %s\n"
       "======================================================================\n",
-      totals["in_tokens"],
-      totals["out_tokens"],
-      totals["total_tokens"],
+      total_in,
+      total_out,
+      total_all,
+      json.dumps(token_usage_by_model),
   )
-  return totals
+  return token_usage_by_model
 
 
 def _inject_token_metrics_into_html(
-    html_path: str, token_totals: Optional[dict[str, int]]
+    html_path: str, token_totals: Optional[dict[str, dict[str, int]]]
 ) -> None:
-  """Injects a Token Usage Summary card between the report title and finding count section."""
+  """Injects a Token Usage Summary card/table between the report title and finding count section."""
   if not os.path.exists(html_path) or not token_totals:
     return
 
-  in_tokens = token_totals.get("in_tokens", 0)
-  out_tokens = token_totals.get("out_tokens", 0)
-  total_tokens = token_totals.get("total_tokens", 0)
+  total_in = sum(m.get("in_tokens", 0) for m in token_totals.values())
+  total_out = sum(m.get("out_tokens", 0) for m in token_totals.values())
+  total_all = sum(m.get("total_tokens", 0) for m in token_totals.values())
+
+  # Build per-model breakdown table if multiple models exist
+  breakdown_html = ""
+  if len(token_totals) > 1:
+    rows = []
+    for model_name, metrics in sorted(token_totals.items()):
+      m_in = metrics.get("in_tokens", 0)
+      m_out = metrics.get("out_tokens", 0)
+      m_total = metrics.get("total_tokens", 0)
+      rows.append(f"""
+        <tr style="border-bottom: 1px solid #e9ecef;">
+          <td style="padding: 8px 12px; font-weight: 600; color: #495057;"><code>{model_name}</code></td>
+          <td style="padding: 8px 12px; color: #0d6efd;">{m_in:,}</td>
+          <td style="padding: 8px 12px; color: #198754;">{m_out:,}</td>
+          <td style="padding: 8px 12px; font-weight: 700; color: #212529;">{m_total:,}</td>
+        </tr>""")
+    rows_str = "".join(rows)
+    breakdown_html = f"""
+    <div style="margin-top: 18px; border-top: 1px solid #e9ecef; padding-top: 14px;">
+      <h4 style="margin-bottom: 8px; font-size: 0.85rem; color: #495057; text-transform: uppercase; letter-spacing: 0.05em;">
+        Per-Model Breakdown
+      </h4>
+      <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem; text-align: left;">
+        <thead>
+          <tr style="background-color: #f8f9fa; border-bottom: 2px solid #dee2e6;">
+            <th style="padding: 8px 12px; color: #6c757d; font-weight: 600;">Model</th>
+            <th style="padding: 8px 12px; color: #6c757d; font-weight: 600;">Input Tokens</th>
+            <th style="padding: 8px 12px; color: #6c757d; font-weight: 600;">Output Tokens</th>
+            <th style="padding: 8px 12px; color: #6c757d; font-weight: 600;">Total Tokens</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows_str}
+        </tbody>
+      </table>
+    </div>"""
+
+  single_model_label = ""
+  if len(token_totals) == 1:
+    only_model = list(token_totals.keys())[0]
+    single_model_label = f' <span style="font-size: 0.8rem; color: #6c757d; font-weight: normal;">(Model: <code>{only_model}</code>)</span>'
 
   banner_html = f"""
   <div id="codemender-token-metrics-banner" style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 25px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
     <h3 style="margin-bottom: 12px; font-size: 0.95rem; color: #16213e; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 8px;">
-      ⚡ LLM Token Usage Summary
+      ⚡ LLM Token Usage Summary{single_model_label}
     </h3>
     <div style="display: flex; gap: 40px; flex-wrap: wrap;">
       <div>
         <span style="font-size: 0.8rem; text-transform: uppercase; color: #6c757d; font-weight: 600; display: block; margin-bottom: 4px;">Input Tokens</span>
-        <span style="font-size: 1.5rem; font-weight: 700; color: #0d6efd;">{in_tokens:,}</span>
+        <span style="font-size: 1.5rem; font-weight: 700; color: #0d6efd;">{total_in:,}</span>
       </div>
       <div>
         <span style="font-size: 0.8rem; text-transform: uppercase; color: #6c757d; font-weight: 600; display: block; margin-bottom: 4px;">Output Tokens</span>
-        <span style="font-size: 1.5rem; font-weight: 700; color: #198754;">{out_tokens:,}</span>
+        <span style="font-size: 1.5rem; font-weight: 700; color: #198754;">{total_out:,}</span>
       </div>
       <div>
         <span style="font-size: 0.8rem; text-transform: uppercase; color: #6c757d; font-weight: 600; display: block; margin-bottom: 4px;">Total Tokens</span>
-        <span style="font-size: 1.5rem; font-weight: 700; color: #212529;">{total_tokens:,}</span>
+        <span style="font-size: 1.5rem; font-weight: 700; color: #212529;">{total_all:,}</span>
       </div>
     </div>
+    {breakdown_html}
   </div>
 """
   try:
@@ -378,7 +432,7 @@ def _generate_and_upload_report(
     bucket_name: str,
     owner: str,
     repo_name: str,
-    token_totals: Optional[dict[str, int]] = None,
+    token_totals: Optional[dict[str, dict[str, int]]] = None,
 ) -> None:
   """Generates final HTML report using cm CLI and uploads it to GCS."""
   cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()

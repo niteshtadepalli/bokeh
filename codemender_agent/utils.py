@@ -60,6 +60,21 @@ def resolve_command_model(command_name: str) -> Optional[str]:
   return os.environ.get("CODEMENDER_MODEL")
 
 
+def accumulate_model_token_usage(
+    usage_dict: dict[str, dict[str, int]],
+    model_name: str,
+    token_metrics: Optional[dict[str, int]],
+) -> None:
+  """Accumulates in/out/total tokens into usage_dict keyed by model_name."""
+  if not token_metrics or not isinstance(token_metrics, dict):
+    return
+  if model_name not in usage_dict:
+    usage_dict[model_name] = {"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}
+  usage_dict[model_name]["in_tokens"] += token_metrics.get("in_tokens", 0)
+  usage_dict[model_name]["out_tokens"] += token_metrics.get("out_tokens", 0)
+  usage_dict[model_name]["total_tokens"] += token_metrics.get("total_tokens", 0)
+
+
 def build_cm_command(
     cm_binary: str,
     action: str,

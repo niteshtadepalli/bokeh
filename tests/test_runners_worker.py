@@ -32,10 +32,12 @@ class TestWorkerRunner(unittest.TestCase):
     self.env_patcher = unittest.mock.patch.dict(
         os.environ,
         {
+            "HOME": self.workspace_dir,
             "CODEMENDER_WORKER_INDEX": "0",
             "CODEMENDER_BASE_WORKSPACE_URL": "http://signed-url/base.tar.gz",
             "CODEMENDER_PARTITION_URLS": json.dumps(["http://signed-url/partition_0.json"]),
             "CODEMENDER_UPLOAD_URLS": json.dumps(["http://signed-url/upload_0.db"]),
+            "CODEMENDER_METADATA_URLS": json.dumps(["http://signed-url/metadata_0.json"]),
             "WORKSPACE_DIR": self.workspace_dir,
             "GITHUB_REPO_URL": "https://github.com/owner/repo.git",
             "GITHUB_TOKEN": "fake-token",
@@ -144,9 +146,14 @@ class TestWorkerRunner(unittest.TestCase):
     self.assertTrue(verify_called)
     self.assertTrue(fix_called)
     mock_create_pr.assert_called_once()
-    mock_upload_to_url.assert_called_once_with(
+    mock_upload_to_url.assert_any_call(
         os.path.expanduser("~/.codemender/state.db"),
         "http://signed-url/upload_0.db"
+    )
+    mock_upload_to_url.assert_any_call(
+        os.path.join(self.workspace_dir, "worker_0_metadata.json"),
+        "http://signed-url/metadata_0.json",
+        content_type="application/json",
     )
 
   @unittest.mock.patch("codemender_agent.runners.worker.run_command")
@@ -237,19 +244,25 @@ class TestWorkerRunner(unittest.TestCase):
     self.assertFalse(fix_called)
 
     mock_create_pr.assert_not_called()
-    mock_upload_to_url.assert_called_once()
+    mock_upload_to_url.assert_any_call(
+        os.path.expanduser("~/.codemender/state.db"),
+        "http://signed-url/upload_0.db"
+    )
+    mock_upload_to_url.assert_any_call(
+        os.path.join(self.workspace_dir, "worker_0_metadata.json"),
+        "http://signed-url/metadata_0.json",
+        content_type="application/json",
+    )
 
   @unittest.mock.patch("codemender_agent.runners.worker.run_command")
-  @unittest.mock.patch("codemender_agent.runners.worker.generate_signed_url")
   @unittest.mock.patch("codemender_agent.runners.worker.download_from_url")
   @unittest.mock.patch("codemender_agent.runners.worker.upload_to_url")
   @unittest.mock.patch("tarfile.open")
-  def test_worker_pipeline_self_resolution_generate_signed_url(
-      self, mock_tarfile_open, mock_upload_to_url, mock_download_from_url, mock_generate_signed_url, mock_run_command
+  def test_worker_pipeline_metadata_upload(
+      self, mock_tarfile_open, mock_upload_to_url, mock_download_from_url, mock_run_command
   ):
     mock_download_from_url.return_value = True
     mock_upload_to_url.return_value = True
-    mock_generate_signed_url.return_value = "http://signed-url/self_resolved.json"
     mock_run_command.return_value.returncode = 0
     mock_run_command.return_value.stdout = ""
 
@@ -270,24 +283,16 @@ class TestWorkerRunner(unittest.TestCase):
     with unittest.mock.patch.dict(
         os.environ,
         {
-            "CODEMENDER_GCS_BUCKET": "my-test-bucket",
-            "CODEMENDER_SCAN_ID": "scan-xyz-123",
+            "CODEMENDER_METADATA_URLS": json.dumps(["http://signed-url/metadata_0.json"]),
         },
     ):
       with self.assertRaises(SystemExit) as cm:
         run_worker_pipeline()
       self.assertEqual(cm.exception.code, 0)
 
-    # Verify self-resolution generated metadata URL directly inside worker
-    mock_generate_signed_url.assert_any_call(
-        "my-test-bucket",
-        "scans/scan-xyz-123/worker_0_metadata.json",
-        method="PUT",
-        content_type="application/json",
-    )
     mock_upload_to_url.assert_any_call(
-        unittest.mock.ANY,
-        "http://signed-url/self_resolved.json",
+        os.path.join(self.workspace_dir, "worker_0_metadata.json"),
+        "http://signed-url/metadata_0.json",
         content_type="application/json",
     )
 

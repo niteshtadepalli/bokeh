@@ -109,5 +109,40 @@ class TestConfig(unittest.TestCase):
 
 
 
+  def test_inject_codemender_config_sandbox(self):
+    """Verify sandbox settings and project_paths normalization in config.yaml."""
+    with tempfile.TemporaryDirectory() as temp_home:
+      with tempfile.TemporaryDirectory() as repo_dir:
+        local_config = {
+            "build": {"command": "npm test"},
+            "project_paths": ["src", "routes", os.path.abspath("/custom/abs/path")],
+        }
+        with open(os.path.join(repo_dir, ".codemender.yaml"), "w") as f:
+          yaml.dump(local_config, f)
+
+        with unittest.mock.patch("os.path.expanduser", return_value=temp_home):
+          inject_codemender_config(repo_dir)
+
+          out_config = os.path.join(temp_home, ".codemender", "config.yaml")
+          self.assertTrue(os.path.exists(out_config))
+
+          with open(out_config, "r") as f:
+            data = yaml.safe_load(f)
+
+          # Verify sandbox defaults
+          self.assertIn("sandbox", data)
+          self.assertTrue(data["sandbox"]["enabled"])
+          self.assertEqual(data["sandbox"]["mounts"]["target_dir"], os.path.abspath(repo_dir))
+          self.assertEqual(data["sandbox"]["network"]["profile"], "permissive-open")
+
+          # Verify project_paths are all absolute
+          self.assertIn("project_paths", data)
+          for p in data["project_paths"]:
+            self.assertTrue(os.path.isabs(p), f"Path {p} is not absolute")
+          self.assertIn(os.path.abspath(os.path.join(repo_dir, "src")), data["project_paths"])
+          self.assertIn(os.path.abspath(os.path.join(repo_dir, "routes")), data["project_paths"])
+          self.assertIn(os.path.abspath("/custom/abs/path"), data["project_paths"])
+
+
 if __name__ == "__main__":
   unittest.main()

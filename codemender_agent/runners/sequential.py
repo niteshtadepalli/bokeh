@@ -30,9 +30,12 @@ from codemender_agent.config import get_cleanup_ports
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.runners.aggregate import _inject_token_metrics_into_html
 from codemender_agent.storage import upload_and_sign_report
+from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import free_port
+from codemender_agent.utils import resolve_command_model
 from codemender_agent.utils import run_command
 from codemender_agent.vcs.git import clean_workspace
 from codemender_agent.vcs.git import generate_branch_name
@@ -51,6 +54,7 @@ logger = logging.getLogger("codemender-orchestrator")
 def run_sequential_pipeline() -> None:
   """Executes the single-task sequential scan, verify, fix, and PR pipeline."""
   cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
+  token_usage: dict[str, dict[str, int]] = {}
   repo_url, token = get_github_credentials()
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
@@ -151,16 +155,17 @@ def run_sequential_pipeline() -> None:
     )
     sys.exit(1)
 
-  # Step 3: Parse scan targets (separated by comma or semicolon) and run `cm find` sequentially
+  # Step 3: Parse scan targets (normalized to absolute paths to prevent sandbox mount errors)
   scan_target_env = os.environ.get("CODEMENDER_SCAN_TARGET", ".")
   targets = []
   for part in scan_target_env.split(";"):
     for subpart in part.split(","):
       t = subpart.strip()
       if t:
-        targets.append(t)
+        abs_t = t if os.path.isabs(t) else os.path.abspath(os.path.join(repo_dir, t))
+        targets.append(abs_t)
   if not targets:
-    targets = ["."]
+    targets = [os.path.abspath(repo_dir)]
 
   logger.info("Starting CodeMender scanning for targets: %s", targets)
 
@@ -174,6 +179,10 @@ def run_sequential_pipeline() -> None:
           env=scrubbed_env,
           check=True,
       )
+      find_model = resolve_command_model("find") or "default"
+      find_tokens = getattr(find_res, "token_usage", None)
+      if isinstance(find_tokens, dict):
+        accumulate_model_token_usage(token_usage, find_model, find_tokens)
       session_id = extract_session_id(find_res.stdout)
       if session_id:
         logger.info("Detected active scan session ID: %s for target '%s'", session_id, target)
@@ -292,6 +301,10 @@ def run_sequential_pipeline() -> None:
           env=scrubbed_env,
           check=False,
       )
+      verify_model = resolve_command_model("verify") or "default"
+      verify_tokens = getattr(verify_res, "token_usage", None)
+      if isinstance(verify_tokens, dict):
+        accumulate_model_token_usage(token_usage, verify_model, verify_tokens)
       for port in get_cleanup_ports():
         free_port(port)
 
@@ -338,6 +351,10 @@ def run_sequential_pipeline() -> None:
         env=scrubbed_env,
         check=False,
     )
+    fix_model = resolve_command_model("fix") or "default"
+    fix_tokens = getattr(fix_res, "token_usage", None)
+    if isinstance(fix_tokens, dict):
+      accumulate_model_token_usage(token_usage, fix_model, fix_tokens)
     for port in get_cleanup_ports():
       free_port(port)
 
@@ -443,6 +460,8 @@ def run_sequential_pipeline() -> None:
   )
   if report_res.returncode == 0:
     local_report_path = os.path.expanduser("~/.codemender/reports/report.html")
+    if cli_version == "preview" and token_usage:
+      _inject_token_metrics_into_html(local_report_path, token_usage)
     report_bucket = os.environ.get("CODEMENDER_REPORT_BUCKET")
     if report_bucket:
       dest_blob = f"reports/{owner}_{repo_name}/report_{time.strftime('%Y%m%d-%H%M%S')}.html"
