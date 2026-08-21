@@ -458,7 +458,31 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertIn("12,500", content)
     self.assertIn("800", content)
     self.assertIn("13,300", content)
-    self.assertIn("gemini-2.5-flash", content)
+    self.assertIn("(Model: <code>gemini-2.5-flash</code>)", content)
+    self.assertNotIn("Per-Model Breakdown", content)
+
+  def test_inject_token_metrics_into_html_default_model(self):
+    html_path = os.path.join(self.workspace_dir, "report_default.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+      f.write("<!DOCTYPE html><html><head><title>Report</title></head><body><h1>Scan Summary</h1></body></html>")
+
+    token_totals = {
+        "default": {
+            "in_tokens": 31000,
+            "out_tokens": 651,
+            "total_tokens": 31000,
+        }
+    }
+
+    _inject_token_metrics_into_html(html_path, token_totals)
+
+    with open(html_path, "r", encoding="utf-8") as f:
+      content = f.read()
+
+    self.assertIn("codemender-token-metrics-banner", content)
+    self.assertIn("31,000", content)
+    self.assertIn("651", content)
+    self.assertIn("(Model: <code>default</code>)", content)
     self.assertNotIn("Per-Model Breakdown", content)
 
   def test_inject_token_metrics_into_html_multi_model(self):
