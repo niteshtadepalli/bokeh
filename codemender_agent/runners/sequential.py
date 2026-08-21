@@ -155,16 +155,17 @@ def run_sequential_pipeline() -> None:
     )
     sys.exit(1)
 
-  # Step 3: Parse scan targets (separated by comma or semicolon) and run `cm find` sequentially
+  # Step 3: Parse scan targets (normalized to absolute paths to prevent sandbox mount errors)
   scan_target_env = os.environ.get("CODEMENDER_SCAN_TARGET", ".")
   targets = []
   for part in scan_target_env.split(";"):
     for subpart in part.split(","):
       t = subpart.strip()
       if t:
-        targets.append(t)
+        abs_t = t if os.path.isabs(t) else os.path.abspath(os.path.join(repo_dir, t))
+        targets.append(abs_t)
   if not targets:
-    targets = ["."]
+    targets = [os.path.abspath(repo_dir)]
 
   logger.info("Starting CodeMender scanning for targets: %s", targets)
 

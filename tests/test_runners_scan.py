@@ -326,6 +326,76 @@ class TestScanRunner(unittest.TestCase):
     self.assertEqual(rows[1][1], "OPEN")
     self.assertEqual(rows[1][2], 0)
 
+  @patch("codemender_agent.runners.scan.generate_signed_url")
+  @patch("codemender_agent.runners.scan.run_command")
+  @patch("codemender_agent.runners.scan.upload_file_to_gcs")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.get_default_branch")
+  @patch("shutil.which")
+  def test_scan_pipeline_relative_targets_normalized(
+      self,
+      mock_which,
+      mock_get_default_branch,
+      mock_is_duplicate_pr,
+      mock_check_remote_branch,
+      mock_upload_gcs,
+      mock_run_cmd,
+      mock_generate_signed_url,
+  ):
+    """Verify that relative scan targets are normalized to absolute paths for cm find."""
+    mock_which.return_value = "/bin/cm"
+    mock_get_default_branch.return_value = "main"
+    mock_is_duplicate_pr.return_value = False
+    mock_check_remote_branch.return_value = False
+    mock_upload_gcs.return_value = True
+    mock_generate_signed_url.side_effect = (
+        lambda bucket, blob, method="GET", **kwargs: (
+            f"http://signed-url/{blob}?method={method}"
+        )
+    )
+
+    mock_git_rev = MagicMock()
+    mock_git_rev.stdout = "abc123commitsha"
+
+    mock_cm_report = MagicMock()
+    mock_cm_report.stdout = json.dumps([
+        {"FindingID": "fid-1", "Status": "DETECTED", "VulnType": "SQL_INJECTION", "FilePath": "routes/db.py"}
+    ])
+
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if "rev-parse" in cmd_str:
+        return mock_git_rev
+      elif "report" in cmd_str:
+        return mock_cm_report
+      else:
+        return mock_default
+
+    mock_run_cmd.side_effect = run_cmd_side_effect
+
+    with patch.dict(os.environ, {"CODEMENDER_SCAN_TARGET": "routes;services/api"}):
+      run_scan_pipeline()
+
+    # Verify cm find was called with absolute paths
+    repo_dir = os.path.join(self.workspace_dir, "repo")
+    expected_target1 = os.path.join(repo_dir, "routes")
+    expected_target2 = os.path.join(repo_dir, "services/api")
+
+    find_targets_passed = []
+    for call in mock_run_cmd.call_args_list:
+      cmd = call[0][0]
+      if len(cmd) >= 2 and cmd[1] == "find":
+        find_targets_passed.append(cmd[-1])
+
+    self.assertIn(expected_target1, find_targets_passed)
+    self.assertIn(expected_target2, find_targets_passed)
+    for target in find_targets_passed:
+      self.assertTrue(os.path.isabs(target), f"Target {target} is not absolute")
+
 
 if __name__ == "__main__":
   unittest.main()

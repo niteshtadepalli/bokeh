@@ -190,6 +190,11 @@ def inject_codemender_config(repo_dir: str) -> None:
   # Set default project path to the repository directory to restrict agent scope
   if not config_data.get("project_paths"):
     config_data["project_paths"] = [os.path.abspath(repo_dir)]
+  else:
+    config_data["project_paths"] = [
+        p if os.path.isabs(p) else os.path.abspath(os.path.join(repo_dir, p))
+        for p in config_data["project_paths"]
+    ]
 
   # 3. Read Environment Variable configurations (A: Env Overrides)
   env_build_cmd = os.environ.get("CODEMENDER_BUILD_COMMAND")
@@ -233,11 +238,33 @@ def inject_codemender_config(repo_dir: str) -> None:
       for k, v in project_config["vcs"].items():
         if k != "commands":
           config_data["vcs"][k] = v
-    for key in ["scan", "project_paths", "output", "tools"]:
+    for key in ["scan", "project_paths", "output", "tools", "sandbox", "security"]:
       if key in project_config:
         config_data[key] = project_config[key]
 
-  # 5. Interactive Terminal Prompt Fallback
+    # Re-normalize project_paths if overwritten by project_config
+    if "project_paths" in project_config and isinstance(project_config["project_paths"], list):
+      config_data["project_paths"] = [
+          p if os.path.isabs(p) else os.path.abspath(os.path.join(repo_dir, p))
+          for p in project_config["project_paths"]
+      ]
+
+  # 5. Sandbox Configuration (Enabled by default with absolute target mounts)
+  if "sandbox" not in config_data or config_data["sandbox"] is None:
+    config_data["sandbox"] = {}
+  if "mounts" not in config_data["sandbox"] or config_data["sandbox"]["mounts"] is None:
+    config_data["sandbox"]["mounts"] = {}
+  if "network" not in config_data["sandbox"] or config_data["sandbox"]["network"] is None:
+    config_data["sandbox"]["network"] = {}
+
+  sandbox_enabled_env = os.environ.get("CODEMENDER_SANDBOX_ENABLED", "true").lower()
+  config_data["sandbox"]["enabled"] = (sandbox_enabled_env != "false")
+  config_data["sandbox"]["mounts"]["target_dir"] = os.path.abspath(repo_dir)
+
+  net_profile = os.environ.get("CODEMENDER_SANDBOX_NETWORK_PROFILE", "permissive-open")
+  config_data["sandbox"]["network"]["profile"] = net_profile
+
+  # 6. Interactive Terminal Prompt Fallback
   if not config_data["build"].get("command"):
     if sys.stdin.isatty():
       try:
@@ -256,13 +283,13 @@ def inject_codemender_config(repo_dir: str) -> None:
           " Post-fix verification will be skipped."
       )
 
-  # 6. Force disable confirmations for headless execution safety (AFTER repository config merge)
+  # 7. Force disable confirmations for headless execution safety (AFTER repository config merge)
   if "tools" not in config_data or config_data["tools"] is None:
     config_data["tools"] = {}
   config_data["tools"]["confirm_commands"] = False
   config_data["tools"]["confirm_writes"] = False
 
-  # 7. Save the merged configuration back to ~/.codemender/config.yaml using atomic rename
+  # 8. Save the merged configuration back to ~/.codemender/config.yaml using atomic rename
   try:
     os.makedirs(os.path.dirname(global_config_path), exist_ok=True)
     tmp_config_path = global_config_path + ".tmp"

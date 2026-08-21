@@ -494,16 +494,17 @@ def run_scan_pipeline() -> None:
   cm_binary = shutil.which("cm") or "cm"
   _init_codemender(repo_dir, scrubbed_env, cm_binary)
 
-  # 3. Parse scan targets
+  # 3. Parse scan targets (normalized to absolute paths to prevent sandbox mount errors)
   scan_target_env = os.environ.get("CODEMENDER_SCAN_TARGET", ".")
   targets = []
   for part in scan_target_env.split(";"):
     for subpart in part.split(","):
       t = subpart.strip()
       if t:
-        targets.append(t)
+        abs_t = t if os.path.isabs(t) else os.path.abspath(os.path.join(repo_dir, t))
+        targets.append(abs_t)
   if not targets:
-    targets = ["."]
+    targets = [os.path.abspath(repo_dir)]
 
   # 4. Scan repository
   findings, scan_token_usage = _scan_repository(repo_dir, scrubbed_env, cm_binary, targets)
