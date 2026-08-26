@@ -45,7 +45,6 @@ graph TD
 
         subgraph Storage & Registry
             ReportsGCS[GCS: Reports Bucket]
-            ReleasesGCS[GCS: Releases Bucket]
             Registry[Artifact Registry: Docker Repo]
         end
 
@@ -153,9 +152,9 @@ We will create a new directory `terraform/gcp/` containing the following files:
 
 *   Declares all input variables: `project_id`, `region`, `resource_prefix`
     (defaults to `"codemender"` for environment isolation),
-    `reports_bucket_name`, `releases_bucket_name`, `runner_cpu` (defaults to
-    `"2"`), `runner_memory` (defaults to `"4Gi"`), `create_vpc_and_nat`,
-    `existing_vpc_connector_id`, `scheduler_cron`.
+    `reports_bucket_name`, `runner_cpu` (defaults to `"2"`), `runner_memory`
+    (defaults to `"4Gi"`), `create_vpc_and_nat`, `existing_vpc_connector_id`,
+    `scheduler_cron`.
 *   Includes `vpc_connector_cidr` variable, defaulting to `10.0.0.0/26` with
     regex validation, as well as `vpc_connector_min_instances`,
     `vpc_connector_max_instances`, and `vpc_connector_machine_type`.
@@ -177,7 +176,6 @@ We will create a new directory `terraform/gcp/` containing the following files:
 ### 5. `terraform/gcp/storage.tf`
 
 *   Creates GCS Reports bucket (with 30-day lifecycle expiration rule).
-*   Creates GCS Releases bucket.
 *   Creates Artifact Registry Docker repository
     (`${var.resource_prefix}-runner`) with a cleanup policy to remove
     old/untagged images.
@@ -187,8 +185,7 @@ We will create a new directory `terraform/gcp/` containing the following files:
     (`${data.google_project.project.number}@cloudbuild.gserviceaccount.com`) and
     compute default
     (`${data.google_project.project.number}-compute@developer.gserviceaccount.com`)
-    service accounts for source tarball (`_cloudbuild`) and release bucket
-    access.
+    service accounts for source tarball (`_cloudbuild`) access.
 
 ### 6. `terraform/gcp/secret.tf`
 
@@ -214,7 +211,6 @@ We will create a new directory `terraform/gcp/` containing the following files:
     *   Runner SA: `roles/storage.objectAdmin` on Reports bucket.
     *   Workflow SA: `roles/storage.objectViewer` on Reports bucket (required
         for Stage 1 `read_manifest` step).
-    *   Runner SA: `roles/storage.objectViewer` on Releases bucket.
 *   Grants `roles/iam.serviceAccountTokenCreator` on the Runner SA to itself
     (required for `signBlob` / GCS signed URL generation).
 *   Binds `roles/secretmanager.secretAccessor` on the GitHub token secret to the
@@ -252,9 +248,9 @@ We will create a new directory `terraform/gcp/` containing the following files:
 
 ### 10. `terraform/gcp/outputs.tf`
 
-*   Exports details: static NAT IP (if created), GCS bucket URLs, GCS Releases
-    bucket name, Artifact Registry path, Workflow trigger URL, and instructions
-    for updating the GitHub App Token secret.
+*   Exports details: static NAT IP (if created), GCS Reports bucket URL and
+    name, Artifact Registry path, Workflow trigger URL, and instructions for
+    updating the GitHub App Token secret.
 
 --------------------------------------------------------------------------------
 

@@ -41,21 +41,6 @@ resource "google_storage_bucket" "reports" {
   depends_on = [google_project_service.enabled_services]
 }
 
-# GCS Bucket for CLI Binary Releases
-resource "google_storage_bucket" "releases" {
-  name                        = var.releases_bucket_name != "" ? var.releases_bucket_name : "${var.resource_prefix}-releases-${var.project_id}"
-  location                    = var.region
-  project                     = var.project_id
-  force_destroy               = true
-  uniform_bucket_level_access = true
-
-  versioning {
-    enabled = true
-  }
-
-  depends_on = [google_project_service.enabled_services]
-}
-
 # Artifact Registry Repository for CodeMender Runner Images
 resource "google_artifact_registry_repository" "docker_repo" {
   provider      = google
@@ -75,7 +60,7 @@ locals {
   }
 }
 
-# Grant Storage Object Viewer to both legacy & compute default Cloud Build service accounts (for source tarballs and releases)
+# Grant Storage Object Viewer to both legacy & compute default Cloud Build service accounts (for source tarballs)
 resource "google_project_iam_member" "cloudbuild_storage_viewer" {
   for_each   = local.cloudbuild_service_accounts
   project    = var.project_id
@@ -102,12 +87,3 @@ resource "google_project_iam_member" "cloudbuild_log_writer" {
   member     = each.value
   depends_on = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
-
-# Grant Releases Bucket Viewer to Cloud Build SAs
-resource "google_storage_bucket_iam_member" "cloudbuild_releases_viewer" {
-  for_each = local.cloudbuild_service_accounts
-  bucket   = google_storage_bucket.releases.name
-  role     = "roles/storage.objectViewer"
-  member   = each.value
-}
-
