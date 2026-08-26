@@ -60,7 +60,7 @@ locals {
   }
 }
 
-# Grant Storage Object Viewer to both legacy & compute default Cloud Build service accounts (for source tarballs and releases)
+# Grant Storage Object Viewer to both legacy & compute default Cloud Build service accounts (for source tarballs)
 resource "google_project_iam_member" "cloudbuild_storage_viewer" {
   for_each   = local.cloudbuild_service_accounts
   project    = var.project_id

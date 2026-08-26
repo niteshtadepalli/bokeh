@@ -11,8 +11,7 @@ This guide provides step-by-step instructions to setup, deploy, and run the
 The parallel scanning pipeline uses **Infrastructure as Code (IaC)** to
 provision:
 
-*   **Google Cloud Storage (GCS)**: Private buckets for binary releases
-    (`releases`) and scan reports (`reports`).
+*   **Google Cloud Storage (GCS)**: Private bucket for scan reports (`reports`).
 *   **Artifact Registry**: Docker container repository for runner images
     (`codemender-runner`).
 *   **Secret Manager**: Secure storage for GitHub tokens
@@ -36,7 +35,7 @@ If you deploy multiple pipelines in the same GCP project using different
 *   **Isolated Resources (Unique per prefix)**:
     *   **Compute & Workflow**: Cloud Run Jobs (`${prefix}-runner`, `${prefix}-worker`) and Cloud
         Workflow (`${prefix}-coordinator`).
-    *   **Storage & Secret**: GCS Reports/Releases buckets, Artifact Registry
+    *   **Storage & Secret**: GCS Reports bucket, Artifact Registry
         repository, and Secret Manager GitHub secret (`${prefix}-github-token`).
     *   **Security**: Service Accounts (`${prefix}-runner-sa`, `${prefix}-worker-sa`, etc.) and Custom
         IAM Role bindings (suffixed with `random_id` to prevent 7-day GCP IAM soft-delete tombstone conflicts).
