@@ -24,12 +24,14 @@ import sqlite3
 import sys
 import tarfile
 import time
-from typing import Optional
+from typing import Optional, Set
 
+from codemender_agent.config import OrchestratorConfig
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
 from codemender_agent.storage import download_file_from_gcs
+from codemender_agent.storage import get_storage_adapter
 from codemender_agent.storage import list_gcs_blobs
 from codemender_agent.storage import upload_and_sign_report
 from codemender_agent.utils import accumulate_model_token_usage
@@ -64,10 +66,11 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
   conn = sqlite3.connect(base_db_path)
   cursor = conn.cursor()
   try:
-    # Attach the worker database shard
+    # Attach the worker database shard as a named SQLite database
     cursor.execute("ATTACH DATABASE ? AS worker", (worker_db_path,))
 
-    # 1. Findings Merge:
+    # 1. Findings Table Merge:
+    # Match findings by finding_id and update mutable status fields if updated_at is newer
     main_cols = _get_table_columns(cursor, "findings", "main")
     worker_cols = _get_table_columns(cursor, "findings", "worker")
     common_cols = [c for c in worker_cols if c in main_cols]
@@ -96,6 +99,7 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
             {where_cond};
         """)
 
+      # Insert any newly recorded findings that do not already exist in the base table
       cursor.execute(f"""
           INSERT OR IGNORE INTO main.findings ({cols_str})
           SELECT {cols_str} FROM worker.findings AS w
@@ -105,7 +109,8 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
           );
       """)
 
-    # 2. Sessions Merge:
+    # 2. Sessions Table Merge:
+    # Merge worker interactive and CLI session tracking rows
     main_cols = _get_table_columns(cursor, "sessions", "main")
     worker_cols = _get_table_columns(cursor, "sessions", "worker")
     common_cols = [c for c in worker_cols if c in main_cols]
@@ -130,7 +135,8 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
           SELECT {cols_str} FROM worker.sessions;
       """)
 
-    # 3. Artifacts Merge:
+    # 3. Artifacts Table Merge:
+    # Exclude auto-incrementing primary key columns ('id', 'artifact_id') to prevent ID collisions
     main_cols = _get_table_columns(cursor, "artifacts", "main")
     worker_cols = _get_table_columns(cursor, "artifacts", "worker")
     common_cols = [c for c in worker_cols if c in main_cols and c not in ["id", "artifact_id"]]
@@ -149,7 +155,8 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
           );
       """)
 
-    # 4. Patches Merge:
+    # 4. Patches Table Merge:
+    # Upsert generated patches and diff metadata associated with remediated findings
     main_cols = _get_table_columns(cursor, "patches", "main")
     worker_cols = _get_table_columns(cursor, "patches", "worker")
     common_cols = [c for c in worker_cols if c in main_cols]
@@ -165,7 +172,8 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
           );
       """)
 
-    # 5. File Hashes Merge:
+    # 5. File Hashes Table Merge:
+    # Upsert SHA256 hashes of modified repository files to avoid cache invalidations
     cursor.execute("SELECT name FROM main.sqlite_master WHERE type='table' AND name='file_hashes'")
     if cursor.fetchone():
       main_cols = _get_table_columns(cursor, "file_hashes", "main")
@@ -185,6 +193,7 @@ def merge_db(base_db_path: str, worker_db_path: str) -> None:
     logger.error("Failed to merge database %s: %s", worker_db_path, e)
     conn.rollback()
   finally:
+    # Always detach worker shard database to release locks
     try:
       cursor.execute("DETACH DATABASE worker")
     except sqlite3.Error:  # pylint: disable=broad-exception-caught
@@ -215,6 +224,7 @@ def _verify_worker_db_counts(
           pass
 
     missing_workers = set(range(expected_workers)) - found_indices
+    # Check if any expected worker task indices are absent from downloaded shards
     if missing_workers:
       logger.warning(
           "Missing databases for worker tasks: %s. "
@@ -222,12 +232,16 @@ def _verify_worker_db_counts(
           list(missing_workers),
       )
   except ValueError:
+    # Log warning if task count string cannot be parsed as an integer
     logger.warning(
         "Invalid CODEMENDER_TOTAL_WORKERS or CLOUD_RUN_TASK_COUNT value: %s",
         total_workers_env,
     )
 
 
+# -----------------------------------------------------------------------------
+# Worker Shard Database Download and Merge Pipeline
+# -----------------------------------------------------------------------------
 def _download_and_merge_worker_dbs(
     worker_db_blobs: list[str],
     temp_db_dir: str,
@@ -235,13 +249,62 @@ def _download_and_merge_worker_dbs(
     base_db_path: str,
 ) -> None:
   """Downloads each worker DB shard from GCS and merges it into base DB."""
+  # Iterate over all discovered GCS worker DB blobs and download them locally
   for blob in worker_db_blobs:
     local_worker_db = os.path.join(temp_db_dir, os.path.basename(blob))
     logger.info("Downloading %s...", blob)
+    # Merge downloaded worker shard into the base SQLite state database
     if download_file_from_gcs(local_worker_db, bucket_name, blob):
       merge_db(base_db_path, local_worker_db)
     else:
       logger.error("Failed to download worker DB: %s", blob)
+
+
+def _discover_and_merge_local_worker_dbs(
+    workspace_dir: str,
+    base_db_path: str,
+    storage_adapter: Optional[any] = None,
+) -> list[str]:
+  """Discovers and merges worker database shards from local/transit directory structure."""
+  worker_db_files = []
+
+  # 1. Check .codemender_transit/shards/ recursively for worker SQLite databases
+  shards_dir = os.path.join(workspace_dir, ".codemender_transit", "shards")
+  if os.path.exists(shards_dir):
+    for root, _, files in os.walk(shards_dir):
+      for f in sorted(files):
+        if f.endswith("_state.db"):
+          p = os.path.join(root, f)
+          if p not in worker_db_files:
+            worker_db_files.append(p)
+
+  # 2. Check worker_dbs directory in workspace
+  temp_db_dir = os.path.join(workspace_dir, "worker_dbs")
+  if os.path.exists(temp_db_dir):
+    for f in sorted(os.listdir(temp_db_dir)):
+      if f.endswith("_state.db"):
+        p = os.path.join(temp_db_dir, f)
+        if p not in worker_db_files:
+          worker_db_files.append(p)
+
+  # 3. Check storage adapter listing if no local files were found directly on disk
+  if not worker_db_files and storage_adapter:
+    blobs = storage_adapter.list_blobs(prefix="shards")
+    for blob in blobs:
+      if blob.endswith("_state.db"):
+        local_path = os.path.join(temp_db_dir, os.path.basename(blob))
+        os.makedirs(temp_db_dir, exist_ok=True)
+        # Download transit blob to local worker_dbs directory
+        if storage_adapter.download_file(local_path, blob):
+          if local_path not in worker_db_files:
+            worker_db_files.append(local_path)
+
+  logger.info("Discovered %d local worker database shards to merge.", len(worker_db_files))
+  # 4. Merge all discovered worker shards into base state.db
+  for worker_db in sorted(worker_db_files):
+    merge_db(base_db_path, worker_db)
+
+  return worker_db_files
 
 
 def _aggregate_token_metrics(
@@ -249,8 +312,9 @@ def _aggregate_token_metrics(
     bucket_name: str,
     scan_id: str,
     worker_db_blobs: list[str],
+    storage_adapter: Optional[any] = None,
 ) -> dict[str, dict[str, int]]:
-  """Downloads scan_metadata.json and all worker metadata files to aggregate per-model token usage."""
+  """Discovers and parses scan_metadata.json and all worker metadata files to aggregate per-model token usage."""
   token_usage_by_model: dict[str, dict[str, int]] = {}
 
   def _ingest_token_usage(token_dict: any):
@@ -260,35 +324,69 @@ def _aggregate_token_metrics(
       if isinstance(v, dict):
         accumulate_model_token_usage(token_usage_by_model, k, v)
       elif isinstance(v, (int, float)):
-        # Fallback if flat dict {"in_tokens": ...} was provided
         accumulate_model_token_usage(token_usage_by_model, "default", token_dict)
         break
 
-  # 1. Download Stage 1 scan_metadata.json
-  scan_meta_local = os.path.join(workspace_dir, "scan_metadata.json")
-  if download_file_from_gcs(scan_meta_local, bucket_name, f"scans/{scan_id}/scan_metadata.json"):
-    try:
-      with open(scan_meta_local, "r") as f:
-        scan_meta = json.load(f)
-      _ingest_token_usage(scan_meta.get("token_usage"))
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      logger.warning("Failed to parse scan_metadata.json: %s", e)
+  # 1. Ingest Stage 1 scan_metadata.json
+  scan_meta_candidates = [
+      os.path.join(workspace_dir, "scan_metadata.json"),
+      os.path.join(workspace_dir, ".codemender_transit", "base", "scan_metadata.json"),
+  ]
+  if bucket_name and scan_id and not scan_id.startswith("local"):
+    scan_meta_local = os.path.join(workspace_dir, "scan_metadata.json")
+    if download_file_from_gcs(scan_meta_local, bucket_name, f"scans/{scan_id}/scan_metadata.json"):
+      scan_meta_candidates.append(scan_meta_local)
 
-  # 2. Discover and download Stage 2 worker metadata JSONs
-  all_blobs = list_gcs_blobs(bucket_name, prefix=f"scans/{scan_id}/worker_")
-  meta_blobs = sorted(list(set(
-      [b for b in all_blobs if b.endswith("_metadata.json")]
-      + [b.replace("_state.db", "_metadata.json") for b in worker_db_blobs]
-  )))
-  for meta_blob in meta_blobs:
-    local_meta = os.path.join(workspace_dir, os.path.basename(meta_blob))
-    if download_file_from_gcs(local_meta, bucket_name, meta_blob):
+  for scan_meta_p in list(dict.fromkeys(scan_meta_candidates)):
+    if os.path.exists(scan_meta_p):
       try:
-        with open(local_meta, "r") as f:
+        with open(scan_meta_p, "r", encoding="utf-8") as f:
+          scan_meta = json.load(f)
+        _ingest_token_usage(scan_meta.get("token_usage"))
+        break
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.warning("Failed to parse scan_metadata.json: %s", e)
+
+  # 2. Discover Stage 2 worker metadata JSONs
+  meta_paths = set()
+  # Search .codemender_transit recursively
+  transit_dir = os.path.join(workspace_dir, ".codemender_transit")
+  if os.path.exists(transit_dir):
+    for root, _, files in os.walk(transit_dir):
+      for file in files:
+        if file.endswith("_metadata.json") and not file.startswith("scan_"):
+          meta_paths.add(os.path.join(root, file))
+
+  # Search workspace_dir (e.g. worker_dbs/)
+  if os.path.exists(workspace_dir):
+    for root, _, files in os.walk(workspace_dir):
+      for file in files:
+        if file.endswith("_metadata.json") and not file.startswith("scan_"):
+          meta_paths.add(os.path.join(root, file))
+
+  # Download from GCS if configured
+  if bucket_name and scan_id and not scan_id.startswith("local"):
+    try:
+      all_blobs = list_gcs_blobs(bucket_name, prefix=f"scans/{scan_id}/worker_")
+      meta_blobs = sorted(list(set(
+          [b for b in all_blobs if b.endswith("_metadata.json")]
+          + [b.replace("_state.db", "_metadata.json") for b in worker_db_blobs]
+      )))
+      for meta_blob in meta_blobs:
+        local_meta = os.path.join(workspace_dir, os.path.basename(meta_blob))
+        if download_file_from_gcs(local_meta, bucket_name, meta_blob):
+          meta_paths.add(local_meta)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to list/download GCS worker metadata: %s", e)
+
+  for meta_path in sorted(list(meta_paths)):
+    if os.path.exists(meta_path):
+      try:
+        with open(meta_path, "r", encoding="utf-8") as f:
           w_meta = json.load(f)
         _ingest_token_usage(w_meta.get("token_usage"))
       except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.warning("Failed to parse worker metadata %s: %s", meta_blob, e)
+        logger.warning("Failed to parse worker metadata %s: %s", meta_path, e)
 
   total_in = sum(m.get("in_tokens", 0) for m in token_usage_by_model.values())
   total_out = sum(m.get("out_tokens", 0) for m in token_usage_by_model.values())
@@ -406,17 +504,19 @@ def _inject_token_metrics_into_html(
       match = re.search(r"(<body[^>]*>)", content, re.IGNORECASE)
 
     if match:
+      # Inject token usage banner into HTML DOM structure
       if match.group(1).lower().startswith("<div"):
-        # Insert BEFORE <div class="cards">
+        # Insert BEFORE <div class="cards"> container
         pos = match.start()
         new_content = content[:pos] + banner_html + "\n  " + content[pos:]
       else:
-        # Insert AFTER match tag
+        # Insert AFTER opening <body> tag
         pos = match.end()
         new_content = content[:pos] + "\n" + banner_html + content[pos:]
     else:
       new_content = banner_html + "\n" + content
 
+    # Write modified HTML report back to file
     with open(html_path, "w", encoding="utf-8") as f:
       f.write(new_content)
     logger.info("Successfully injected Token Usage Summary into HTML report.")
@@ -424,6 +524,211 @@ def _inject_token_metrics_into_html(
     logger.warning("Failed to inject token usage into HTML report: %s", e)
 
 
+def _render_step_summary(
+    base_db_path: str,
+    config: OrchestratorConfig,
+    owner: str,
+    repo_name: str,
+    target_sha: Optional[str] = None,
+    token_totals: Optional[dict[str, dict[str, int]]] = None,
+) -> str:
+  """Renders a comprehensive GitHub Actions Step Summary Markdown dashboard."""
+  findings_stats = {
+      "total": 0,
+      "fixed": 0,
+      "verified": 0,
+      "pre_existing_ignored": 0,
+      "skipped_duplicate": 0,
+      "dismissed": 0,
+      "unfixed": 0,
+  }
+  findings_list = []
+
+  # 1. Query findings table from SQLite database to calculate status breakdown
+  if os.path.exists(base_db_path):
+    try:
+      with closing(sqlite3.connect(base_db_path)) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='findings'")
+        if cursor.fetchone():
+          cols = _get_table_columns(cursor, "findings", "main")
+          select_cols = ["finding_id", "title", "status", "file_path", "start_line", "vuln_type"]
+          avail_cols = [c for c in select_cols if c in cols]
+          cursor.execute(f"SELECT {', '.join(avail_cols)} FROM findings ORDER BY finding_id")
+          # 2. Iterate through each finding and bucket into status counters
+          for row in cursor.fetchall():
+            row_dict = dict(zip(avail_cols, row))
+            fid = row_dict.get("finding_id", "")
+            status = (row_dict.get("status") or "").upper()
+            findings_stats["total"] += 1
+            if status in ("FIXED", "REMEDIATED"):
+              findings_stats["fixed"] += 1
+            elif status in ("VERIFIED", "CONFIRMED"):
+              findings_stats["verified"] += 1
+            elif status == "PRE_EXISTING_IGNORED":
+              findings_stats["pre_existing_ignored"] += 1
+            elif status == "SKIPPED_DUPLICATE":
+              findings_stats["skipped_duplicate"] += 1
+            else:
+              # Fold DISMISSED, PR_CREATION_FAILED, and all other unclassified statuses into unfixed
+              findings_stats["unfixed"] += 1
+
+            findings_list.append({
+                "finding_id": fid,
+                "title": row_dict.get("title", ""),
+                "status": status or "DETECTED",
+                "file_path": row_dict.get("file_path", ""),
+                "start_line": row_dict.get("start_line", 0),
+                "vuln_type": row_dict.get("vuln_type", ""),
+            })
+    except sqlite3.Error as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to query base_db for step summary: %s", e)
+
+  # 3. Construct header metadata section (repository, target commit, execution mode)
+  mode_desc = "Pull Request Scan (Clean as You Code)" if config.is_pr_scan else "Nightly Repository Scan"
+  commit_desc = target_sha[:8] if target_sha else "HEAD"
+
+  lines = [
+      "# 🛡️ CodeMender Security Remediation Summary",
+      "",
+      f"- **Repository:** `{owner}/{repo_name}`",
+      f"- **Target Commit:** `{commit_desc}`",
+      f"- **Execution Mode:** `{mode_desc}`",
+      "",
+      "### 📊 Remediation Overview",
+      "",
+      "| Total Discovered | Remediated (Fixed) | Verified (Exploitable) | Pre-Existing Ignored | Skipped Duplicates | Other / Unfixed |",
+      "| :---: | :---: | :---: | :---: | :---: | :---: |",
+      f"| {findings_stats['total']} | {findings_stats['fixed']} | {findings_stats['verified']} | {findings_stats['pre_existing_ignored']} | {findings_stats['skipped_duplicate']} | {findings_stats['unfixed']} |",
+      "",
+  ]
+
+  # 4. Construct table of individual findings and remediation outcomes
+  if findings_list:
+    lines.extend([
+        "### 🛠️ Discovered Findings & Remediation Status",
+        "",
+        "| Finding ID | Vulnerability Type | Location | Status | Title |",
+        "| :--- | :--- | :--- | :--- | :--- |",
+    ])
+    for f in findings_list:
+      # Location formatting: evaluate file_path:start_line directly (start_line=None/0 evaluates as file:None/0 for whole-file findings by design)
+      loc = f"{f['file_path']}:{f['start_line']}" if f["file_path"] else "N/A"
+      title_clean = f["title"].replace("|", "\\|") if f["title"] else "-"
+      lines.append(
+          f"| `{f['finding_id']}` | `{f['vuln_type'] or 'N/A'}` | `{loc}` | `{f['status']}` | {title_clean} |"
+      )
+    lines.append("")
+
+  # 5. Construct token usage summary table if metrics are available
+  if token_totals:
+    total_in = sum(m.get("in_tokens", 0) for m in token_totals.values())
+    total_out = sum(m.get("out_tokens", 0) for m in token_totals.values())
+    total_all = sum(m.get("total_tokens", 0) for m in token_totals.values())
+    lines.extend([
+        "### ⚡ LLM Token Usage Summary",
+        "",
+        f"- **Input Tokens:** {total_in:,}",
+        f"- **Output Tokens:** {total_out:,}",
+        f"- **Grand Total Tokens:** {total_all:,}",
+        "",
+    ])
+
+  summary_md = "\n".join(lines)
+
+  # 6. Guardrail: 1000 KiB maximum step summary size
+  max_bytes = 1000 * 1024
+  encoded = summary_md.encode("utf-8")
+  if len(encoded) > max_bytes:
+    summary_md = encoded[:max_bytes - 200].decode("utf-8", errors="ignore") + "\n\n... *(Summary truncated due to GitHub Step Summary size limit)*\n"
+
+  # 7. Write to GITHUB_STEP_SUMMARY environment file if executing inside GitHub Actions
+  summary_file = config.github_step_summary or os.environ.get("GITHUB_STEP_SUMMARY")
+  if summary_file:
+    try:
+      with open(summary_file, "a", encoding="utf-8") as f:
+        f.write(summary_md + "\n")
+      logger.info("Wrote Step Summary to %s", summary_file)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to write to GITHUB_STEP_SUMMARY (%s): %s", summary_file, e)
+
+  return summary_md
+
+
+def _sanitize_sarif_file(
+    sarif_path: str,
+    repo_dir: str,
+    skipped_finding_ids: Optional[Set[str]] = None,
+    is_pr_scan: bool = False,
+) -> None:
+  """Sanitizes SARIF file paths to be repository-relative and injects suppressions for duplicates."""
+  if not os.path.exists(sarif_path):
+    return
+
+  try:
+    with open(sarif_path, "r", encoding="utf-8") as f:
+      data = json.load(f)
+
+    clean_repo_dir = os.path.abspath(repo_dir)
+
+    # Iterate through all runs and results to normalize file URIs and suppressions
+    for run in (data.get("runs") or []):
+      for result in (run.get("results") or []):
+        # 1. Sanitize file URIs to make them workspace-relative (required by GitHub Code Scanning)
+        for loc in (result.get("locations") or []):
+          phys = loc.get("physicalLocation") or {}
+          art = phys.get("artifactLocation") or {}
+          uri = art.get("uri", "")
+          if uri:
+            # Strip file:// URI scheme prefix if present
+            if uri.startswith("file://"):
+              uri = uri[7:]
+            # Normalize absolute paths to repository-relative paths
+            if os.path.isabs(uri):
+              try:
+                rel_path = os.path.relpath(uri, clean_repo_dir).replace("\\", "/")
+                # Strip out-of-tree traversal components to prevent GitHub upload-sarif validation errors
+                if rel_path.startswith("../") or rel_path == "..":
+                  rel_path = re.sub(r"^(\.\./)+", "", rel_path)
+                  if not rel_path or rel_path == ".":
+                    rel_path = os.path.basename(uri)
+                art["uri"] = rel_path
+              except ValueError:
+                art["uri"] = os.path.basename(uri)
+            else:
+              clean_uri = uri.replace("\\", "/").lstrip("/")
+              if clean_uri.startswith("../") or clean_uri == "..":
+                clean_uri = re.sub(r"^(\.\./)+", "", clean_uri)
+                if not clean_uri or clean_uri == ".":
+                  clean_uri = os.path.basename(uri)
+              art["uri"] = clean_uri
+
+        # 2. Inject suppression metadata on Nightly scans if finding is SKIPPED_DUPLICATE
+        if not is_pr_scan and skipped_finding_ids:
+          res_props = result.get("properties") or {}
+          finding_id = result.get("ruleId") or res_props.get("finding_id")
+          if (finding_id and finding_id in skipped_finding_ids) or res_props.get("status") == "SKIPPED_DUPLICATE":
+            # Add SARIF suppression record to avoid duplicate alert notifications on GitHub Code Scanning
+            result["suppressions"] = [
+                {
+                    "kind": "external",
+                    "status": "underReview",
+                    "justification": "Remediation PR or branch already exists",
+                }
+            ]
+
+    # 3. Save sanitized SARIF report back to disk atomically
+    with open(sarif_path, "w", encoding="utf-8") as f:
+      json.dump(data, f, indent=2)
+    logger.info("Successfully sanitized SARIF report: %s", sarif_path)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    # Log warning if SARIF sanitization fails
+    logger.warning("Failed to sanitize SARIF report %s: %s", sarif_path, e)
+
+
+# -----------------------------------------------------------------------------
+# Final Report Generation and Upload Pipeline
+# -----------------------------------------------------------------------------
 def _generate_and_upload_report(
     repo_dir: str,
     scrubbed_env: dict[str, str],
@@ -433,10 +738,19 @@ def _generate_and_upload_report(
     owner: str,
     repo_name: str,
     token_totals: Optional[dict[str, dict[str, int]]] = None,
+    scan_id: Optional[str] = None,
+    # Execution mode and filtering configurations
+    is_pr_scan: bool = False,
+    skipped_finding_ids: Optional[Set[str]] = None,
+    storage_mode: str = "gcs",
+    config: Optional[OrchestratorConfig] = None,
 ) -> None:
-  """Generates final HTML report using cm CLI and uploads it to GCS."""
-  cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
+  """Generates final HTML and SARIF reports using cm CLI and uploads to GCS or publishes locally."""
+  cfg = config or OrchestratorConfig.from_env()
+  cli_version = cfg.cli_version
   logger.info("Generating final consolidated HTML summary report...")
+
+  # 1. Execute 'cm report -f html' to generate full HTML report
   report_cmd = build_cm_command(
       cm_binary, "report", extra_flags=["-f", "html"], cli_version=cli_version
   )
@@ -447,81 +761,206 @@ def _generate_and_upload_report(
       check=False,
   )
 
-  if report_res.returncode == 0:
-    local_report_path = os.path.join(codemender_home, "reports/report.html")
+  local_report_path = os.path.join(codemender_home, "reports/report.html")
+  if report_res.returncode == 0 or os.path.exists(local_report_path):
+    # 2. Inject aggregated LLM token usage metrics into HTML report header
     _inject_token_metrics_into_html(local_report_path, token_totals)
-    report_bucket = os.environ.get("CODEMENDER_REPORT_BUCKET") or bucket_name
-    dest_blob = (
-        f"reports/{owner}_{repo_name}/"
-        f"report_{time.strftime('%Y%m%d-%H%M%S')}.html"
-    )
 
-    logger.info("Uploading final report to GCS bucket %s...", report_bucket)
-    signed_url = upload_and_sign_report(
-        local_report_path, report_bucket, dest_blob
+    # 3. Copy HTML report to workspace/repo_dir for artifact capture
+    workspace_dir = cfg.workspace_dir or os.getcwd()
+    for dest in [
+        os.path.join(repo_dir, "report.html"),
+        os.path.join(workspace_dir, "report.html"),
+    ]:
+      if os.path.exists(local_report_path) and os.path.abspath(local_report_path) != os.path.abspath(dest):
+        try:
+          os.makedirs(os.path.dirname(dest), exist_ok=True)
+          shutil.copy2(local_report_path, dest)
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+
+    # Generate JSON report for CI artifact pipelines
+    json_cmd = build_cm_command(
+        cm_binary, "report", extra_flags=["-f", "json"], cli_version=cli_version
     )
-    if signed_url:
-      logger.info(
-          "\n"
-          "======================================================================\n"
-          "📊 CONSOLIDATED CODEMENDER SUMMARY REPORT GENERATED:\n"
-          "👉 %s\n"
-          "======================================================================\n",
-          signed_url,
+    run_command(
+        json_cmd,
+        cwd=repo_dir,
+        env=scrubbed_env,
+        check=False,
+    )
+    local_json_path = os.path.join(codemender_home, "reports/report.json")
+    if os.path.exists(local_json_path):
+      for dest in [
+          os.path.join(repo_dir, "report.json"),
+          os.path.join(workspace_dir, "report.json"),
+      ]:
+        if os.path.abspath(local_json_path) != os.path.abspath(dest):
+          try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(local_json_path, dest)
+          except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
+    # 4. Upload HTML report to GCS bucket and generate signed URL if in GCS mode
+    if storage_mode in ["gcs", "local"] and bucket_name:
+      report_bucket = cfg.report_bucket or bucket_name
+      dest_blob = (
+          f"reports/{owner}_{repo_name}/{scan_id}/"
+          f"report_{time.strftime('%Y%m%d-%H%M%S')}.html"
+          if scan_id
+          else f"reports/{owner}_{repo_name}/"
+          f"report_{time.strftime('%Y%m%d-%H%M%S')}.html"
       )
-    else:
-      logger.critical(
-          "Failed to upload or generate signed URL for the consolidated GCS"
-          " report."
+
+      logger.info("Uploading final report to GCS bucket %s...", report_bucket)
+      # Upload HTML report to GCS bucket and acquire signed GET URL
+      signed_url = upload_and_sign_report(
+          local_report_path, report_bucket, dest_blob
       )
-      sys.exit(1)
+      if signed_url:
+        # Print high-visibility banner with signed URL for CI logs
+        logger.info(
+            "\n"
+            "======================================================================\n"
+            "📊 CONSOLIDATED CODEMENDER SUMMARY REPORT GENERATED:\n"
+            "👉 %s\n"
+            "======================================================================\n",
+            signed_url,
+        )
+      else:
+        # Abort if GCS report upload fails
+        logger.critical(
+            "Failed to upload or generate signed URL for the consolidated GCS"
+            " report."
+        )
+        sys.exit(1)
   else:
+    # Log report generation failure
     logger.error(
         "Failed to execute 'cm report -f html' in aggregator (code %d).",
         report_res.returncode,
     )
-    sys.exit(1)
+    # Abort in GCS mode if report cannot be produced
+    if storage_mode == "gcs":
+      sys.exit(1)
+
+  # 5. Generate SARIF report for GitHub Security Code Scanning tab
+  logger.info("Generating final consolidated SARIF report...")
+  sarif_cmd = build_cm_command(
+      cm_binary, "report", extra_flags=["-f", "sarif"], cli_version=cli_version
+  )
+  run_command(
+      sarif_cmd,
+      cwd=repo_dir,
+      env=scrubbed_env,
+      check=False,
+  )
+
+  # 6. Locate generated SARIF artifact
+  sarif_candidates = [
+      os.path.join(codemender_home, "reports/report.sarif"),
+      os.path.join(repo_dir, "reports/report.sarif"),
+      os.path.join(repo_dir, "report.sarif"),
+  ]
+  found_sarif = None
+  for sc in sarif_candidates:
+    if os.path.exists(sc):
+      found_sarif = sc
+      break
+
+  # 7. Sanitize SARIF paths and copy to standard upload locations
+  if found_sarif:
+    _sanitize_sarif_file(
+        found_sarif,
+        repo_dir,
+        skipped_finding_ids=skipped_finding_ids,
+        is_pr_scan=is_pr_scan,
+    )
+    # Ensure SARIF is placed in repo_dir and workspace root for upload-sarif action
+    for target_dest in [
+        os.path.join(repo_dir, "report.sarif"),
+        os.path.join(workspace_dir, "report.sarif"),
+    ]:
+      if os.path.abspath(found_sarif) != os.path.abspath(target_dest):
+        try:
+          os.makedirs(os.path.dirname(target_dest), exist_ok=True)
+          shutil.copy2(found_sarif, target_dest)
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
 
 
 def run_aggregate_pipeline() -> None:
   """Executes Stage 3: Download all worker states, merge DBs, generate report, and upload."""
-  scan_id = os.environ.get("CODEMENDER_SCAN_ID")
-  bucket_name = os.environ.get("CODEMENDER_GCS_BUCKET")
-  if not scan_id or not bucket_name:
-    logger.critical("CODEMENDER_SCAN_ID and CODEMENDER_GCS_BUCKET must be set.")
-    sys.exit(1)
+  config = OrchestratorConfig.from_env()
+  workspace_dir = config.workspace_dir or os.getcwd()
 
-  workspace_dir = os.environ.get("WORKSPACE_DIR", os.getcwd())
-  repo_url, token = get_github_credentials()
+  # 1. Validate required storage credentials in GCS mode
+  if config.storage_mode == "gcs":
+    if not config.scan_id or not config.gcs_bucket:
+      logger.critical("CODEMENDER_SCAN_ID and CODEMENDER_GCS_BUCKET must be set in GCS mode.")
+      sys.exit(1)
+
+  scan_id = config.scan_id or "default"
+  bucket_name = config.gcs_bucket or ""
+
+  storage_adapter = get_storage_adapter(
+      config.storage_mode,
+      bucket_name=config.gcs_bucket,
+      base_dir=workspace_dir,
+  )
+
+  # 2. Extract repository credentials and paths
+  repo_url, token = get_github_credentials(config=config)
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
   repo_dir = os.path.join(workspace_dir, repo_name)
   scrubbed_env = get_scrubbed_env()
 
-  # 1. Download manifest
+  # 3. Download or discover scan manifest.json
   manifest_path = os.path.join(workspace_dir, "manifest.json")
-  logger.info("Downloading manifest.json...")
-  if not download_file_from_gcs(
-      manifest_path, bucket_name, f"scans/{scan_id}/manifest.json"
-  ):
-    logger.critical("Failed to download manifest.json.")
-    sys.exit(1)
+  manifest = {}
+  if config.storage_mode in ["gcs", "local"]:
+    logger.info("Downloading manifest.json from storage...")
+    # Fetch manifest.json from GCS or local storage bucket
+    if not download_file_from_gcs(
+        manifest_path, bucket_name, f"scans/{scan_id}/manifest.json"
+    ):
+      logger.critical("Failed to download manifest.json.")
+      sys.exit(1)
+  else:
+    # In local/GitHub Actions storage mode, locate manifest in workspace or transit base folder
+    if not os.path.exists(manifest_path):
+      logger.info("Downloading manifest.json from transit storage...")
+      if not storage_adapter.download_file(manifest_path, "base/manifest.json"):
+        transit_manifest = os.path.join(workspace_dir, ".codemender_transit", "base", "manifest.json")
+        if os.path.exists(transit_manifest):
+          shutil.copy2(transit_manifest, manifest_path)
 
-  with open(manifest_path, "r") as f:
-    manifest = json.load(f)
+  # Parse manifest JSON payload to extract scan target SHA and total findings count
+  if os.path.exists(manifest_path):
+    try:
+      with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to parse manifest.json: %s", e)
+  else:
+    logger.warning("Manifest not found, continuing with empty manifest.")
 
   target_sha = manifest.get("target_sha")
   findings_count = manifest.get("findings_count", 0)
 
-  if findings_count == 0:
+  # If zero findings were discovered in Stage 1, exit aggregator immediately
+  if findings_count == 0 and "findings_count" in manifest:
     logger.info("Manifest indicates 0 findings. Nothing to aggregate.")
     sys.exit(0)
 
-  # 2. Clone repository to have files ready for report generation
+  # 4. Clone repository to prepare source files for report formatting
   logger.info("Cloning repository for report generation: %s", clean_repo_url)
   if os.path.exists(repo_dir):
     shutil.rmtree(repo_dir)
 
+  # Execute authenticated git clone into repo_dir
   clone_cmd = [
       "git",
       "-c",
@@ -532,18 +971,30 @@ def run_aggregate_pipeline() -> None:
   ]
   run_command(clone_cmd, cwd=workspace_dir)
 
-  # Checkout target commit SHA
+  # Checkout target commit SHA or resolve default branch
   if target_sha:
     logger.info("Checking out target SHA: %s", target_sha)
+    # Fetch explicit target SHA from origin in case of detached or unadvertised PR commits
+    fetch_target_cmd = [
+        "git",
+        "-c",
+        get_git_auth_header(token),
+        "fetch",
+        "origin",
+        target_sha,
+    ]
+    run_command(fetch_target_cmd, cwd=repo_dir, check=False)
     run_command(["git", "checkout", "-f", target_sha], cwd=repo_dir)
   else:
     logger.warning("Target SHA not found in manifest, using default branch.")
     try:
+      # Inspect current checked out branch name
       default_branch = run_command(
           ["git", "branch", "--show-current"], cwd=repo_dir
       ).stdout.strip()
     except Exception:  # pylint: disable=broad-exception-caught
       default_branch = ""
+    # Query remote default branch via GitHub API if local detection is empty
     if not default_branch:
       default_branch = get_default_branch(token, owner, repo_name)
     logger.info("Using default branch: %s", default_branch)
@@ -551,77 +1002,157 @@ def run_aggregate_pipeline() -> None:
 
   setup_local_git_excludes(repo_dir)
 
-  # 3. Download & Extract base workspace_base.tar.gz to restored state
+  # 5. Download & Extract base workspace_base.tar.gz to restore base state.db
   codemender_home = os.path.expanduser("~/.codemender")
   if os.path.exists(codemender_home):
     shutil.rmtree(codemender_home)
   os.makedirs(codemender_home, exist_ok=True)
 
   tarball_path = os.path.join(workspace_dir, "workspace_base.tar.gz")
-  logger.info("Downloading base workspace...")
-  if not download_file_from_gcs(
-      tarball_path, bucket_name, f"scans/{scan_id}/workspace_base.tar.gz"
-  ):
-    logger.critical("Failed to download base workspace.")
+  should_extract = False
+  if config.storage_mode in ["gcs", "local"]:
+    logger.info("Downloading base workspace...")
+    # Download base workspace tarball containing Stage 1 SQLite state.db
+    if not download_file_from_gcs(
+        tarball_path, bucket_name, f"scans/{scan_id}/workspace_base.tar.gz"
+    ):
+      logger.critical("Failed to download base workspace.")
+      sys.exit(1)
+    should_extract = True
+  else:
+    if os.path.exists(tarball_path):
+      should_extract = True
+    else:
+      logger.info("Downloading base workspace from transit adapter...")
+      # Download transit tarball from storage adapter or fallback to local transit base
+      if storage_adapter.download_file(tarball_path, "base/workspace_base.tar.gz"):
+        should_extract = True
+      else:
+        transit_tarball = os.path.join(workspace_dir, ".codemender_transit", "base", "workspace_base.tar.gz")
+        if os.path.exists(transit_tarball):
+          shutil.copy2(transit_tarball, tarball_path)
+          should_extract = True
+
+  # Extract tarball contents into ~/.codemender
+  if not should_extract:
+    logger.critical(
+        "Failed to locate or download base workspace tarball in aggregator."
+    )
     sys.exit(1)
 
   logger.info(
       "Extracting base workspace to %s", os.path.dirname(codemender_home)
   )
-  with tarfile.open(tarball_path, "r:gz") as tar:
-    tar.extractall(path=os.path.dirname(codemender_home))
+  try:
+    with tarfile.open(tarball_path, "r:gz") as tar:
+      # Use safe data_filter on Python 3.12+ to prevent traversal vulnerabilities and deprecation warnings
+      if hasattr(tarfile, "data_filter"):
+        tar.extractall(path=os.path.dirname(codemender_home), filter="data")
+      else:
+        tar.extractall(path=os.path.dirname(codemender_home))
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.critical(
+        "Failed to extract base workspace tarball in aggregator: %s", e
+    )
+    sys.exit(1)
 
   base_db_path = os.path.join(codemender_home, "state.db")
 
-  # 4. List and verify worker DBs in GCS
-  logger.info("Listing worker databases in GCS...")
-  all_blobs = list_gcs_blobs(bucket_name, f"scans/{scan_id}/")
-  worker_db_blobs = [
-      b
-      for b in all_blobs
-      if b.startswith(f"scans/{scan_id}/worker_") and b.endswith("_state.db")
-  ]
-  logger.info("Found worker DB blobs: %s", worker_db_blobs)
+  # 6. Discover and merge all worker database shards into base_db_path
+  worker_db_blobs = []
+  if config.storage_mode in ["gcs", "local"]:
+    logger.info("Listing worker databases...")
+    all_blobs = list_gcs_blobs(bucket_name, f"scans/{scan_id}/")
+    worker_db_blobs = [
+        b
+        for b in all_blobs
+        if b.startswith(f"scans/{scan_id}/worker_") and b.endswith("_state.db")
+    ]
+    logger.info("Found worker DB blobs: %s", worker_db_blobs)
 
-  total_workers_env = os.environ.get(
-      "CODEMENDER_TOTAL_WORKERS"
-  ) or os.environ.get("CLOUD_RUN_TASK_COUNT")
-  _verify_worker_db_counts(worker_db_blobs, total_workers_env)
+    # Compute expected total workers and verify downloaded shard coverage
+    total_workers_str = (
+        str(config.total_workers)
+        if config.total_workers is not None
+        else str(len(manifest.get("partition_urls", [])) or len(manifest.get("upload_urls", [])))
+        if (manifest.get("partition_urls") or manifest.get("upload_urls"))
+        else None
+    )
+    _verify_worker_db_counts(worker_db_blobs, total_workers_str)
 
-  # 5. Download and merge worker database shards
-  temp_db_dir = os.path.join(workspace_dir, "worker_dbs")
-  os.makedirs(temp_db_dir, exist_ok=True)
-  _download_and_merge_worker_dbs(
-      worker_db_blobs, temp_db_dir, bucket_name, base_db_path
+    temp_db_dir = os.path.join(workspace_dir, "worker_dbs")
+    os.makedirs(temp_db_dir, exist_ok=True)
+    # Download worker shards from GCS and merge each into base state.db
+    _download_and_merge_worker_dbs(worker_db_blobs, temp_db_dir, bucket_name, base_db_path)
+  else:
+    logger.info("Discovering worker databases in local transit storage...")
+    worker_db_blobs = _discover_and_merge_local_worker_dbs(workspace_dir, base_db_path, storage_adapter)
+    # Verify local worker shard discovery count
+    total_workers_str = (
+        str(config.total_workers)
+        if config.total_workers is not None
+        else str(len(manifest.get("partition_urls", [])) or len(manifest.get("upload_urls", [])))
+        if (manifest.get("partition_urls") or manifest.get("upload_urls"))
+        else None
+    )
+    _verify_worker_db_counts(worker_db_blobs, total_workers_str)
+
+  # 7. Aggregate Token Metrics (Preview Mode only)
+  token_totals = None
+  if config.cli_version == "preview":
+    token_totals = _aggregate_token_metrics(
+        workspace_dir,
+        bucket_name,
+        scan_id,
+        worker_db_blobs,
+    )
+
+  # 8. Render Step Summary before DB cleanup (preserves differential statistics)
+  _render_step_summary(
+      base_db_path,
+      config,
+      owner,
+      repo_name,
+      target_sha=target_sha,
+      token_totals=token_totals,
   )
 
-  # Aggregate Token Metrics (Preview Mode only)
-  token_totals = None
-  cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
-  if cli_version == "preview":
-    token_totals = _aggregate_token_metrics(
-        workspace_dir, bucket_name, scan_id, worker_db_blobs
-    )
+  # 9. Collect SKIPPED_DUPLICATE IDs for Nightly SARIF suppression
+  skipped_finding_ids: Set[str] = set()
+  if os.path.exists(base_db_path):
+    try:
+      with closing(sqlite3.connect(base_db_path)) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='findings'")
+        if cursor.fetchone():
+          cursor.execute("SELECT finding_id FROM findings WHERE status = 'SKIPPED_DUPLICATE'")
+          skipped_finding_ids = {r[0] for r in cursor.fetchall()}
+    except sqlite3.Error as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to collect SKIPPED_DUPLICATE finding IDs: %s", e)
 
-  # 6. Generate final report and upload
-  inject_codemender_config(repo_dir)
-
-  # Delete SKIPPED_DUPLICATE and DISMISSED findings from local db to keep HTML report clean
+  # 10. Scoped Reporting DB Cleanup (Purge pre-existing ignored findings on PR scans)
   try:
-    with closing(sqlite3.connect(base_db_path)) as conn:
-      conn.execute(
-          "DELETE FROM findings WHERE status IN ('SKIPPED_DUPLICATE',"
-          " 'DISMISSED')"
-      )
-      conn.commit()
-    logger.info(
-        "Removed SKIPPED_DUPLICATE and DISMISSED findings from local state.db"
-        " for report."
-    )
+    if os.path.exists(base_db_path):
+      with closing(sqlite3.connect(base_db_path)) as conn:
+        if config.is_pr_scan:
+          # On PR scans, remove pre-existing ignored and duplicates from per-scan report
+          conn.execute(
+              "DELETE FROM findings WHERE status IN ('PRE_EXISTING_IGNORED', 'SKIPPED_DUPLICATE', 'DISMISSED')"
+          )
+          logger.info("Purged PRE_EXISTING_IGNORED, SKIPPED_DUPLICATE, and DISMISSED findings for PR report.")
+        else:
+          # On Nightly scans, retain SKIPPED_DUPLICATE for SARIF suppressions, remove only DISMISSED
+          conn.execute("DELETE FROM findings WHERE status IN ('DISMISSED')")
+          logger.info("Purged DISMISSED findings for Nightly report.")
+        conn.commit()
   except sqlite3.Error as e:  # pylint: disable=broad-exception-caught
-    logger.warning("Failed to remove SKIPPED_DUPLICATE findings from state.db: %s", e)
+    logger.warning("Failed to perform scoped report findings cleanup in state.db: %s", e)
 
+  # 11. Generate final HTML and SARIF reports and upload
+  inject_codemender_config(repo_dir, config=config)
+  # Resolve path to CodeMender 'cm' executable
   cm_binary = shutil.which("cm") or "cm"
+  # Invoke report generation and upload routine with full run parameters
   _generate_and_upload_report(
       repo_dir,
       scrubbed_env,
@@ -631,7 +1162,13 @@ def run_aggregate_pipeline() -> None:
       owner,
       repo_name,
       token_totals=token_totals,
+      scan_id=scan_id,
+      # Pass execution mode and SARIF suppression configurations
+      is_pr_scan=config.is_pr_scan,
+      skipped_finding_ids=skipped_finding_ids,
+      storage_mode=config.storage_mode,
+      config=config,
   )
 
+  # Log final aggregator completion notice
   logger.info("Stage 3 (Aggregate) completed successfully.")
-

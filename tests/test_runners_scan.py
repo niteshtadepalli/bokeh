@@ -259,7 +259,7 @@ class TestScanRunner(unittest.TestCase):
     mock_check_remote_branch_exists.return_value = False
     
     # fid-1 will be skipped (db.py), fid-2 will be active (app.py)
-    mock_is_duplicate_pr.side_effect = lambda r, t, f, v, s: f == "db.py"
+    mock_is_duplicate_pr.side_effect = lambda r, t, f, v, s, **kw: f == "db.py"
 
     mock_git_rev = MagicMock()
     mock_git_rev.stdout = "abc123commitsha"
@@ -395,6 +395,97 @@ class TestScanRunner(unittest.TestCase):
     self.assertIn(expected_target2, find_targets_passed)
     for target in find_targets_passed:
       self.assertTrue(os.path.isabs(target), f"Target {target} is not absolute")
+
+  @patch("codemender_agent.runners.scan.get_pr_changed_lines")
+  @patch("codemender_agent.runners.scan.run_command")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.get_default_branch")
+  @patch("shutil.which")
+  def test_scan_pipeline_pr_differential_filtering(
+      self,
+      mock_which,
+      mock_get_default_branch,
+      mock_is_duplicate_pr,
+      mock_check_remote_branch,
+      mock_run_cmd,
+      mock_get_pr_changed_lines,
+  ):
+    """Verify differential PR filtering marks untouched findings PRE_EXISTING_IGNORED and emits GHA outputs."""
+    mock_which.return_value = "/bin/cm"
+    mock_get_default_branch.return_value = "main"
+    mock_is_duplicate_pr.return_value = False
+    mock_check_remote_branch.return_value = False
+    
+    # Diff hunks: only modified lines 10-15 in app.py
+    mock_get_pr_changed_lines.return_value = {"app.py": {10, 11, 12, 13, 14, 15}}
+
+    mock_git_rev = MagicMock()
+    mock_git_rev.stdout = "targetsha123"
+
+    mock_cm_report = MagicMock()
+    mock_cm_report.stdout = json.dumps([
+        {"FindingID": "fid-modified", "Status": "DETECTED", "VulnType": "SQL_INJECTION", "FilePath": "app.py", "StartLine": 12, "EndLine": 12},
+        {"FindingID": "fid-untouched", "Status": "DETECTED", "VulnType": "XSS", "FilePath": "legacy.py", "StartLine": 50, "EndLine": 55},
+    ])
+
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if "rev-parse" in cmd_str:
+        return mock_git_rev
+      elif "report" in cmd_str:
+        return mock_cm_report
+      else:
+        return mock_default
+
+    mock_run_cmd.side_effect = run_cmd_side_effect
+
+    # Setup fake local state.db
+    import sqlite3
+    db_dir = os.path.join(self.workspace_dir, ".codemender")
+    os.makedirs(db_dir, exist_ok=True)
+    db_path = os.path.join(db_dir, "state.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE findings (finding_id TEXT, status TEXT, muted INTEGER, mute_reason TEXT, dismiss_reason TEXT)")
+    conn.execute("INSERT INTO findings VALUES ('fid-modified', 'OPEN', 0, '', '')")
+    conn.execute("INSERT INTO findings VALUES ('fid-untouched', 'OPEN', 0, '', '')")
+    conn.commit()
+    conn.close()
+
+    output_file = os.path.join(self.workspace_dir, "github_output.txt")
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "CODEMENDER_PR_BASE_REF": "main",
+            "GITHUB_OUTPUT": output_file,
+        },
+    ):
+      run_scan_pipeline()
+
+    # Check local state.db mutations
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT finding_id, status FROM findings ORDER BY finding_id")
+    rows = cursor.fetchall()
+    conn.close()
+
+    self.assertEqual(rows[0], ("fid-modified", "OPEN"))
+    self.assertEqual(rows[1], ("fid-untouched", "PRE_EXISTING_IGNORED"))
+
+    # Check GITHUB_OUTPUT file
+    self.assertTrue(os.path.exists(output_file))
+    with open(output_file, "r") as f:
+      output_content = f.read()
+
+    self.assertIn("matrix=[0]", output_content)
+    self.assertIn("findings_count=1", output_content)
+    self.assertIn("target_sha=targetsha123", output_content)
 
 
 if __name__ == "__main__":

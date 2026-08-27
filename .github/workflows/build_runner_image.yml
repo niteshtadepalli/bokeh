@@ -1,0 +1,75 @@
+name: Build & Publish CodeMender Runner Image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile'
+      - 'codemender_agent/**'
+      - 'requirements.txt'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      cm_version:
+        description: 'Specific version/tag from Artifact Registry'
+        required: false
+        default: 'stable'
+        type: string
+      cm_custom_url:
+        description: 'Optional direct download URL for custom/rollback binary'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve CodeMender CLI Binary
+        run: |
+          if [ -n "${{ inputs.cm_custom_url }}" ]; then
+            echo "Downloading custom cm binary from ${{ inputs.cm_custom_url }}..."
+            curl -fsSL -o cm-custom.zip "${{ inputs.cm_custom_url }}"
+            unzip -q -o cm-custom.zip cm || cp cm-custom.zip cm
+            chmod +x cm
+          elif [ -f "./cm" ]; then
+            echo "Using local cm binary present in build context."
+            chmod +x cm
+          else
+            VERSION="${{ inputs.cm_version || 'stable' }}"
+            echo "Downloading CodeMender CLI version: ${VERSION} from Artifact Registry..."
+            URL="https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3A${VERSION}%3Acm-linux-amd64.zip:download?alt=media"
+            curl -fsSL -o cm-linux-amd64.zip "$URL"
+            unzip -q -o cm-linux-amd64.zip cm
+            chmod +x cm
+          fi
+
+      - name: Build and Push Runner Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/codemender-runner:latest
+            ghcr.io/${{ github.repository_owner }}/codemender-runner:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

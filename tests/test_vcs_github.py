@@ -66,6 +66,55 @@ class TestVcsGithub(unittest.TestCase):
     branch = get_default_branch("token", "org", "repo")
     self.assertEqual(branch, "development")
 
+  @patch("requests.post")
+  def test_create_pr_comment_success(self, mock_post):
+    """Verify posting review comment on PRs."""
+    from codemender_agent.vcs.github import create_pr_comment
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 201
+    mock_resp.json.return_value = {
+        "html_url": "https://github.com/org/repo/pull/42#issuecomment-1"
+    }
+    mock_post.return_value = mock_resp
+
+    comment_url = create_pr_comment(
+        token="valid-token",
+        owner="org",
+        repo="repo",
+        pr_number=42,
+        body="## Security Fix Proposal",
+    )
+    self.assertEqual(
+        comment_url, "https://github.com/org/repo/pull/42#issuecomment-1"
+    )
+    mock_post.assert_called_once()
+
+  @patch("requests.get")
+  def test_is_duplicate_pr_with_head_branch(self, mock_get):
+    """Verify targeted O(1) duplicate PR lookup with head_branch parameter."""
+    from codemender_agent.vcs.github import is_duplicate_pr
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = [
+        {"title": "Fix SQL Injection", "state": "open"}
+    ]
+    mock_get.return_value = mock_resp
+
+    is_dup = is_duplicate_pr(
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        file_path="db.py",
+        vuln_type="SQL_INJECTION",
+        start_line=10,
+        head_branch="codemender/fix-sql_injection-abc12345",
+    )
+    self.assertTrue(is_dup)
+    mock_get.assert_called_once()
+    call_args = mock_get.call_args
+    self.assertIn("head=org:codemender/fix-sql_injection-abc12345", call_args[0][0])
+
 
 if __name__ == "__main__":
   unittest.main()

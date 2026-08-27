@@ -83,20 +83,25 @@ def build_cm_command(
     extra_flags: Optional[List[str]] = None,
 ) -> List[str]:
   """Centralized command builder for CodeMender CLI invocations."""
+  # 1. Resolve active CLI version (preview vs legacy)
   if cli_version is None:
     cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
   else:
     cli_version = cli_version.lower()
 
+  # 2. Validate mandatory target or finding ID for core actions
   if action in ["find", "verify", "fix"] and not target_or_id:
     raise ValueError(f"Action '{action}' requires a valid target or finding ID.")
 
+  # 3. Construct modern CLI commands for 'preview' version
   if cli_version == "preview":
     model = resolve_command_model(action)
     model_flags = ["--model", model] if model else []
 
+    # Handle 'find' command
     if action == "find":
       cmd = [cm_binary, "find", "-y"] + model_flags + [target_or_id]
+    # Handle 'verify' command with optional exploit verification skip
     elif action == "verify":
       skip_flag = (
           ["--skip-exploit-verification"]
@@ -109,31 +114,40 @@ def build_cm_command(
           + skip_flag
           + [target_or_id]
       )
+    # Handle 'fix' command with bypass warnings
     elif action == "fix":
       cmd = (
           [cm_binary, "fix", "-y", "--bypass-warning"]
           + model_flags
           + [target_or_id]
       )
+    # Handle 'init' command
     elif action == "init":
       cmd = [cm_binary, "init"]
       if extra_flags:
         cmd.extend(extra_flags)
+    # Handle generic actions
     else:
       cmd = [cm_binary, action]
       if extra_flags:
         cmd.extend(extra_flags)
-  else:  # legacy
+  # 4. Construct legacy CLI commands for backward compatibility
+  else:
+    # Legacy 'find' command
     if action == "find":
       cmd = [cm_binary, "find", target_or_id]
+    # Legacy 'verify' subcommand
     elif action == "verify":
       cmd = [cm_binary, "find", "verify", target_or_id, "--yes"]
+    # Legacy 'fix' command
     elif action == "fix":
       cmd = [cm_binary, "fix", target_or_id, "--yes"]
+    # Legacy 'init' command
     elif action == "init":
       cmd = [cm_binary, "init"]
       if extra_flags:
         cmd.extend(extra_flags)
+    # Legacy generic actions
     else:
       cmd = [cm_binary, action]
       if extra_flags:
@@ -220,9 +234,9 @@ def run_command(
 
   stdout_lines = []
 
-  # Stream output line-by-line cleanly without busy-wait sleep loops
+  # Stream output line-by-line cleanly without busy-wait sleep loops, redacting sensitive tokens
   for line in process.stdout:
-    sys.stdout.write(line)
+    sys.stdout.write(redact_sensitive_arg(line))
     sys.stdout.flush()
     stdout_lines.append(line)
 
@@ -240,9 +254,11 @@ def run_command(
     logger.error("Command failed with code %d", return_code)
     raise subprocess.CalledProcessError(return_code, cmd, full_stdout, "")
 
+  # 1. Parse LLM token metrics if running in preview CLI mode
   cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
   token_usage = None
   if cli_version == "preview":
+    # Extract token metrics matching the preview CLI output format
     matches = re.findall(
         r"Tokens:\s*([0-9.kMgG]+)\s*in\s*/\s*([0-9.kMgG]+)\s*out\s*/\s*([0-9.kMgG]+)\s*total",
         full_stdout,
@@ -251,6 +267,7 @@ def run_command(
       in_tokens = 0
       out_tokens = 0
       total_tokens = 0
+      # Accumulate in/out/total token counts across all regex matches in output
       for m in matches:
         try:
           in_tokens += parse_token_metric(m[0])
@@ -258,28 +275,39 @@ def run_command(
           total_tokens += parse_token_metric(m[2])
         except ValueError:
           pass
+      # Package parsed token metric values
       token_usage = {
           "in_tokens": in_tokens,
           "out_tokens": out_tokens,
           "total_tokens": total_tokens,
       }
     else:
+      # Default zero-value token metric payload
       token_usage = {"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}
 
+  # 2. Package subprocess completed result with attached token metrics
   res = subprocess.CompletedProcess(cmd, return_code, full_stdout, "")
   res.token_usage = token_usage
   return res
 
 
 def free_port(port: int):
-  """Attempts to kill any process listening on the specified port."""
+  """Attempts to kill any process listening on the specified port.
+
+  Note: 'fuser' is a Linux-specific utility (provided by psmisc). In our production
+  and CI execution environments (Cloud Run Job and Ubuntu runner container),
+  fuser is pre-installed. If executed on non-Linux developer environments (e.g. macOS),
+  FileNotFoundError is caught cleanly and skipped.
+  """
   try:
+    # Use fuser -k on Linux to release port before test execution
     subprocess.run(
         ["fuser", "-k", f"{port}/tcp"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
     )
-  except FileNotFoundError:
-    logger.warning("fuser command not found. Skipping port %d cleanup.", port)
+  except (FileNotFoundError, PermissionError, OSError) as e:
+    # Graceful fallback on non-Linux, non-root, or stripped container environments
+    logger.warning("Could not run fuser for port %d cleanup (%s). Skipping.", port, e)
 

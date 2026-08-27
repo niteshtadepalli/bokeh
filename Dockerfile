@@ -12,57 +12,68 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# CodeMender Orchestrator - Deployment Container for Cloud Run Jobs
-# Base image: Python 3.11 slim
-FROM python:3.11-slim
+# CodeMender Orchestrator - Universal Multi-Toolchain Base Container for GitHub Actions and Cloud Run
+FROM ubuntu:22.04
 
-# Install system dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install core utilities and build essentials
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
-    ca-certificates \
+    jq \
+    tar \
+    gzip \
+    unzip \
     psmisc \
+    ca-certificates \
+    build-essential \
+    software-properties-common \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
+# Install Python 3.11 and venv
+RUN add-apt-repository ppa:deadsnakes/ppa -y && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    python-is-python3 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
-# Copy CodeMender CLI binary (downloaded by Cloud Build step into workspace root)
+# Install Node.js 20 LTS, npm, yarn, pnpm
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm install -g yarn pnpm && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
+# Install Go (latest stable)
+RUN curl -fsSL https://go.dev/dl/go1.22.6.linux-amd64.tar.gz | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Install Java JDK 17, Maven, Gradle
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openjdk-17-jdk \
+    maven \
+    gradle \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
+# Copy CodeMender CLI binary
 COPY cm /usr/local/bin/cm
 RUN chmod +x /usr/local/bin/cm
 
-# ==============================================================================
-# Language Runtimes (BYOP Toolchain Configurations)
-# Customize this section to match your target repository requirements.
-# ==============================================================================
-
-# RUNTIME: Node.js & npm (Active for JS/TS projects like juice-shop)
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    rm -rf /var/lib/apt/lists/*
-
-# RUNTIME: Go (Uncomment to enable for Go projects)
-# COPY --from=golang:1.22 /usr/local/go /usr/local/go
-# ENV PATH="/usr/local/go/bin:${PATH}"
-
-# RUNTIME: Java JDK & Maven (Uncomment to enable for Maven projects)
-# RUN apt-get update && apt-get install -y default-jdk maven && \
-#     rm -rf /var/lib/apt/lists/*
-
-# RUNTIME: PHP CLI (Uncomment to enable for PHP projects like DVWA)
-RUN apt-get update && apt-get install -y --no-install-recommends php-cli && \
-    rm -rf /var/lib/apt/lists/*
-
-# ==============================================================================
-
-# Set working directory
-WORKDIR /app
-
-# Copy requirements and install dependencies
+# Set up isolated /opt/codemender runtime environment
+WORKDIR /opt/codemender
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python3.11 -m venv /opt/codemender/venv && \
+    /opt/codemender/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # Copy orchestrator package and entrypoint script
 COPY codemender_agent ./codemender_agent
 COPY orchestrator.py .
 
-# Set entrypoint for Cloud Run Job execution
-ENTRYPOINT ["python", "orchestrator.py"]
+ENV PYTHONPATH=/opt/codemender
+
+# Set entrypoint to isolated virtual environment python
+ENTRYPOINT ["/opt/codemender/venv/bin/python3", "/opt/codemender/orchestrator.py"]

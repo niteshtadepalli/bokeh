@@ -55,6 +55,7 @@ class TestWorkerRunner(unittest.TestCase):
   @unittest.mock.patch("codemender_agent.runners.worker.download_from_url")
   @unittest.mock.patch("codemender_agent.runners.worker.upload_to_url")
   @unittest.mock.patch("codemender_agent.runners.worker.check_remote_branch_exists")
+  @unittest.mock.patch("codemender_agent.runners.worker.push_branch_to_remote")
   @unittest.mock.patch("codemender_agent.runners.worker.create_pull_request")
   @unittest.mock.patch("codemender_agent.runners.worker.is_duplicate_pr")
   @unittest.mock.patch("codemender_agent.runners.worker.is_finding_verified")
@@ -69,6 +70,7 @@ class TestWorkerRunner(unittest.TestCase):
       mock_is_finding_verified,
       mock_is_duplicate_pr,
       mock_create_pr,
+      mock_push_branch,
       mock_check_remote_branch_exists,
       mock_upload_to_url,
       mock_download_from_url,
@@ -295,6 +297,120 @@ class TestWorkerRunner(unittest.TestCase):
         "http://signed-url/metadata_0.json",
         content_type="application/json",
     )
+
+  @unittest.mock.patch("codemender_agent.runners.worker.run_command")
+  @unittest.mock.patch("codemender_agent.runners.worker.download_from_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.upload_to_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.check_remote_branch_exists")
+  @unittest.mock.patch("codemender_agent.runners.worker.push_branch_to_remote")
+  @unittest.mock.patch("codemender_agent.runners.worker.create_pull_request")
+  @unittest.mock.patch("codemender_agent.runners.worker.create_pr_comment")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_duplicate_pr")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_finding_verified")
+  @unittest.mock.patch("codemender_agent.runners.worker.get_finding_status")
+  @unittest.mock.patch("tarfile.open")
+  @unittest.mock.patch("shutil.which")
+  def test_worker_pipeline_child_pr_and_fork_comment(
+      self,
+      mock_which,
+      _mock_tarfile_open,
+      mock_get_finding_status,
+      mock_is_finding_verified,
+      mock_is_duplicate_pr,
+      mock_create_comment,
+      mock_create_pr,
+      mock_push_branch,
+      mock_check_remote_branch_exists,
+      mock_upload_to_url,
+      mock_download_from_url,
+      mock_run_cmd,
+  ):
+    """Verify Child PR creation targeting pr_head_ref on internal PRs and review comment on Fork PRs."""
+    mock_which.return_value = "/bin/cm"
+    mock_check_remote_branch_exists.return_value = False
+    mock_is_duplicate_pr.return_value = False
+    mock_is_finding_verified.return_value = True
+    mock_get_finding_status.return_value = "FIXED"
+    # Setup transit partition file
+    with open(os.path.join(self.workspace_dir, "partition_0.json"), "w") as f:
+      json.dump({"finding_ids": ["fid-1"]}, f)
+    transit_shard = os.path.join(self.workspace_dir, ".codemender_transit", "base")
+    os.makedirs(transit_shard, exist_ok=True)
+    with open(os.path.join(transit_shard, "partition_0.json"), "w") as f:
+      json.dump({"finding_ids": ["fid-1"]}, f)
+
+    mock_cm_report = unittest.mock.MagicMock()
+    mock_cm_report.stdout = json.dumps([
+        {
+            "FindingID": "fid-1",
+            "Status": "DETECTED",
+            "VulnType": "SQL_INJECTION",
+            "FilePath": "db.py",
+            "Title": "SQL Injection in db.py",
+            "Severity": "HIGH",
+            "Analysis": "Fix it.",
+        }
+    ])
+    mock_cm_report.returncode = 0
+
+    mock_git_status = unittest.mock.MagicMock()
+    mock_git_status.stdout = " M db.py"
+    mock_git_status.returncode = 0
+
+    mock_default = unittest.mock.MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if "report" in cmd_str:
+        return mock_cm_report
+      elif "status" in cmd_str:
+        return mock_git_status
+      else:
+        return mock_default
+
+    mock_run_cmd.side_effect = run_cmd_side_effect
+
+    # 1. Test Internal PR -> Child PR targeting pr_head_ref
+    with unittest.mock.patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "CODEMENDER_PR_HEAD_REF": "feature/payments",
+            "CODEMENDER_PR_BASE_REF": "main",
+        },
+    ):
+      run_worker_pipeline()
+
+    # Verify Child PR targeted feature/payments as base_branch
+    mock_create_pr.assert_called_with(
+        token="fake-token",
+        owner="owner",
+        repo="repo",
+        title=unittest.mock.ANY,
+        body=unittest.mock.ANY,
+        head_branch=unittest.mock.ANY,
+        base_branch="feature/payments",
+    )
+
+    # 2. Test Fork PR -> Skip Child PR push and post PR comment
+    mock_create_pr.reset_mock()
+    with unittest.mock.patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "CODEMENDER_IS_FORK_PR": "true",
+            "CODEMENDER_PR_NUMBER": "42",
+        },
+    ):
+      run_worker_pipeline()
+
+    mock_create_pr.assert_not_called()
+    mock_create_comment.assert_called_once()
+    self.assertEqual(mock_create_comment.call_args.kwargs.get("pr_number"), 42)
 
 
 if __name__ == "__main__":

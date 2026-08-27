@@ -240,6 +240,56 @@ class TestStorage(unittest.TestCase):
             credentials=mock_signing_creds,
         )
 
+  def test_github_actions_transit_storage_adapter(self):
+    """Test GitHubActionsTransitStorageAdapter uploads, downloads, and lists blobs correctly."""
+    import os
+    from codemender_agent.storage import GitHubActionsTransitStorageAdapter
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+      adapter = GitHubActionsTransitStorageAdapter(base_dir=temp_dir)
+      
+      # Create sample file to upload
+      src_file = os.path.join(temp_dir, "sample.txt")
+      with open(src_file, "w") as f:
+        f.write("hello gha")
+
+      # Upload to base
+      self.assertTrue(adapter.upload_file(src_file, "base/sample.txt"))
+      self.assertTrue(os.path.exists(os.path.join(temp_dir, ".codemender_transit", "base", "sample.txt")))
+
+      # List blobs
+      blobs = adapter.list_blobs(prefix="base")
+      self.assertIn("base/sample.txt", blobs)
+
+      # Download file
+      dest_file = os.path.join(temp_dir, "downloaded.txt")
+      self.assertTrue(adapter.download_file(dest_file, "base/sample.txt"))
+      with open(dest_file, "r") as f:
+        self.assertEqual(f.read(), "hello gha")
+
+      # Signed URL
+      url = adapter.generate_signed_url("base/sample.txt")
+      self.assertTrue(url.startswith("file://"))
+
+  def test_get_storage_adapter_factory(self):
+    """Test get_storage_adapter returns correct adapter instance for each mode."""
+    from codemender_agent.storage import (
+        GCSTransitStorageAdapter,
+        GitHubActionsTransitStorageAdapter,
+        LocalStorageAdapter,
+        get_storage_adapter,
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+      gcs_adapter = get_storage_adapter("gcs", bucket_name="test-bkt", base_dir=temp_dir)
+      self.assertIsInstance(gcs_adapter, GCSTransitStorageAdapter)
+
+      gha_adapter = get_storage_adapter("github_actions", base_dir=temp_dir)
+      self.assertIsInstance(gha_adapter, GitHubActionsTransitStorageAdapter)
+
+      local_adapter = get_storage_adapter("local", base_dir=temp_dir)
+      self.assertIsInstance(local_adapter, LocalStorageAdapter)
+
 
 if __name__ == "__main__":
   unittest.main()

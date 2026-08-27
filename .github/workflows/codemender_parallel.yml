@@ -1,0 +1,294 @@
+name: CodeMender Parallel Remediation
+
+on:
+  workflow_call:
+    inputs:
+      runner_image:
+        description: 'Universal runner image or custom Bring-Your-Own-Image (BYOI)'
+        required: false
+        default: 'ghcr.io/google/codemender-runner:latest'
+        type: string
+      runner_type:
+        description: 'Runner label for job execution'
+        required: false
+        default: 'ubuntu-latest'
+        type: string
+      scan_target:
+        description: 'Subdirectory path(s) to scan (default: repository root)'
+        required: false
+        default: '.'
+        type: string
+      build_command:
+        description: 'Custom build and test command for patch verification'
+        required: false
+        default: ''
+        type: string
+      max_tasks:
+        description: 'Maximum number of parallel worker tasks'
+        required: false
+        default: 10
+        type: number
+      intermediate_artifact_retention_days:
+        description: 'Retention period (days) for intermediate state artifacts'
+        required: false
+        default: 3
+        type: number
+      report_artifact_retention_days:
+        description: 'Retention period (days) for final triage reports'
+        required: false
+        default: 90
+        type: number
+      upload_sarif:
+        description: 'Upload generated SARIF findings to GitHub Security Tab'
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      gcp_workload_identity_provider:
+        description: 'GCP Workload Identity Provider resource name'
+        required: false
+      gcp_service_account:
+        description: 'GCP Service Account email'
+        required: false
+      gcp_sa_key:
+        description: 'GCP Service Account JSON private key'
+        required: false
+      github_app_id:
+        description: 'GitHub App ID for installation token generation'
+        required: false
+      github_app_private_key:
+        description: 'GitHub App private key (PEM format)'
+        required: false
+      github_token:
+        description: 'Optional GitHub Token/PAT'
+        required: false
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+  security-events: write
+  actions: read
+
+jobs:
+  scan:
+    name: Stage 1 - Scan & Partition
+    runs-on: ${{ inputs.runner_type }}
+    timeout-minutes: 55
+    container:
+      image: ${{ inputs.runner_image }}
+    outputs:
+      matrix: ${{ steps.run-scan.outputs.matrix }}
+      findings_count: ${{ steps.run-scan.outputs.findings_count }}
+      target_sha: ${{ steps.run-scan.outputs.target_sha }}
+      scan_id: ${{ steps.run-scan.outputs.scan_id }}
+
+    steps:
+      - name: Mint GitHub App Token
+        id: app-token
+        if: ${{ secrets.github_app_id != '' && secrets.github_app_private_key != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+
+      - name: Authenticate to Google Cloud
+        if: ${{ secrets.gcp_workload_identity_provider != '' || secrets.gcp_sa_key != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
+          service_account: ${{ secrets.gcp_service_account }}
+          credentials_json: ${{ secrets.gcp_sa_key }}
+
+      - name: Configure Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+
+      - name: Execute Scan Stage
+        id: run-scan
+        env:
+          CODEMENDER_RUN_MODE: scan
+          CODEMENDER_STORAGE_MODE: github_actions
+          CODEMENDER_SCAN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          CODEMENDER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
+          CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
+          CODEMENDER_SCAN_TARGET: ${{ inputs.scan_target }}
+          CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
+          CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.github_token || secrets.GITHUB_TOKEN || github.token }}
+          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          WORKSPACE_DIR: ${{ github.workspace }}
+        run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
+
+      - name: Upload Base State Artifact
+        if: ${{ steps.run-scan.outputs.findings_count != '0' && steps.run-scan.outputs.findings_count != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codemender-base-state
+          path: .codemender_transit/base/
+          retention-days: ${{ inputs.intermediate_artifact_retention_days }}
+          overwrite: true
+          if-no-files-found: ignore
+
+  worker:
+    name: Stage 2 - Worker ${{ matrix.worker_index }}
+    needs: scan
+    if: needs.scan.outputs.findings_count != '0' && needs.scan.outputs.findings_count != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        worker_index: ${{ fromJson(needs.scan.outputs.matrix) }}
+    runs-on: ${{ inputs.runner_type }}
+    timeout-minutes: 55
+    container:
+      image: ${{ inputs.runner_image }}
+
+    steps:
+      - name: Mint GitHub App Token
+        id: app-token
+        if: ${{ secrets.github_app_id != '' && secrets.github_app_private_key != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+
+      - name: Authenticate to Google Cloud
+        if: ${{ secrets.gcp_workload_identity_provider != '' || secrets.gcp_sa_key != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
+          service_account: ${{ secrets.gcp_service_account }}
+          credentials_json: ${{ secrets.gcp_sa_key }}
+
+      - name: Configure Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Download Base State Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codemender-base-state
+          path: .codemender_transit/base/
+
+      - name: Execute Worker Stage
+        env:
+          CODEMENDER_RUN_MODE: worker
+          CODEMENDER_STORAGE_MODE: github_actions
+          CODEMENDER_SCAN_ID: ${{ needs.scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
+          CODEMENDER_WORKER_INDEX: ${{ matrix.worker_index }}
+          CODEMENDER_TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
+          CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          CODEMENDER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
+          CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
+          CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.github_token || secrets.GITHUB_TOKEN || github.token }}
+          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          WORKSPACE_DIR: ${{ github.workspace }}
+        run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
+
+      - name: Upload Worker Shard Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-shard-${{ matrix.worker_index }}
+          path: .codemender_transit/shards/worker_${{ matrix.worker_index }}/
+          retention-days: ${{ inputs.intermediate_artifact_retention_days }}
+          overwrite: true
+          if-no-files-found: ignore
+
+  aggregate:
+    name: Stage 3 - Aggregator & Reporting
+    needs: [scan, worker]
+    if: always() && needs.scan.result == 'success' && needs.scan.outputs.findings_count != '0' && needs.scan.outputs.findings_count != ''
+    runs-on: ${{ inputs.runner_type }}
+    timeout-minutes: 30
+    container:
+      image: ${{ inputs.runner_image }}
+
+    steps:
+      - name: Mint GitHub App Token
+        id: app-token
+        if: ${{ secrets.github_app_id != '' && secrets.github_app_private_key != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+
+      - name: Authenticate to Google Cloud
+        if: ${{ secrets.gcp_workload_identity_provider != '' || secrets.gcp_sa_key != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
+          service_account: ${{ secrets.gcp_service_account }}
+          credentials_json: ${{ secrets.gcp_sa_key }}
+
+      - name: Configure Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Download Base State Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codemender-base-state
+          path: .codemender_transit/base/
+
+      - name: Download Worker Shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: worker-shard-*
+          path: .codemender_transit/shards/
+          merge-multiple: true
+
+      - name: Execute Aggregator Stage
+        env:
+          CODEMENDER_RUN_MODE: aggregate
+          CODEMENDER_STORAGE_MODE: github_actions
+          CODEMENDER_SCAN_ID: ${{ needs.scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
+          CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          CODEMENDER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
+          CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
+          CODEMENDER_TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
+          CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
+          CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.github_token || secrets.GITHUB_TOKEN || github.token }}
+          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          WORKSPACE_DIR: ${{ github.workspace }}
+        run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
+
+      - name: Upload SARIF Report
+        if: ${{ inputs.upload_sarif }}
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: report.sarif
+
+      - name: Upload Final Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codemender-report-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'nightly' }}-run-${{ github.run_id }}
+          path: |
+            report.html
+            report.json
+            report.sarif
+          retention-days: ${{ inputs.report_artifact_retention_days }}
+          overwrite: true
+          if-no-files-found: ignore

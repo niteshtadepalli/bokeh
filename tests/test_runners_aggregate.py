@@ -17,6 +17,7 @@
 import json
 import os
 import sqlite3
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -583,6 +584,199 @@ class TestAggregateRunner(unittest.TestCase):
             }
         },
     )
+
+  def test_render_step_summary_formatting(self):
+    """Test step summary Markdown formatting with stats and findings table."""
+    from codemender_agent.config import OrchestratorConfig
+    from codemender_agent.runners.aggregate import _render_step_summary
+
+    db_path = os.path.join(self.workspace_dir, "summary_test.db")
+    self.create_test_db(
+        db_path,
+        [
+            {"finding_id": "fid-1", "title": "SQL Injection in Login", "status": "FIXED", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-2", "title": "XSS in Profile", "status": "PRE_EXISTING_IGNORED", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-3", "title": "CSRF in Settings", "status": "SKIPPED_DUPLICATE", "updated_at": "2026-08-01"},
+        ],
+    )
+
+    summary_file = os.path.join(self.workspace_dir, "step_summary.md")
+    with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_file}):
+      config = OrchestratorConfig(is_pr_scan=True)
+      summary_md = _render_step_summary(
+          db_path,
+          config,
+          owner="my-org",
+          repo_name="my-repo",
+          target_sha="abc123456789",
+          token_totals={"gemini-2.5-flash": {"in_tokens": 100, "out_tokens": 50, "total_tokens": 150}},
+      )
+
+    self.assertIn("# 🛡️ CodeMender Security Remediation Summary", summary_md)
+    self.assertIn("my-org/my-repo", summary_md)
+    self.assertIn("Pull Request Scan (Clean as You Code)", summary_md)
+    self.assertIn("fid-1", summary_md)
+    self.assertIn("FIXED", summary_md)
+    self.assertIn("PRE_EXISTING_IGNORED", summary_md)
+    self.assertIn("SKIPPED_DUPLICATE", summary_md)
+    self.assertIn("150", summary_md)
+    self.assertTrue(os.path.exists(summary_file))
+
+  def test_render_step_summary_truncation(self):
+    """Test step summary truncation when exceeding 1000 KiB buffer size."""
+    from codemender_agent.config import OrchestratorConfig
+    from codemender_agent.runners.aggregate import _render_step_summary
+
+    db_path = os.path.join(self.workspace_dir, "summary_large.db")
+    # Create DB with very large number of findings
+    large_findings = [
+        {"finding_id": f"fid-{i}", "title": f"Vulnerability {i} " + ("x" * 200), "status": "DETECTED", "updated_at": "2026-08-01"}
+        for i in range(5000)
+    ]
+    self.create_test_db(db_path, large_findings)
+
+    config = OrchestratorConfig(is_pr_scan=False)
+    summary_md = _render_step_summary(
+        db_path,
+        config,
+        owner="my-org",
+        repo_name="my-repo",
+    )
+
+    self.assertLessEqual(len(summary_md.encode("utf-8")), 1000 * 1024 + 100)
+    self.assertIn("Summary truncated", summary_md)
+
+  def test_sanitize_sarif_file(self):
+    """Test SARIF file path sanitization and duplicate suppression injection."""
+    from codemender_agent.runners.aggregate import _sanitize_sarif_file
+
+    repo_dir = os.path.join(self.workspace_dir, "my-repo")
+    os.makedirs(repo_dir, exist_ok=True)
+    sarif_path = os.path.join(self.workspace_dir, "test.sarif")
+
+    raw_sarif = {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {"driver": {"name": "CodeMender"}},
+                "results": [
+                    {
+                        "ruleId": "fid-1",
+                        "message": {"text": "SQL Injection"},
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {
+                                        "uri": f"{repo_dir}/src/db/user.py"
+                                    }
+                                }
+                            }
+                        ],
+                        "properties": {"finding_id": "fid-1", "status": "SKIPPED_DUPLICATE"},
+                    },
+                    {
+                        "ruleId": "fid-2",
+                        "message": {"text": "XSS"},
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {
+                                        "uri": "src/web/app.py"
+                                    }
+                                }
+                            }
+                        ],
+                        "properties": {"finding_id": "fid-2", "status": "FIXED"},
+                    },
+                ],
+            }
+        ],
+    }
+
+    with open(sarif_path, "w", encoding="utf-8") as f:
+      json.dump(raw_sarif, f)
+
+    # Sanitize for Nightly scan (is_pr_scan=False)
+    _sanitize_sarif_file(sarif_path, repo_dir, skipped_finding_ids={"fid-1"}, is_pr_scan=False)
+
+    with open(sarif_path, "r", encoding="utf-8") as f:
+      sanitized = json.load(f)
+
+    results = sanitized["runs"][0]["results"]
+    # Path should be relative
+    self.assertEqual(results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "src/db/user.py")
+    # Suppressions should be present for fid-1
+    self.assertIn("suppressions", results[0])
+    self.assertEqual(results[0]["suppressions"][0]["status"], "underReview")
+    # No suppressions for fid-2
+    self.assertNotIn("suppressions", results[1])
+
+  @patch("codemender_agent.runners.aggregate.run_command")
+  @patch("codemender_agent.runners.aggregate.merge_db")
+  @patch("shutil.which")
+  def test_aggregate_pipeline_github_actions_mode(
+      self,
+      mock_which,
+      mock_merge_db,
+      mock_run_cmd,
+  ):
+    """Test full aggregate pipeline execution in github_actions storage mode."""
+    mock_which.return_value = "/bin/cm"
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+    mock_run_cmd.return_value = mock_default
+
+    # Create local transit structure
+    transit_base = os.path.join(self.workspace_dir, ".codemender_transit", "base")
+    os.makedirs(transit_base, exist_ok=True)
+    with open(os.path.join(transit_base, "manifest.json"), "w") as f:
+      json.dump({"findings_count": 1, "target_sha": "def456sha"}, f)
+
+    # Create base DB in ~/.codemender
+    db_dir = os.path.join(self.workspace_dir, ".codemender")
+    os.makedirs(db_dir, exist_ok=True)
+    base_db = os.path.join(db_dir, "state.db")
+    self.create_test_db(
+        base_db,
+        [
+            {"finding_id": "fid-1", "title": "SQL Injection", "status": "DETECTED", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-2", "title": "Pre-existing XSS", "status": "PRE_EXISTING_IGNORED", "updated_at": "2026-08-01"},
+        ],
+    )
+
+    tarball_file = os.path.join(transit_base, "workspace_base.tar.gz")
+    with tarfile.open(tarball_file, "w:gz") as tar:
+      tar.add(db_dir, arcname=".codemender")
+
+    # Create worker shard in .codemender_transit/shards/worker_0/
+    shard_dir = os.path.join(self.workspace_dir, ".codemender_transit", "shards", "worker_0")
+    os.makedirs(shard_dir, exist_ok=True)
+    worker_db = os.path.join(shard_dir, "worker_0_state.db")
+    self.create_test_db(
+        worker_db,
+        [{"finding_id": "fid-1", "title": "SQL Injection", "status": "FIXED", "updated_at": "2026-08-02"}],
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "CODEMENDER_TOTAL_WORKERS": "1",
+        },
+    ):
+      run_aggregate_pipeline()
+
+    # Verify merge_db called for shard
+    mock_merge_db.assert_called()
+
+    # Verify report commands executed
+    cmd_names = [call[0][0] for call in mock_run_cmd.call_args_list]
+    html_called = any("report" in c and "html" in c for c in cmd_names)
+    sarif_called = any("report" in c and "sarif" in c for c in cmd_names)
+    self.assertTrue(html_called)
+    self.assertTrue(sarif_called)
 
 
 if __name__ == "__main__":
