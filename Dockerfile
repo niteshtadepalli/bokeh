@@ -29,6 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     build-essential \
     software-properties-common \
+    gnupg \
+    dirmngr \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
 # Install Python 3.11 and venv

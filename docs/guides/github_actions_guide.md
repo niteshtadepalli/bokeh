@@ -1,10 +1,14 @@
 # CodeMender GitHub Actions Orchestrator Guide
 
-This guide provides step-by-step instructions for onboarding repositories to **CodeMender Orchestrator** using native **GitHub Actions (GHA)** workflows.
+This guide provides step-by-step instructions for onboarding repositories to
+**CodeMender Orchestrator** using native **GitHub Actions (GHA)** workflows.
 
-CodeMender runs as a decentralized, 3-stage parallel pipeline inside containerized GitHub Actions runners, enabling automated vulnerability scanning, exploit verification, and patch synthesis with **zero external cloud storage buckets** required.
+CodeMender runs as a decentralized, 3-stage parallel pipeline inside
+containerized GitHub Actions runners, enabling automated vulnerability scanning,
+exploit verification, and patch synthesis with **zero external cloud storage
+buckets** required.
 
----
+--------------------------------------------------------------------------------
 
 ## Architecture Overview
 
@@ -59,33 +63,42 @@ CodeMender runs as a decentralized, 3-stage parallel pipeline inside containeriz
 +---------------------------------------------------------------------------------------+
 ```
 
----
+--------------------------------------------------------------------------------
 
 ## 1. Prerequisites
 
 To run CodeMender in GitHub Actions, you need:
 
-1. **Google Cloud Platform (GCP) Credentials**: Used to authenticate with Vertex AI / Gemini LLM APIs for exploit verification and patch generation.
-   - Recommended: **Workload Identity Federation (WIF)** (keyless OIDC authentication).
-   - Alternative: **Service Account Key JSON** stored as a GitHub secret.
-2. **GitHub Authentication Token**:
-   - Recommended: **GitHub App** (auto-generates 60-minute installation tokens with granular permissions).
-   - Alternative: Standard `GITHUB_TOKEN` or Personal Access Token (PAT).
+1.  **Google Cloud Platform (GCP) Credentials**: Used to authenticate with
+    Vertex AI / Gemini LLM APIs for exploit verification and patch generation.
+    -   Recommended: **Workload Identity Federation (WIF)** (keyless OIDC
+        authentication).
+    -   Alternative: **Service Account Key JSON** stored as a GitHub secret.
+2.  **GitHub Authentication Token**:
+    -   Recommended: **GitHub App** (auto-generates 60-minute installation
+        tokens with granular permissions).
+    -   Alternative: Standard `GITHUB_TOKEN` or Personal Access Token (PAT).
 
----
+--------------------------------------------------------------------------------
 
 ## 2. Setting Up GCP Workload Identity Federation (WIF)
 
-Workload Identity Federation allows GitHub Actions to securely call Google Cloud Vertex AI without managing long-lived service account key JSONs.
+Workload Identity Federation allows GitHub Actions to securely call Google Cloud
+Vertex AI without managing long-lived service account key JSONs.
 
-### Step 1: Create a Workload Identity Pool and Provider
+### Step 1: Create the Workload Identity Pool & Service Account
+
+First, set up your base GCP project variables and create the shared pool and
+service account:
 
 ```bash
-# 1. Set environment variables
+# 1. Base configuration variables
 PROJECT_ID="your-gcp-project-id"
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 POOL_NAME="github-actions-pool"
 PROVIDER_NAME="github-actions-provider"
-REPO_NAME="your-org/your-repo"
+SA_NAME="codemender-runner-sa"
+SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 # 2. Create the Workload Identity Pool
 gcloud iam workload-identity-pools create "$POOL_NAME" \
@@ -93,60 +106,136 @@ gcloud iam workload-identity-pools create "$POOL_NAME" \
     --location="global" \
     --display-name="GitHub Actions Pool"
 
-# 3. Create the OIDC Workload Identity Provider
-gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_NAME" \
-    --project="$PROJECT_ID" \
-    --location="global" \
-    --workload-identity-pool="$POOL_NAME" \
-    --display-name="GitHub Provider" \
-    --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
-    --attribute-condition="assertion.repository == '$REPO_NAME'" \
-    --issuer-uri="https://token.actions.githubusercontent.com"
-```
-
-### Step 2: Grant Permissions to the Service Account
-
-```bash
-SA_NAME="codemender-runner-sa"
-SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-
-# 1. Create the dedicated service account
+# 3. Create the dedicated service account
 gcloud iam service-accounts create "$SA_NAME" \
     --project="$PROJECT_ID" \
     --display-name="CodeMender Runner Service Account"
 
-# 2. Grant Vertex AI User role for LLM inference
+# 4. Grant Vertex AI User role for LLM inference
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="roles/aiplatform.user"
+```
 
-# 3. Allow GitHub Actions repository to impersonate the service account
+--------------------------------------------------------------------------------
+
+### Step 2: Configure Provider & IAM Binding by Scope
+
+Choose the scoping model that matches your setup:
+
+#### Scope Option A: User Scope (All Repos under a Personal GitHub Account)
+
+Allows **all repositories** owned by your personal GitHub username
+(`github.com/<username>/*`) to authenticate and share the Workload Identity
+Pool.
+
+```bash
+GITHUB_USER="your-github-username"
+
+# 1. Create OIDC Provider scoped to user account
+gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_NAME" \
+    --project="$PROJECT_ID" \
+    --location="global" \
+    --workload-identity-pool="$POOL_NAME" \
+    --display-name="GitHub User Provider" \
+    --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
+    --attribute-condition="assertion.repository_owner == '$GITHUB_USER'" \
+    --issuer-uri="https://token.actions.githubusercontent.com"
+
+# 2. Grant impersonation to all repositories owned by the user
 gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
     --project="$PROJECT_ID" \
     --role="roles/iam.workloadIdentityUser" \
-    --member="principalSet://iam.googleapis.com/projects/$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')/locations/global/workloadIdentityPools/${POOL_NAME}/attribute.repository/${REPO_NAME}"
+    --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_NAME}/attribute.repository_owner/${GITHUB_USER}"
 ```
 
----
+--------------------------------------------------------------------------------
+
+#### Scope Option B: Organization Scope (All Repos under a Company / Organization)
+
+Allows **all repositories** within a GitHub Organization (`github.com/<org>/*`)
+to authenticate with a single central Workload Identity configuration.
+
+```bash
+GITHUB_ORG="your-github-org"
+
+# 1. Create OIDC Provider scoped to the organization
+gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_NAME" \
+    --project="$PROJECT_ID" \
+    --location="global" \
+    --workload-identity-pool="$POOL_NAME" \
+    --display-name="GitHub Org Provider" \
+    --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
+    --attribute-condition="assertion.repository_owner == '$GITHUB_ORG'" \
+    --issuer-uri="https://token.actions.githubusercontent.com"
+
+# 2. Grant impersonation to all repositories in the organization
+gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+    --project="$PROJECT_ID" \
+    --role="roles/iam.workloadIdentityUser" \
+    --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_NAME}/attribute.repository_owner/${GITHUB_ORG}"
+```
+
+--------------------------------------------------------------------------------
+
+#### Scope Option C: Specific List of Repositories (1 or More Repos)
+
+Restricts access strictly to a **specific list of named repositories** (e.g.
+`your-org/repo-a`, `your-org/repo-b`), enforcing the principle of least
+privilege.
+
+```bash
+# 1. Create OIDC Provider with a repository whitelist condition
+# Example: single repo "your-org/repo-a" or multiple repos in a list
+gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_NAME" \
+    --project="$PROJECT_ID" \
+    --location="global" \
+    --workload-identity-pool="$POOL_NAME" \
+    --display-name="GitHub Specific Repos Provider" \
+    --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
+    --attribute-condition="assertion.repository in ['your-org/repo-a', 'your-org/repo-b']" \
+    --issuer-uri="https://token.actions.githubusercontent.com"
+
+# 2. Grant impersonation individually to each allowed repository
+ALLOWED_REPOS=("your-org/repo-a" "your-org/repo-b")
+
+for REPO in "${ALLOWED_REPOS[@]}"; do
+    gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+        --project="$PROJECT_ID" \
+        --role="roles/iam.workloadIdentityUser" \
+        --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_NAME}/attribute.repository/${REPO}"
+done
+```
+
+--------------------------------------------------------------------------------
 
 ## 3. GitHub App Configuration
 
-Creating a dedicated GitHub App ensures that tokens are minted with least-privilege permissions and that automated commits/PRs are attributed cleanly to the bot.
+Creating a dedicated GitHub App ensures that tokens are minted with
+least-privilege permissions and that automated commits/PRs are attributed
+cleanly to the bot.
 
 ### Permissions Required:
-- **Repository Permissions**:
-  - `Contents: Read and write` (to checkout code and push remediation branches)
-  - `Pull requests: Read and write` (to open Child PRs and post review comments)
-  - `Security events: Read and write` (to upload SARIF reports to GitHub Security Tab)
-  - `Issues: Read and write` (for review comments on Fork PRs)
+
+-   **Repository Permissions**:
+    -   `Contents: Read and write` (to checkout code and push remediation
+        branches)
+    -   `Pull requests: Read and write` (to open Child PRs and post review
+        comments)
+    -   `Code scanning alerts: Read and write` (maps to `security-events: write`
+        in workflow YAML to upload SARIF reports to GitHub Security Tab)
+    -   `Issues: Read and write` (for review comments on Fork PRs)
 
 ### Secrets to Configure in GitHub Repository:
-- `GH_APP_ID`: Application ID of your GitHub App.
-- `GH_APP_PRIVATE_KEY`: Private Key (`.pem` format) generated by the GitHub App.
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`: `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>`
-- `GCP_SERVICE_ACCOUNT`: `<SA_NAME>@<PROJECT_ID>.iam.gserviceaccount.com`
 
----
+-   `GH_APP_ID`: Application ID of your GitHub App.
+-   `GH_APP_PRIVATE_KEY`: Private Key (`.pem` format) generated by the GitHub
+    App.
+-   `GCP_WORKLOAD_IDENTITY_PROVIDER`:
+    `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>`
+-   `GCP_SERVICE_ACCOUNT`: `<SA_NAME>@<PROJECT_ID>.iam.gserviceaccount.com`
+
+--------------------------------------------------------------------------------
 
 ## 4. Example Caller Workflows
 
@@ -193,11 +282,86 @@ jobs:
       github_app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 ```
 
----
+--------------------------------------------------------------------------------
 
-## 5. Bring-Your-Own-Image (BYOI) Custom Toolchains
+## 5. Building & Publishing the Standard Runner Base Image
 
-If your repository requires specialized build tools (such as Rust, PHP, C++, custom SDKs, or database engines for unit test validation), you can create a custom runner image that inherits from the standard CodeMender base runner.
+The CodeMender runner base image (`ghcr.io/<org>/codemender-runner:latest`)
+contains the pre-baked standard LTS language runtimes (Python 3.11, Node.js 20
+LTS, Go 1.22+, OpenJDK 17), build essentials (`gcc`, `g++`, `make`, `git`,
+`curl`, `fuser`, `unzip`), the `cm` Go binary in `/usr/local/bin/cm`, and the
+isolated orchestrator Python virtual environment in `/opt/codemender/venv`.
+
+You can build and publish this base image to GitHub Container Registry (GHCR)
+using either the automated GitHub Actions workflow or locally via the Docker
+CLI.
+
+--------------------------------------------------------------------------------
+
+### Method A: Automated CI Workflow (Recommended)
+
+The repository includes a ready-to-use GitHub Actions workflow at
+`.github/workflows/build_runner_image.yml` that builds and publishes the image
+automatically.
+
+1.  **Automatic Build**: The workflow runs automatically whenever `Dockerfile`,
+    `codemender_agent/**`, or `requirements.txt` are pushed to `main`.
+2.  **Manual Dispatch**:
+    -   Go to your repository on GitHub $\rightarrow$ **Actions** tab.
+    -   Select **Build & Publish CodeMender Runner Image** in the left sidebar.
+    -   Click **Run workflow** (optionally specify a `cm_version` tag, e.g.
+        `stable`).
+    -   The workflow will build and publish
+        `ghcr.io/<your-org-or-user>/codemender-runner:latest`.
+
+--------------------------------------------------------------------------------
+
+### Method B: Manual Local Build & Push via Docker CLI
+
+If you want to build and push the base image manually from your terminal:
+
+```bash
+# 1. Download the CodeMender Go CLI binary into the repository root
+URL="https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
+curl -fsSL -o cm-linux-amd64.zip "$URL"
+unzip -q -o cm-linux-amd64.zip cm
+chmod +x cm
+
+# 2. Log in to GitHub Container Registry (GHCR)
+# Create a Personal Access Token (classic) with 'write:packages' scope
+echo "$GITHUB_PAT" | docker login ghcr.io -u "your-github-username" --password-stdin
+
+# 3. Build and tag the base image
+IMAGE_NAME="ghcr.io/your-org-or-username/codemender-runner:latest"
+docker build -t "$IMAGE_NAME" .
+
+# 4. Push the image to GHCR
+docker push "$IMAGE_NAME"
+```
+
+--------------------------------------------------------------------------------
+
+### Step 3: Configure Package Visibility in GHCR ⚠️ *(Important)*
+
+By default, newly published packages in GHCR may be private. To allow GitHub
+Actions workflows in your repositories to pull the runner image:
+
+1.  Go to your GitHub profile or organization page $\rightarrow$ click the
+    **Packages** tab.
+2.  Select the **`codemender-runner`** package.
+3.  Click **Package settings** (in the right sidebar).
+4.  Scroll down to **Danger Zone** $\rightarrow$ **Change package visibility**:
+    -   Set to **Public** (recommended for open/shared runner images), OR
+    -   Under **Manage Actions access**, grant access to the specific
+        repositories running the workflows.
+
+--------------------------------------------------------------------------------
+
+## 6. Bring-Your-Own-Image (BYOI) Custom Toolchains
+
+If your repository requires specialized build tools (such as Rust, PHP, C++,
+custom SDKs, or database engines for unit test validation), you can create a
+custom runner image that inherits from the standard CodeMender base runner.
 
 ### Step 1: Create a Custom Dockerfile
 
@@ -220,7 +384,8 @@ RUN cargo install --locked cargo-audit
 
 ### Step 2: Build and Publish Image to GHCR
 
-Build and push your image to GitHub Container Registry (`ghcr.io/your-org/my-custom-runner:latest`).
+Build and push your image to GitHub Container Registry
+(`ghcr.io/your-org/my-custom-runner:latest`).
 
 ### Step 3: Pass Custom Image in Reusable Workflow
 
@@ -233,57 +398,87 @@ Build and push your image to GitHub Container Registry (`ghcr.io/your-org/my-cus
       ...
 ```
 
----
+--------------------------------------------------------------------------------
 
-## 6. Reviewing & Triaging Remediations
+## 7. Reviewing & Triaging Remediations
 
 CodeMender provides 4 integrated review surfaces:
 
 ### 1. In-PR Child Pull Requests (Internal PRs)
-When a vulnerability is discovered on an active internal Pull Request, CodeMender creates a **Child Pull Request** targeting the developer's feature branch (`pr_head_ref`).
-- **Zero Merge Collisions**: Developers review the fix in isolation.
-- **1-Click Merge**: Merging the Child PR incorporates the security patch directly into the developer's branch.
+
+When a vulnerability is discovered on an active internal Pull Request,
+CodeMender creates a **Child Pull Request** targeting the developer's feature
+branch (`pr_head_ref`).
+
+-   **Zero Merge Collisions**: Developers review the fix in isolation.
+-   **1-Click Merge**: Merging the Child PR incorporates the security patch
+    directly into the developer's branch.
 
 ### 2. Fork Pull Request Review Comments
-For Pull Requests originating from repository forks, Child PR creation is skipped to respect security boundaries. CodeMender posts a Markdown review comment directly on the Fork PR containing:
-- Exploit analysis and vulnerability summary.
-- Unified patch diff.
-- One-line copyable local `git apply` instructions.
+
+For Pull Requests originating from repository forks, Child PR creation is
+skipped to respect security boundaries. CodeMender posts a Markdown review
+comment directly on the Fork PR containing:
+
+-   Exploit analysis and vulnerability summary.
+-   Unified patch diff.
+-   One-line copyable local `git apply` instructions.
 
 ### 3. GitHub Actions Step Summary (`$GITHUB_STEP_SUMMARY`)
-Every CI run renders a Markdown summary dashboard directly in the GitHub Actions run overview, showing:
-- Remediation Overview (Total Discovered, Fixed, Verified, Pre-Existing Ignored, Skipped Duplicates).
-- Discovered Findings & Status Table.
-- LLM Token Usage Summary.
+
+Every CI run renders a Markdown summary dashboard directly in the GitHub Actions
+run overview, showing:
+
+-   Remediation Overview (Total Discovered, Fixed, Verified, Pre-Existing
+    Ignored, Skipped Duplicates).
+-   Discovered Findings & Status Table.
+-   LLM Token Usage Summary.
 
 ### 4. GitHub Security Tab (SARIF Integration)
-- **Nightly Scans on `main`**: All findings (including existing remediations marked `SKIPPED_DUPLICATE`) are published to SARIF with `underReview` suppression metadata, keeping the repository Security Tab alert inventory accurate without prematurely closing open alerts.
-- **PR Scans**: Untouched legacy tech debt (`PRE_EXISTING_IGNORED`) is excluded from PR SARIF uploads to ensure developer PR checks remain focused strictly on new changes ("Clean as You Code").
 
----
+-   **Nightly Scans on `main`**: All findings (including existing remediations
+    marked `SKIPPED_DUPLICATE`) are published to SARIF with `underReview`
+    suppression metadata, keeping the repository Security Tab alert inventory
+    accurate without prematurely closing open alerts.
+-   **PR Scans**: Untouched legacy tech debt (`PRE_EXISTING_IGNORED`) is
+    excluded from PR SARIF uploads to ensure developer PR checks remain focused
+    strictly on new changes ("Clean as You Code").
 
-## 7. Configuration Reference Table
+--------------------------------------------------------------------------------
+
+## 8. Configuration Reference Table
 
 ### Workflow Inputs (`with:`)
 
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `runner_image` | `string` | `ghcr.io/<org>/codemender-runner:latest` | Container image for runner execution. |
-| `runner_type` | `string` | `ubuntu-latest` | GitHub Actions runner label. |
-| `scan_target` | `string` | `.` | Target directory or semicolon-separated paths to scan. |
-| `build_command` | `string` | `""` | Custom build/test command for verification. |
-| `max_tasks` | `number` | `4` (PR) / `10` (Nightly) | Maximum parallel worker tasks in dynamic matrix. |
-| `intermediate_artifact_retention_days` | `number` | `3` | Retention period in days for base state & shard artifacts. |
-| `report_artifact_retention_days` | `number` | `90` | Retention period in days for final HTML/JSON reports. |
-| `upload_sarif` | `boolean` | `true` | Whether to upload `report.sarif` to GitHub Security Tab. |
+Parameter                              | Type      | Default                                  | Description
+:------------------------------------- | :-------- | :--------------------------------------- | :----------
+`runner_image`                         | `string`  | `ghcr.io/<org>/codemender-runner:latest` | Container image for runner execution.
+`runner_type`                          | `string`  | `ubuntu-latest`                          | GitHub Actions runner label.
+`scan_target`                          | `string`  | `.`                                      | Target directory or semicolon-separated paths to scan.
+`build_command`                        | `string`  | `""`                                     | Custom build/test command for verification.
+`max_tasks`                            | `number`  | `4` (PR) / `10` (Nightly)                | Maximum parallel worker tasks in dynamic matrix.
+`intermediate_artifact_retention_days` | `number`  | `3`                                      | Retention period in days for base state & shard artifacts.
+`report_artifact_retention_days`       | `number`  | `90`                                     | Retention period in days for final HTML/JSON reports.
+`upload_sarif`                         | `boolean` | `true`                                   | Whether to upload `report.sarif` to GitHub Security Tab.
 
 ### Workflow Secrets (`secrets:`)
 
-| Secret Name | Required | Description |
-| :--- | :--- | :--- |
-| `gcp_workload_identity_provider` | Yes (if WIF) | Google Cloud Workload Identity Provider resource URI. |
-| `gcp_service_account` | Yes (if WIF) | Google Cloud Service Account email for impersonation. |
-| `gcp_sa_key` | Optional | Direct Service Account JSON key (alternative to WIF). |
-| `github_app_id` | Recommended | GitHub App ID for token generation. |
-| `github_app_private_key` | Recommended | GitHub App Private Key (`.pem`) for token generation. |
-| `github_token` | Optional | Fallback GitHub Token / PAT (if GitHub App not configured). |
+| Secret Name                      | Required     | Description                |
+| :------------------------------- | :----------- | :------------------------- |
+| `gcp_workload_identity_provider` | Yes (if WIF) | Google Cloud Workload      |
+:                                  :              : Identity Provider resource :
+:                                  :              : URI.                       :
+| `gcp_service_account`            | Yes (if WIF) | Google Cloud Service       |
+:                                  :              : Account email for          :
+:                                  :              : impersonation.             :
+| `gcp_sa_key`                     | Optional     | Direct Service Account     |
+:                                  :              : JSON key (alternative to   :
+:                                  :              : WIF).                      :
+| `github_app_id`                  | Recommended  | GitHub App ID for token    |
+:                                  :              : generation.                :
+| `github_app_private_key`         | Recommended  | GitHub App Private Key     |
+:                                  :              : (`.pem`) for token         :
+:                                  :              : generation.                :
+| `github_token`                   | Optional     | Fallback GitHub Token /    |
+:                                  :              : PAT (if GitHub App not     :
+:                                  :              : configured).               :
