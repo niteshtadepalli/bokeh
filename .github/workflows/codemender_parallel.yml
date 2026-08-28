@@ -63,6 +63,11 @@ on:
         required: false
         default: ''
         type: string
+      skip_exploit_verification:
+        description: 'Skip dynamic exploit verification during verification stage (cm verify --skip-exploit-verification)'
+        required: false
+        default: false
+        type: boolean
       sandbox_enabled:
         description: 'Enable cm sandbox isolation with container capabilities'
         required: false
@@ -254,6 +259,7 @@ jobs:
           CODEMENDER_MODEL: ${{ inputs.model }}
           CODEMENDER_VERIFY_MODEL: ${{ inputs.verify_model }}
           CODEMENDER_FIX_MODEL: ${{ inputs.fix_model }}
+          CODEMENDER_SKIP_EXPLOIT_VERIFICATION: ${{ inputs.skip_exploit_verification }}
           CODEMENDER_SANDBOX_ENABLED: ${{ inputs.sandbox_enabled }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
           GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git

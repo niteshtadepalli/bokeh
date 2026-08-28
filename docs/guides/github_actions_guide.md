@@ -646,11 +646,6 @@ jobs:
 
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
 
-    # Environment variables passed to CodeMender stages
-    env:
-      # Optional: set to 'true' to skip dynamic exploit verification in Stage 2
-      CODEMENDER_SKIP_EXPLOIT_VERIFICATION: ${{ inputs.skip_exploit_verification || 'false' }}
-
     with:
       # =======================================================================
       # 1. RUNNER & INFRASTRUCTURE CONFIGURATION (OPTIONAL)
@@ -674,6 +669,10 @@ jobs:
       # ⚠️ Fallback Default ('npm test'): Set your repo's build/test command here so it runs on PR scans!
       # Examples: 'npm test', 'pytest', 'mvn test', 'go test ./...', 'cargo test'
       build_command: ${{ inputs.build_command || 'npm test' }}
+
+      # Optional: Skip dynamic exploit verification during Stage 2 (cm verify --skip-exploit-verification).
+      # ⚠️ Fallback Default (false): Generates & verifies PoC exploits dynamically before synthesis.
+      skip_exploit_verification: ${{ inputs.skip_exploit_verification || false }}
 
       # =======================================================================
       # 3. PARALLELISM & CONCURRENCY
@@ -962,6 +961,7 @@ run overview, showing:
 | `find_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 1 vulnerability discovery (`cm find`). |
 | `verify_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 2 exploit verification (`cm verify`). |
 | `fix_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 2 patch synthesis (`cm fix`). |
+| `skip_exploit_verification` | `boolean` | `false` | When `true`, skips dynamic exploit verification (`cm verify --skip-exploit-verification`) and generates patches directly. |
 
 --------------------------------------------------------------------------------
 
