@@ -237,31 +237,156 @@ cleanly to the bot.
 
 --------------------------------------------------------------------------------
 
-## 4. Example Caller Workflows
+## 4. Enabling CodeMender in Any Target Repository
+
+To enable CodeMender security scanning and automated remediation on any target repository (e.g. `your-org/backend-service` or `username/juice-shop-local`), follow this 4-step onboarding checklist.
+
+### Understanding the Containerized Runner Model
+
+CodeMender runs as a containerized pipeline inside GitHub Actions. You do not need to install tools, runtimes, or dependencies directly on host runner machines:
+- The reusable workflow automatically executes inside the pre-built CodeMender base runner image (`ghcr.io/ilbzzz/codemender-runner:latest` or your organization's runner).
+- The container image contains pre-baked multi-language toolchains (Python 3.11, Node.js 20 LTS, Java 17, Go 1.22+), build essentials (`gcc`, `make`, `curl`, `git`), and the `cm` Go binary in `/usr/local/bin/cm`.
+- Target repositories only need to configure authentication secrets and add a caller workflow file (`.github/workflows/codemender.yml`).
+
+---
+
+### Step 1: Install the GitHub App on the Target Repository
+
+1. Navigate to your GitHub App settings or installation dashboard:
+   - **Personal Account**: `https://github.com/settings/apps/<your-app-name>/installations`
+   - **Organization**: `https://github.com/organizations/<your-org>/settings/apps/<your-app-name>/installations`
+2. Click **Configure** next to the installation entry.
+3. Under **Repository access**:
+   - Select **All repositories** (recommended for org-wide coverage), OR
+   - Select **Only select repositories** and pick your target repository (e.g. `juice-shop-local`).
+4. Click **Save**.
+
+> [!NOTE]
+> Installing the GitHub App grants CodeMender temporary, least-privilege tokens to checkout code, push remediation branches (`codemender/fix-...`), open Child PRs, and upload SARIF security alerts.
+
+---
+
+### Step 2: Configure Actions Secrets
+
+Add the required credentials so the runner can authenticate with GCP Vertex AI (Gemini LLM APIs) and GitHub:
+
+#### Option A: Organization-Level Secrets (Recommended for Organizations)
+If you manage a GitHub Organization, configure these secrets once at **Organization Settings $\rightarrow$ Secrets and variables $\rightarrow$ Actions**. All repositories will inherit them automatically:
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`
+- `GCP_SERVICE_ACCOUNT`
+- `GH_APP_ID`
+- `GH_APP_PRIVATE_KEY`
+
+#### Option B: Repository-Level Secrets (Personal Accounts or Individual Repos)
+In your target repository:
+1. Go to **Settings $\rightarrow$ Secrets and variables $\rightarrow$ Actions**.
+2. Click **New repository secret** and add the following 4 secrets:
+   - `GCP_WORKLOAD_IDENTITY_PROVIDER`: e.g. `projects/123456789/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider`
+   - `GCP_SERVICE_ACCOUNT`: e.g. `codemender-runner-sa@your-gcp-project.iam.gserviceaccount.com`
+   - `GH_APP_ID`: Application ID of your GitHub App
+   - `GH_APP_PRIVATE_KEY`: Complete PEM content of the private key (`-----BEGIN RSA PRIVATE KEY...`)
+
+> [!IMPORTANT]
+> **Verify GCP WIF Scoping**: Ensure the target repository is allowed by your GCP Workload Identity Provider attribute condition:
+> - If configured with **User Scope** (`assertion.repository_owner == '<user>'`) or **Org Scope** (`assertion.repository_owner == '<org>'`), all repositories owned by that user/org are authenticated automatically.
+> - If configured with **Specific Repositories Scope** (Section 2, Option C), add the new repository to the provider's allowed repository list and IAM policy bindings.
+
+---
+
+### Step 3: Grant GHCR Package Access to Target Repository
+
+GitHub Actions runners need permission to pull the runner container image (`ghcr.io/ilbzzz/codemender-runner:latest`).
+
+#### If the Container Package is Public:
+- No package access configuration is needed. Any target repository can pull the runner image with zero setup.
+
+#### If the Container Package is Private:
+1. Go to your GitHub profile or organization $\rightarrow$ click the **Packages** tab.
+2. Select the **`codemender-runner`** package.
+3. Click **Package settings** (in the right sidebar):
+   - Personal account URL: `https://github.com/users/<username>/packages/container/codemender-runner/settings`
+   - Organization URL: `https://github.com/orgs/<org>/packages/container/codemender-runner/settings`
+4. Under **Manage Actions access**:
+   - Click **Add repository** $\rightarrow$ select your target repository $\rightarrow$ select role **Read**.
+5. In your caller workflow, ensure the top-level permissions block contains `packages: read`.
+
+---
+
+### Step 4: Add Caller Workflow (`.github/workflows/codemender.yml`)
+
+Add `.github/workflows/codemender.yml` to the default branch of the target repository:
+
+#### Calling Reusable Workflow (Organizations & Public Workflow Repos)
+```yaml
+name: CodeMender Security Remediation
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly on Sunday at 2:00 AM UTC
+  pull_request:
+    types: [opened, synchronize, labeled]
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+  security-events: write
+  actions: read
+  packages: read
+
+jobs:
+  remediate:
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'security-scan'))
+    uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
+    with:
+      # Optional: custom test verification command for target repo
+      build_command: 'npm test'
+    secrets:
+      gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      github_app_id: ${{ secrets.GH_APP_ID }}
+      github_app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+```
+
+#### Calling Local Workflow (Personal Accounts with Private Repositories)
+> [!NOTE]
+> GitHub disallows cross-repository reusable workflow calls between private repositories under personal user accounts.
+> For private personal repositories, copy `codemender_parallel.yml` into `.github/workflows/` of the target repository and call it locally:
+```yaml
+    uses: ./.github/workflows/codemender_parallel.yml
+```
+
+--------------------------------------------------------------------------------
+
+## 5. Example Caller Workflows
 
 Create a workflow file in your repository at `.github/workflows/codemender.yml`.
 
-### Example 1: Nightly Scan & Labeled Pull Request Scan
+### Example 1: Standard Workflow (Scheduled & Pull Request Scans)
 
 ```yaml
 name: CodeMender Security Remediation
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # Run every night at 2:00 AM UTC
+    - cron: '0 2 * * 0'  # Weekly on Sunday at 2:00 AM UTC
   pull_request:
     types: [opened, synchronize, labeled]
     branches: [main, master]
   workflow_dispatch:
-    inputs:
-      scan_target:
-        description: 'Subdirectory path to scan'
-        required: false
-        default: '.'
-      max_tasks:
-        description: 'Maximum parallel worker tasks'
-        required: false
-        default: '10'
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+  security-events: write
+  actions: read
+  packages: read
 
 jobs:
   remediate:
@@ -270,11 +395,7 @@ jobs:
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'security-scan'))
-    uses: your-org/codemender-workflows/.github/workflows/codemender_parallel.yml@v1
-    with:
-      scan_target: ${{ inputs.scan_target || '.' }}
-      max_tasks: ${{ github.event_name == 'pull_request' && 4 || 10 }}
-      upload_sarif: true
+    uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
     secrets:
       gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
@@ -284,7 +405,117 @@ jobs:
 
 --------------------------------------------------------------------------------
 
-## 5. Building & Publishing the Standard Runner Base Image
+### Example 2: Custom Configuration with All Optional Flags Configured
+
+```yaml
+name: CodeMender Security Remediation (Custom Flags)
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'
+  pull_request:
+    types: [opened, synchronize, labeled]
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      scan_target:
+        description: 'Target subdirectory to scan'
+        required: false
+        default: 'src/backend'
+        type: string
+      build_command:
+        description: 'Custom build & test command for verification'
+        required: false
+        default: 'npm test'
+        type: string
+      max_tasks:
+        description: 'Maximum parallel worker tasks'
+        required: false
+        default: '6'
+        type: string
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+  security-events: write
+  actions: read
+  packages: read
+
+jobs:
+  remediate:
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'security-scan'))
+    uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
+    with:
+      # Container image for runner execution (Default: ghcr.io/<org>/codemender-runner:latest)
+      runner_image: ghcr.io/ilbzzz/codemender-runner:latest
+
+      # Runner machine label (Default: ubuntu-latest)
+      runner_type: ubuntu-latest
+
+      # Target directory or semicolon-separated paths to scan (Default: '.')
+      scan_target: ${{ inputs.scan_target || 'src/backend' }}
+
+      # Custom build/test verification command executed before opening PRs (Default: '')
+      build_command: ${{ inputs.build_command || 'npm test' }}
+
+      # Maximum parallel worker tasks in Stage 2 (Default: 10 for Nightly, 4 for PR)
+      max_tasks: ${{ inputs.max_tasks && fromJson(inputs.max_tasks) || 6 }}
+
+      # Upload SARIF report to GitHub Security Tab (Default: true)
+      upload_sarif: true
+
+      # Retention period in days for intermediate base & shard artifacts (Default: 3)
+      intermediate_artifact_retention_days: 3
+
+      # Retention period in days for final HTML/JSON triage reports (Default: 90)
+      report_artifact_retention_days: 90
+    secrets:
+      gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      github_app_id: ${{ secrets.GH_APP_ID }}
+      github_app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+```
+
+--------------------------------------------------------------------------------
+
+### Manually Triggering On-Demand Scans
+
+Once `.github/workflows/codemender.yml` is committed to your repository's
+default branch (`main` or `master`), you can manually trigger security scans at
+any time.
+
+#### Option A: Via GitHub Web UI
+
+1.  Go to your target repository on GitHub.
+2.  Click the **Actions** tab.
+3.  In the left sidebar under *Workflows*, select **CodeMender Security
+    Remediation**.
+4.  Click the **Run workflow** dropdown on the right.
+5.  *(Optional)* Configure run parameters:
+    -   **Use workflow from**: Select the branch to scan (e.g. `main` or a
+        feature branch).
+    -   **scan_target**: Subdirectory path to scan (default: `.` for entire
+        repository).
+    -   **max_tasks**: Maximum parallel worker tasks (default: `10`).
+6.  Click the green **Run workflow** button.
+
+#### Option B: Via GitHub CLI (`gh`)
+
+```bash
+# Trigger scan on the default branch
+gh workflow run codemender.yml
+
+# Trigger scan on a specific branch with custom inputs
+gh workflow run codemender.yml --ref main -f scan_target="." -f max_tasks="10"
+```
+
+--------------------------------------------------------------------------------
+
+## 6. Building & Publishing the Standard Runner Base Image
 
 The CodeMender runner base image (`ghcr.io/<org>/codemender-runner:latest`)
 contains the pre-baked standard LTS language runtimes (Python 3.11, Node.js 20
@@ -357,7 +588,7 @@ Actions workflows in your repositories to pull the runner image:
 
 --------------------------------------------------------------------------------
 
-## 6. Bring-Your-Own-Image (BYOI) Custom Toolchains
+## 7. Bring-Your-Own-Image (BYOI) Custom Toolchains
 
 If your repository requires specialized build tools (such as Rust, PHP, C++,
 custom SDKs, or database engines for unit test validation), you can create a
@@ -400,7 +631,7 @@ Build and push your image to GitHub Container Registry
 
 --------------------------------------------------------------------------------
 
-## 7. Reviewing & Triaging Remediations
+## 8. Reviewing & Triaging Remediations
 
 CodeMender provides 4 integrated review surfaces:
 
@@ -446,7 +677,7 @@ run overview, showing:
 
 --------------------------------------------------------------------------------
 
-## 8. Configuration Reference Table
+## 9. Configuration Reference Table
 
 ### Workflow Inputs (`with:`)
 
@@ -479,6 +710,35 @@ Parameter                              | Type      | Default                    
 | `github_app_private_key`         | Recommended  | GitHub App Private Key     |
 :                                  :              : (`.pem`) for token         :
 :                                  :              : generation.                :
-| `github_token`                   | Optional     | Fallback GitHub Token /    |
+| `custom_github_token`            | Optional     | Fallback GitHub Token /    |
 :                                  :              : PAT (if GitHub App not     :
 :                                  :              : configured).               :
+
+### Advanced AI Model & Execution Flags (`env:`)
+
+| Environment Variable                   | Default          | Description      |
+| :------------------------------------- | :--------------- | :--------------- |
+| `CODEMENDER_MODEL`                     | `gemini-1.5-pro` | Base Gemini LLM  |
+:                                        :                  : used across all  :
+:                                        :                  : discovery,       :
+:                                        :                  : verification,    :
+:                                        :                  : and fix stages.  :
+| `CODEMENDER_FIND_MODEL`                | *(inherits       | Dedicated model  |
+:                                        : base)*           : for Stage 1      :
+:                                        :                  : vulnerability    :
+:                                        :                  : discovery.       :
+| `CODEMENDER_VERIFY_MODEL`              | *(inherits       | Dedicated model  |
+:                                        : base)*           : for Stage 2      :
+:                                        :                  : exploit PoC      :
+:                                        :                  : generation and   :
+:                                        :                  : verification.    :
+| `CODEMENDER_FIX_MODEL`                 | *(inherits       | Dedicated model  |
+:                                        : base)*           : for Stage 2 code :
+:                                        :                  : remediation.     :
+| `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | `false`          | When set to      |
+:                                        :                  : `true`, skips    :
+:                                        :                  : writing dynamic  :
+:                                        :                  : exploit PoCs and :
+:                                        :                  : goes directly to :
+:                                        :                  : patch            :
+:                                        :                  : generation.      :

@@ -6,7 +6,7 @@ on:
       runner_image:
         description: 'Universal runner image or custom Bring-Your-Own-Image (BYOI)'
         required: false
-        default: 'ghcr.io/google/codemender-runner:latest'
+        default: 'ghcr.io/ilbzzz/codemender-runner:latest'
         type: string
       runner_type:
         description: 'Runner label for job execution'
@@ -43,6 +43,26 @@ on:
         required: false
         default: true
         type: boolean
+      model:
+        description: 'Default Gemini model across all stages'
+        required: false
+        default: ''
+        type: string
+      find_model:
+        description: 'Dedicated model for Stage 1 vulnerability discovery (cm find)'
+        required: false
+        default: ''
+        type: string
+      verify_model:
+        description: 'Dedicated model for Stage 2 exploit verification (cm verify)'
+        required: false
+        default: ''
+        type: string
+      fix_model:
+        description: 'Dedicated model for Stage 2 patch synthesis (cm fix)'
+        required: false
+        default: ''
+        type: string
     secrets:
       gcp_workload_identity_provider:
         description: 'GCP Workload Identity Provider resource name'
@@ -59,8 +79,8 @@ on:
       github_app_private_key:
         description: 'GitHub App private key (PEM format)'
         required: false
-      github_token:
-        description: 'Optional GitHub Token/PAT'
+      custom_github_token:
+        description: 'Optional custom GitHub Personal Access Token (PAT)'
         required: false
 
 permissions:
@@ -69,6 +89,13 @@ permissions:
   pull-requests: write
   security-events: write
   actions: read
+  packages: read
+
+env:
+  GH_APP_ID: ${{ secrets.github_app_id }}
+  GH_APP_KEY: ${{ secrets.github_app_private_key }}
+  WIF_PROVIDER: ${{ secrets.gcp_workload_identity_provider }}
+  GCP_SA_KEY: ${{ secrets.gcp_sa_key }}
 
 jobs:
   scan:
@@ -77,6 +104,11 @@ jobs:
     timeout-minutes: 55
     container:
       image: ${{ inputs.runner_image }}
+    env:
+      GH_APP_ID: ${{ secrets.github_app_id }}
+      GH_APP_KEY: ${{ secrets.github_app_private_key }}
+      WIF_PROVIDER: ${{ secrets.gcp_workload_identity_provider }}
+      GCP_SA_KEY: ${{ secrets.gcp_sa_key }}
     outputs:
       matrix: ${{ steps.run-scan.outputs.matrix }}
       findings_count: ${{ steps.run-scan.outputs.findings_count }}
@@ -84,22 +116,6 @@ jobs:
       scan_id: ${{ steps.run-scan.outputs.scan_id }}
 
     steps:
-      - name: Mint GitHub App Token
-        id: app-token
-        if: ${{ secrets.github_app_id != '' && secrets.github_app_private_key != '' }}
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.github_app_id }}
-          private-key: ${{ secrets.github_app_private_key }}
-
-      - name: Authenticate to Google Cloud
-        if: ${{ secrets.gcp_workload_identity_provider != '' || secrets.gcp_sa_key != '' }}
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
-          service_account: ${{ secrets.gcp_service_account }}
-          credentials_json: ${{ secrets.gcp_sa_key }}
-
       - name: Configure Git Safe Directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
@@ -108,6 +124,22 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+
+      - name: Mint GitHub App Token
+        id: app-token
+        if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+
+      - name: Authenticate to Google Cloud
+        if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
+          service_account: ${{ secrets.gcp_service_account }}
+          credentials_json: ${{ secrets.gcp_sa_key }}
 
       - name: Execute Scan Stage
         id: run-scan
@@ -122,7 +154,9 @@ jobs:
           CODEMENDER_SCAN_TARGET: ${{ inputs.scan_target }}
           CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
           CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.github_token || secrets.GITHUB_TOKEN || github.token }}
+          CODEMENDER_MODEL: ${{ inputs.model }}
+          CODEMENDER_FIND_MODEL: ${{ inputs.find_model }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
           GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
           WORKSPACE_DIR: ${{ github.workspace }}
         run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
@@ -149,24 +183,13 @@ jobs:
     timeout-minutes: 55
     container:
       image: ${{ inputs.runner_image }}
+    env:
+      GH_APP_ID: ${{ secrets.github_app_id }}
+      GH_APP_KEY: ${{ secrets.github_app_private_key }}
+      WIF_PROVIDER: ${{ secrets.gcp_workload_identity_provider }}
+      GCP_SA_KEY: ${{ secrets.gcp_sa_key }}
 
     steps:
-      - name: Mint GitHub App Token
-        id: app-token
-        if: ${{ secrets.github_app_id != '' && secrets.github_app_private_key != '' }}
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.github_app_id }}
-          private-key: ${{ secrets.github_app_private_key }}
-
-      - name: Authenticate to Google Cloud
-        if: ${{ secrets.gcp_workload_identity_provider != '' || secrets.gcp_sa_key != '' }}
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
-          service_account: ${{ secrets.gcp_service_account }}
-          credentials_json: ${{ secrets.gcp_sa_key }}
-
       - name: Configure Git Safe Directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
@@ -175,6 +198,22 @@ jobs:
         with:
           ref: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
+
+      - name: Mint GitHub App Token
+        id: app-token
+        if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+
+      - name: Authenticate to Google Cloud
+        if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
+          service_account: ${{ secrets.gcp_service_account }}
+          credentials_json: ${{ secrets.gcp_sa_key }}
 
       - name: Download Base State Artifact
         uses: actions/download-artifact@v4
@@ -194,7 +233,10 @@ jobs:
           CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
           CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
           CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.github_token || secrets.GITHUB_TOKEN || github.token }}
+          CODEMENDER_MODEL: ${{ inputs.model }}
+          CODEMENDER_VERIFY_MODEL: ${{ inputs.verify_model }}
+          CODEMENDER_FIX_MODEL: ${{ inputs.fix_model }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
           GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
           WORKSPACE_DIR: ${{ github.workspace }}
         run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
@@ -216,24 +258,13 @@ jobs:
     timeout-minutes: 30
     container:
       image: ${{ inputs.runner_image }}
+    env:
+      GH_APP_ID: ${{ secrets.github_app_id }}
+      GH_APP_KEY: ${{ secrets.github_app_private_key }}
+      WIF_PROVIDER: ${{ secrets.gcp_workload_identity_provider }}
+      GCP_SA_KEY: ${{ secrets.gcp_sa_key }}
 
     steps:
-      - name: Mint GitHub App Token
-        id: app-token
-        if: ${{ secrets.github_app_id != '' && secrets.github_app_private_key != '' }}
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.github_app_id }}
-          private-key: ${{ secrets.github_app_private_key }}
-
-      - name: Authenticate to Google Cloud
-        if: ${{ secrets.gcp_workload_identity_provider != '' || secrets.gcp_sa_key != '' }}
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
-          service_account: ${{ secrets.gcp_service_account }}
-          credentials_json: ${{ secrets.gcp_sa_key }}
-
       - name: Configure Git Safe Directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
@@ -242,6 +273,22 @@ jobs:
         with:
           ref: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
+
+      - name: Mint GitHub App Token
+        id: app-token
+        if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+
+      - name: Authenticate to Google Cloud
+        if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
+          service_account: ${{ secrets.gcp_service_account }}
+          credentials_json: ${{ secrets.gcp_sa_key }}
 
       - name: Download Base State Artifact
         uses: actions/download-artifact@v4
@@ -268,7 +315,7 @@ jobs:
           CODEMENDER_TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
           CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
           CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.github_token || secrets.GITHUB_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
           GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
           WORKSPACE_DIR: ${{ github.workspace }}
         run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py

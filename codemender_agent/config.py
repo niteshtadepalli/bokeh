@@ -345,18 +345,7 @@ def inject_codemender_config(
         for p in config_data["project_paths"]
     ]
 
-  # 3. Read Environment Variable configurations from centralized OrchestratorConfig (Env Overrides)
-  if cfg.build_command:
-    clean_build_cmd = cfg.build_command.strip().strip("'\"")
-    logger.info(
-        "Applying env override CODEMENDER_BUILD_COMMAND: %s", clean_build_cmd
-    )
-    config_data["build"]["command"] = clean_build_cmd
-
-  if cfg.model:
-    config_data["model"] = cfg.model.strip()
-
-  # 4. Read Repository-Level config (Config-as-Code - takes precedence over defaults)
+  # 3. Read Repository-Level config (Config-as-Code - takes precedence over defaults)
   project_config = None
   for filename in [
       ".codemender.yaml",
@@ -401,6 +390,17 @@ def inject_codemender_config(
           p if os.path.isabs(p) else os.path.abspath(os.path.join(repo_dir, p))
           for p in project_config["project_paths"]
       ]
+
+  # 4. Read Environment Variable configurations from centralized OrchestratorConfig (Env Overrides take top precedence)
+  if cfg.build_command:
+    clean_build_cmd = cfg.build_command.strip().strip("'\"")
+    logger.info(
+        "Applying env override CODEMENDER_BUILD_COMMAND: %s", clean_build_cmd
+    )
+    config_data["build"]["command"] = clean_build_cmd
+
+  if cfg.model:
+    config_data["model"] = cfg.model.strip()
 
   # 5. Sandbox Configuration (Enabled by default with absolute target mounts)
   if "sandbox" not in config_data or config_data["sandbox"] is None:
