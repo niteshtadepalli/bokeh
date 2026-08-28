@@ -783,13 +783,21 @@ def _generate_and_upload_report(
     json_cmd = build_cm_command(
         cm_binary, "report", extra_flags=["-f", "json"], cli_version=cli_version
     )
-    run_command(
+    json_res = run_command(
         json_cmd,
         cwd=repo_dir,
         env=scrubbed_env,
         check=False,
     )
     local_json_path = os.path.join(codemender_home, "reports/report.json")
+    if not os.path.exists(local_json_path) and getattr(json_res, "stdout", "").strip().startswith(("[", "{")):
+      try:
+        os.makedirs(os.path.dirname(local_json_path), exist_ok=True)
+        with open(local_json_path, "w", encoding="utf-8") as f:
+          f.write(json_res.stdout.strip())
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
     if os.path.exists(local_json_path):
       for dest in [
           os.path.join(repo_dir, "report.json"),
@@ -850,14 +858,14 @@ def _generate_and_upload_report(
   sarif_cmd = build_cm_command(
       cm_binary, "report", extra_flags=["-f", "sarif"], cli_version=cli_version
   )
-  run_command(
+  sarif_res = run_command(
       sarif_cmd,
       cwd=repo_dir,
       env=scrubbed_env,
       check=False,
   )
 
-  # 6. Locate generated SARIF artifact
+  # 6. Locate generated SARIF artifact (checking disk paths and stdout fallback)
   sarif_candidates = [
       os.path.join(codemender_home, "reports/report.sarif"),
       os.path.join(repo_dir, "reports/report.sarif"),
@@ -868,6 +876,17 @@ def _generate_and_upload_report(
     if os.path.exists(sc):
       found_sarif = sc
       break
+
+  # If cm report printed SARIF to stdout instead of disk, write fallback to reports/report.sarif
+  if not found_sarif and getattr(sarif_res, "stdout", "").strip().startswith("{"):
+    fallback_sarif = os.path.join(codemender_home, "reports/report.sarif")
+    try:
+      os.makedirs(os.path.dirname(fallback_sarif), exist_ok=True)
+      with open(fallback_sarif, "w", encoding="utf-8") as f:
+        f.write(sarif_res.stdout.strip())
+      found_sarif = fallback_sarif
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to write SARIF stdout fallback to disk: %s", e)
 
   # 7. Sanitize SARIF paths and copy to standard upload locations
   if found_sarif:

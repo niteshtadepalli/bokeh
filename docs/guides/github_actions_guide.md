@@ -10,62 +10,242 @@ buckets** required.
 
 --------------------------------------------------------------------------------
 
-## Architecture Overview
+## 1. Architecture Overview
 
-```
-+---------------------------------------------------------------------------------------+
-|                                 TRIGGER INITIATION                                    |
-|   1. Scheduled Nightly (cron on default branch)                                       |
-|   2. Manual On-Demand (workflow_dispatch)                                             |
-|   3. Labeled Pull Request (pull_request event with 'security-scan' label)             |
-+---------------------------------------------------------------------------------------+
-                                           │
-                                           ▼
-+---------------------------------------------------------------------------------------+
-|                              STAGE 1: SCAN & PARTITION                                |
-|   Job: scan (Timeout: 55m)                                                            |
-|   - Full repository vulnerability discovery via 'cm find .'                           |
-|   - Differential PR filtering (untouched legacy debt marked PRE_EXISTING_IGNORED)      |
-|   - Universal deduplication against open PRs and existing branches (SKIPPED_DUPLICATE)|
-|   - Partitions findings across N dynamic worker buckets                               |
-|   - Archives base state and uploads artifact 'codemender-base-state'                  |
-|   - Emits GITHUB_OUTPUT: matrix=[0..N-1], findings_count=<count>                      |
-+---------------------------------------------------------------------------------------+
-                                           │
-                                           ▼ (if findings_count > 0)
-+---------------------------------------------------------------------------------------+
-|                            STAGE 2: PARALLEL WORKERS (Matrix)                         |
-|   Job: worker (Timeout: 55m, fail-fast: false)                                        |
-|   - Downloads base state artifact and checks out working base ref                     |
-|   - Targeted live deduplication check (O(1) git ls-remote + PR lookup)                |
-|   - Exploit verification ('cm verify') & patch synthesis ('cm fix')                   |
-|   - Surgical Git staging querying SQLite 'patches.edited_files' with 3-tier fallback  |
-|   - Remediation routing:                                                              |
-|       * Nightly/Manual: Pushes 'codemender/fix-...' & opens PR to main                |
-|       * Internal PR: Pushes 'codemender/fix-...' & opens Child PR to developer branch|
-|       * Fork PR: Posts review comment on Fork PR with diff and 'git apply' block      |
-|   - Uploads mutated shard artifact 'worker-shard-<index>'                             |
-+---------------------------------------------------------------------------------------+
-                                           │
-                                           ▼ (always() after scan succeeds)
-+---------------------------------------------------------------------------------------+
-|                              STAGE 3: AGGREGATE & REPORTING                           |
-|   Job: aggregate (Timeout: 30m)                                                       |
-|   - Downloads all worker database shards and merges via clean UPDATE queries          |
-|   - Scoped reporting:                                                                 |
-|       * Nightly scans: Retains SKIPPED_DUPLICATE with SARIF suppressions (underReview)|
-|       * PR scans: Purges PRE_EXISTING_IGNORED for clean "Clean as You Code" summary   |
-|   - Generates 4-tier reporting surfaces:                                              |
-|       1. Uploads SARIF to GitHub Security Tab ('github/codeql-action/upload-sarif')   |
-|       2. Renders Markdown dashboard to $GITHUB_STEP_SUMMARY (1000 KiB guardrail)      |
-|       3. In-PR Child PR descriptions or Fork PR review comments                       |
-|       4. Uploads downloadable HTML & JSON reports ('codemender-report-...')           |
-+---------------------------------------------------------------------------------------+
+CodeMender Orchestrator in GitHub Actions operates as a decentralized, 3-stage
+parallel scanning and automated remediation pipeline running completely within
+containerized GitHub Actions runners without requiring external cloud storage
+buckets:
+
+*   **Universal Container Runner (`codemender-runner`)**: Pre-baked container
+    image (`ghcr.io/ilbzzz/codemender-runner:latest` or custom BYOI) containing
+    multi-language toolchains (Node.js, Python, Java, Go), build essentials, and
+    the `cm` binary in `/usr/local/bin/cm`.
+*   **Stage 1: Scan & Partitioning Job (`scan`)**: Ephemeral container job that
+    discovers vulnerabilities (`cm find .`), executes differential PR filtering,
+    deduplicates against existing branches, slices findings into $N$ worker
+    partitions, and uploads the base workspace state.
+*   **Stage 2: Parallel Remediation Matrix (`worker`)**: Dynamic parallel matrix
+    of container jobs that download the base state, verify exploitability (`cm
+    verify`), synthesize patches (`cm fix`), stage edits surgically, push fix
+    branches, and open Pull Requests.
+*   **Stage 3: Aggregation & Reporting (`aggregate`)**: Merges all worker shard
+    databases into a single unified `state.db`, purges ignored findings for PRs,
+    generates SARIF reports for the GitHub Security Tab, renders Step Summaries,
+    and uploads downloadable HTML/JSON triage reports.
+*   **GitHub Transit Artifacts Storage**: Native GitHub Actions artifact storage
+    used to pass intermediate states (`codemender-base-state`, `worker-shard-*`)
+    and final reports between stages with zero external infrastructure costs.
+*   **Authentication & Credential Minting**:
+    *   **Google Cloud Vertex AI**: Keyless OIDC authentication via Workload
+        Identity Federation (WIF) for Gemini LLM reasoning.
+    *   **GitHub REST & Git**: Ephemeral 60-minute tokens minted via GitHub App
+        for secure branch creation, PR opening, and SARIF uploads.
+
+### Execution Scope: Isolated Runners vs. Transit Storage
+
+*   **Shared Transit Storage (Run Scope)**:
+    *   `codemender-base-state`: Base workspace database and partition slices
+        (retained for 3 days by default).
+    *   `worker-shard-<index>`: Individual worker database shards and token
+        metrics.
+    *   `codemender-report-html`, `codemender-report-json`: Downloadable scan
+        reports (retained for 90 days).
+*   **Isolated Workspace (Per Runner Job)**:
+    *   Each matrix task executes in its own isolated container filesystem with
+        its own checked-out repository and ephemeral environment.
+    *   The `cm` sandbox isolates child process execution (e.g. `npm test`,
+        `pytest`) using process namespaces and mount isolation.
+
+```mermaid
+graph TD
+    subgraph Triggers["Trigger Events"]
+        Cron["⏰ Scheduled Cron (Nightly)"]
+        PR["🏷️ Labeled PR ('security-scan')"]
+        Manual["▶️ Manual (workflow_dispatch)"]
+    end
+
+    subgraph Stage1["Stage 1: Scan & Partition (scan job)"]
+        Find["cm find . (Vulnerability Discovery)"]
+        DiffFilter["Differential PR Filtering"]
+        Dedup["Universal Remote Deduplication"]
+        Slice["Partition Slicing (0..N-1)"]
+    end
+
+    subgraph Transit["GitHub Actions Transit Artifacts"]
+        BaseArtifact[("📦 codemender-base-state\n(state.db + partition_*.json)")]
+        ShardArtifacts[("📦 worker-shard-*\n(worker state.db + token metrics)")]
+        ReportArtifacts[("📊 codemender-report-*\n(report.html + report.json)")]
+    end
+
+    subgraph Stage2["Stage 2: Parallel Workers (Matrix [0..N-1])"]
+        Worker0["Worker 0\n(cm verify & cm fix)"]
+        Worker1["Worker 1\n(cm verify & cm fix)"]
+        WorkerN["Worker N-1\n(cm verify & cm fix)"]
+    end
+
+    subgraph Stage3["Stage 3: Aggregate & Report (aggregate job)"]
+        Merge["Merge Shards into Unified state.db"]
+        Purge["Differential Purging (PR mode)"]
+        GenSARIF["Generate report.sarif"]
+        RenderSummary["Render $GITHUB_STEP_SUMMARY"]
+    end
+
+    subgraph AuthServices["Authentication & Cloud AI"]
+        WIF["GCP Workload Identity Federation (WIF)"]
+        VertexAI["Google Cloud Vertex AI (Gemini 1.5 Pro)"]
+        GHApp["GitHub App (60-min installation token)"]
+    end
+
+    subgraph Outputs["Reporting & Action Surfaces"]
+        GHRepo["GitHub Repo: Fix Branches & PRs / Comments"]
+        GHSecurity["GitHub Security Tab (SARIF Alerts)"]
+        Dashboard["GitHub Actions Step Summary Dashboard"]
+    end
+
+    Cron --> Stage1
+    PR --> Stage1
+    Manual --> Stage1
+
+    Find --> DiffFilter --> Dedup --> Slice
+    Slice -->|"Upload Base State"| BaseArtifact
+
+    BaseArtifact -->|"Download Base State"| Worker0
+    BaseArtifact -->|"Download Base State"| Worker1
+    BaseArtifact -->|"Download Base State"| WorkerN
+
+    Worker0 -->|"Push Branch & PR / Comment"| GHRepo
+    Worker1 -->|"Push Branch & PR / Comment"| GHRepo
+    WorkerN -->|"Push Branch & PR / Comment"| GHRepo
+
+    Worker0 -->|"Upload Shard 0"| ShardArtifacts
+    Worker1 -->|"Upload Shard 1"| ShardArtifacts
+    WorkerN -->|"Upload Shard N-1"| ShardArtifacts
+
+    ShardArtifacts -->|"Download Shards"| Merge
+    Merge --> Purge --> GenSARIF --> RenderSummary
+
+    GenSARIF -->|"Upload SARIF"| GHSecurity
+    RenderSummary -->|"Publish Markdown"| Dashboard
+    Merge -->|"Upload Reports"| ReportArtifacts
+
+    WIF -.->|"OIDC Auth"| VertexAI
+    VertexAI -.->|"LLM Reasoning"| Stage1
+    VertexAI -.->|"LLM Reasoning"| Stage2
+    GHApp -.->|"Mint Token"| Stage1
+    GHApp -.->|"Mint Token"| Stage2
+    GHApp -.->|"Mint Token"| Stage3
 ```
 
 --------------------------------------------------------------------------------
 
-## 1. Prerequisites
+## 2. Scanning Execution Modes: Scheduled Nightly vs. Pull Request Scans
+
+CodeMender provides tailored execution behaviors depending on whether the scan
+is triggered on a recurring schedule or against an active Pull Request:
+
+### Execution Modes Comparison
+
+| Feature       | Scheduled Nightly    | Internal Pull Request  | Fork Pull Request Scan |
+:               : Scan                 : Scan                   :                        :
+| :------------ | :------------------- | :--------------------- | :--------------------- |
+| **Trigger     | `schedule` (cron) /  | `pull_request`         | `pull_request`         |
+: Event**       : `workflow_dispatch`  : (`opened`,             : (`opened`,             :
+:               :                      : `synchronize`,         : `synchronize`,         :
+:               :                      : `labeled`)             : `labeled`)             :
+| **Activation  | Cron triggers on     | `security-scan` label  | `security-scan` label  |
+: Condition**   : default branch       : on PR                  : on PR                  :
+| **Target Base | Default branch       | PR Base branch (e.g.   | PR Base branch         |
+: Ref**         : (`main` / `master`)  : `main`)                :                        :
+| **Scan        | Entire repository    | Differential: PR       | Differential: PR       |
+: Scope**       : (`cm find .`)        : changed lines only     : changed lines only     :
+| **Legacy Tech | Discovered & triaged | Marked                 | Marked                 |
+: Debt**        :                      : `PRE_EXISTING_IGNORED` : `PRE_EXISTING_IGNORED` :
+:               :                      : & suppressed           : & suppressed           :
+| **Duplicate   | Marked               | Skipped if fix         | Skipped if fix         |
+: Handling**    : `SKIPPED_DUPLICATE`  : branch/PR exists       : branch/PR exists       :
+:               : (kept in SARIF as    :                        :                        :
+:               : `underReview`)       :                        :                        :
+| **Remediation | Pushes               | Pushes                 | Posts Markdown review  |
+: Action**      : `codemender/fix-...` : `codemender/fix-...` & : comment with diff on   :
+:               : & opens PR to `main` : opens Child PR to      : Fork PR                :
+:               :                      : developer branch       :                        :
+| **Reporting   | Full SARIF alert     | PR-scoped SARIF, Child | PR-scoped SARIF, PR    |
+: Output**      : inventory, HTML,     : PR, Step Summary       : Review Comment, Step   :
+:               : JSON, Step Summary   :                        : Summary                :
+
+--------------------------------------------------------------------------------
+
+### Mode A: Scheduled (Nightly) Scans
+
+Scheduled scans run on a recurring timer (e.g. weekly on Sunday or nightly at
+2:00 AM UTC) to audit the entire repository, maintain security alert
+inventories, and remediate technical debt.
+
+1.  **Triggering**:
+    *   Configured via `schedule.cron` in `.github/workflows/codemender.yml`.
+    *   Can also be triggered on-demand via `workflow_dispatch` through the
+        GitHub Web UI or `gh workflow run`.
+2.  **Full Repository Scanning & Deduplication**:
+    *   Stage 1 discovers all vulnerabilities across the entire codebase (`cm
+        find .`).
+    *   Performs universal deduplication against remote branches (`git
+        ls-remote`) and open PRs. Findings with active remediations are marked
+        `SKIPPED_DUPLICATE`.
+    *   Slices unhandled findings across dynamic worker partitions.
+3.  **Worker Remediation & Mainline PRs**:
+    *   Stage 2 workers verify findings (`cm verify`) and synthesize code
+        patches (`cm fix`).
+    *   Pushes dedicated fix branches (`codemender/fix-...`) and opens **Pull
+        Requests targeting the default branch (`main` or `master`)**.
+4.  **Final Outputs & Security Tab Inventory**:
+    *   Stage 3 aggregates all shards and uploads `report.sarif` to the GitHub
+        Security Tab.
+    *   Findings marked `SKIPPED_DUPLICATE` are tagged with `underReview`
+        suppression metadata, ensuring active security alerts remain open
+        without duplicate notifications.
+    *   Renders a complete summary dashboard to `$GITHUB_STEP_SUMMARY` and
+        uploads downloadable HTML/JSON triage reports.
+
+--------------------------------------------------------------------------------
+
+### Mode B: Pull Request Scans ("Clean as You Code")
+
+Pull Request scans ensure that no new security vulnerabilities are merged into
+the codebase, while preventing legacy repository debt from blocking developer
+pull requests.
+
+1.  **Triggering & Labeling**:
+    *   Triggered on `pull_request` events (`opened`, `synchronize`, `labeled`)
+        when the PR has the **`security-scan`** label.
+    *   **Automating in Production**: Teams automate label assignment using
+        GitHub Actions (`actions/labeler`), label bots, or workflow conditions
+        (see Section 7).
+2.  **Differential PR Scanning**:
+    *   Stage 1 parses git merge-base diff hunks (`git diff -U0
+        origin/main...HEAD`) to identify exact lines modified by the PR.
+    *   **Pre-Existing Tech Debt Suppression**: Findings located outside the PR
+        changed lines are marked `PRE_EXISTING_IGNORED` and excluded from
+        remediation. Only vulnerabilities introduced or modified by the PR are
+        assigned to workers.
+3.  **Worker Remediation Routing**:
+    *   **Internal PRs**: The worker verifies and patches the finding, pushes a
+        fix branch, and opens a **Child Pull Request targeting the developer's
+        feature branch (`pr_head_ref`)**. The developer can review the patch and
+        merge it with 1 click directly into their branch.
+    *   **Fork PRs**: For security boundaries, pushing branches to fork remotes
+        is prevented. The worker posts a comprehensive **Markdown Review
+        Comment** directly on the Fork PR with exploit analysis, unified patch
+        diff, and copyable `git apply` instructions.
+4.  **Final Outputs**:
+    *   Stage 3 purges `PRE_EXISTING_IGNORED` records so PR checks and SARIF
+        uploads reflect only new changes introduced by the pull request.
+    *   Renders a focused differential table in `$GITHUB_STEP_SUMMARY` showing
+        exact PR remediation status.
+
+--------------------------------------------------------------------------------
+
+## 3. Prerequisites
 
 To run CodeMender in GitHub Actions, you need:
 
@@ -81,7 +261,7 @@ To run CodeMender in GitHub Actions, you need:
 
 --------------------------------------------------------------------------------
 
-## 2. Setting Up GCP Workload Identity Federation (WIF)
+## 4. Setting Up GCP Workload Identity Federation (WIF)
 
 Workload Identity Federation allows GitHub Actions to securely call Google Cloud
 Vertex AI without managing long-lived service account key JSONs.
@@ -209,7 +389,7 @@ done
 
 --------------------------------------------------------------------------------
 
-## 3. GitHub App Configuration
+## 5. GitHub App Configuration
 
 Creating a dedicated GitHub App ensures that tokens are minted with
 least-privilege permissions and that automated commits/PRs are attributed
@@ -237,86 +417,127 @@ cleanly to the bot.
 
 --------------------------------------------------------------------------------
 
-## 4. Enabling CodeMender in Any Target Repository
+## 6. Enabling CodeMender in Any Target Repository
 
-To enable CodeMender security scanning and automated remediation on any target repository (e.g. `your-org/backend-service` or `username/juice-shop-local`), follow this 4-step onboarding checklist.
+To enable CodeMender security scanning and automated remediation on any target
+repository (e.g. `your-org/backend-service` or `username/juice-shop-local`),
+follow this 4-step onboarding checklist.
 
 ### Understanding the Containerized Runner Model
 
-CodeMender runs as a containerized pipeline inside GitHub Actions. You do not need to install tools, runtimes, or dependencies directly on host runner machines:
-- The reusable workflow automatically executes inside the pre-built CodeMender base runner image (`ghcr.io/ilbzzz/codemender-runner:latest` or your organization's runner).
-- The container image contains pre-baked multi-language toolchains (Python 3.11, Node.js 20 LTS, Java 17, Go 1.22+), build essentials (`gcc`, `make`, `curl`, `git`), and the `cm` Go binary in `/usr/local/bin/cm`.
-- Target repositories only need to configure authentication secrets and add a caller workflow file (`.github/workflows/codemender.yml`).
+CodeMender runs as a containerized pipeline inside GitHub Actions. You do not
+need to install tools, runtimes, or dependencies directly on host runner
+machines:
 
----
+-   The reusable workflow automatically executes inside the pre-built CodeMender
+    base runner image (`ghcr.io/ilbzzz/codemender-runner:latest` or your
+    organization's runner).
+-   The container image contains pre-baked multi-language toolchains (Python
+    3.11, Node.js 20 LTS, Java 17, Go 1.22+), build essentials (`gcc`, `make`,
+    `curl`, `git`), and the `cm` Go binary in `/usr/local/bin/cm`.
+-   Target repositories only need to configure authentication secrets and add a
+    caller workflow file (`.github/workflows/codemender.yml`).
+
+--------------------------------------------------------------------------------
 
 ### Step 1: Install the GitHub App on the Target Repository
 
-1. Navigate to your GitHub App settings or installation dashboard:
-   - **Personal Account**: `https://github.com/settings/apps/<your-app-name>/installations`
-   - **Organization**: `https://github.com/organizations/<your-org>/settings/apps/<your-app-name>/installations`
-2. Click **Configure** next to the installation entry.
-3. Under **Repository access**:
-   - Select **All repositories** (recommended for org-wide coverage), OR
-   - Select **Only select repositories** and pick your target repository (e.g. `juice-shop-local`).
-4. Click **Save**.
+1.  Navigate to your GitHub App settings or installation dashboard:
+    -   **Personal Account**:
+        `https://github.com/settings/apps/<your-app-name>/installations`
+    -   **Organization**:
+        `https://github.com/organizations/<your-org>/settings/apps/<your-app-name>/installations`
+2.  Click **Configure** next to the installation entry.
+3.  Under **Repository access**:
+    -   Select **All repositories** (recommended for org-wide coverage), OR
+    -   Select **Only select repositories** and pick your target repository
+        (e.g. `juice-shop-local`).
+4.  Click **Save**.
 
 > [!NOTE]
-> Installing the GitHub App grants CodeMender temporary, least-privilege tokens to checkout code, push remediation branches (`codemender/fix-...`), open Child PRs, and upload SARIF security alerts.
+> Installing the GitHub App grants CodeMender temporary, least-privilege
+> tokens to checkout code, push remediation branches (`codemender/fix-...`),
+> open Child PRs, and upload SARIF security alerts.
 
----
+--------------------------------------------------------------------------------
 
 ### Step 2: Configure Actions Secrets
 
-Add the required credentials so the runner can authenticate with GCP Vertex AI (Gemini LLM APIs) and GitHub:
+Add the required credentials so the runner can authenticate with GCP Vertex AI
+(Gemini LLM APIs) and GitHub:
 
 #### Option A: Organization-Level Secrets (Recommended for Organizations)
-If you manage a GitHub Organization, configure these secrets once at **Organization Settings $\rightarrow$ Secrets and variables $\rightarrow$ Actions**. All repositories will inherit them automatically:
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`
-- `GCP_SERVICE_ACCOUNT`
-- `GH_APP_ID`
-- `GH_APP_PRIVATE_KEY`
+
+If you manage a GitHub Organization, configure these secrets once at
+**Organization Settings $\rightarrow$ Secrets and variables $\rightarrow$
+Actions**. All repositories will inherit them automatically:
+
+-   `GCP_WORKLOAD_IDENTITY_PROVIDER`
+-   `GCP_SERVICE_ACCOUNT`
+-   `GH_APP_ID`
+-   `GH_APP_PRIVATE_KEY`
 
 #### Option B: Repository-Level Secrets (Personal Accounts or Individual Repos)
+
 In your target repository:
-1. Go to **Settings $\rightarrow$ Secrets and variables $\rightarrow$ Actions**.
-2. Click **New repository secret** and add the following 4 secrets:
-   - `GCP_WORKLOAD_IDENTITY_PROVIDER`: e.g. `projects/123456789/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider`
-   - `GCP_SERVICE_ACCOUNT`: e.g. `codemender-runner-sa@your-gcp-project.iam.gserviceaccount.com`
-   - `GH_APP_ID`: Application ID of your GitHub App
-   - `GH_APP_PRIVATE_KEY`: Complete PEM content of the private key (`-----BEGIN RSA PRIVATE KEY...`)
+
+1.  Go to **Settings $\rightarrow$ Secrets and variables $\rightarrow$
+    Actions**.
+2.  Click **New repository secret** and add the following 4 secrets:
+    -   `GCP_WORKLOAD_IDENTITY_PROVIDER`: e.g.
+        `projects/123456789/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider`
+    -   `GCP_SERVICE_ACCOUNT`: e.g.
+        `codemender-runner-sa@your-gcp-project.iam.gserviceaccount.com`
+    -   `GH_APP_ID`: Application ID of your GitHub App
+    -   `GH_APP_PRIVATE_KEY`: Complete PEM content of the private key
+        (`-----BEGIN RSA PRIVATE KEY...`)
 
 > [!IMPORTANT]
-> **Verify GCP WIF Scoping**: Ensure the target repository is allowed by your GCP Workload Identity Provider attribute condition:
-> - If configured with **User Scope** (`assertion.repository_owner == '<user>'`) or **Org Scope** (`assertion.repository_owner == '<org>'`), all repositories owned by that user/org are authenticated automatically.
-> - If configured with **Specific Repositories Scope** (Section 2, Option C), add the new repository to the provider's allowed repository list and IAM policy bindings.
+> **Verify GCP WIF Scoping**: Ensure the target repository is
+> allowed by your GCP Workload Identity Provider attribute condition: - If
+> configured with **User Scope** (`assertion.repository_owner == '<user>'`) or
+> **Org Scope** (`assertion.repository_owner == '<org>'`), all repositories
+> owned by that user/org are authenticated automatically. - If configured with
+> **Specific Repositories Scope** (Section 4, Option C), add the new repository
+> to the provider's allowed repository list and IAM policy bindings.
 
----
+--------------------------------------------------------------------------------
 
 ### Step 3: Grant GHCR Package Access to Target Repository
 
-GitHub Actions runners need permission to pull the runner container image (`ghcr.io/ilbzzz/codemender-runner:latest`).
+GitHub Actions runners need permission to pull the runner container image
+(`ghcr.io/ilbzzz/codemender-runner:latest`).
 
 #### If the Container Package is Public:
-- No package access configuration is needed. Any target repository can pull the runner image with zero setup.
+
+-   No package access configuration is needed. Any target repository can pull
+    the runner image with zero setup.
 
 #### If the Container Package is Private:
-1. Go to your GitHub profile or organization $\rightarrow$ click the **Packages** tab.
-2. Select the **`codemender-runner`** package.
-3. Click **Package settings** (in the right sidebar):
-   - Personal account URL: `https://github.com/users/<username>/packages/container/codemender-runner/settings`
-   - Organization URL: `https://github.com/orgs/<org>/packages/container/codemender-runner/settings`
-4. Under **Manage Actions access**:
-   - Click **Add repository** $\rightarrow$ select your target repository $\rightarrow$ select role **Read**.
-5. In your caller workflow, ensure the top-level permissions block contains `packages: read`.
 
----
+1.  Go to your GitHub profile or organization $\rightarrow$ click the
+    **Packages** tab.
+2.  Select the **`codemender-runner`** package.
+3.  Click **Package settings** (in the right sidebar):
+    -   Personal account URL:
+        `https://github.com/users/<username>/packages/container/codemender-runner/settings`
+    -   Organization URL:
+        `https://github.com/orgs/<org>/packages/container/codemender-runner/settings`
+4.  Under **Manage Actions access**:
+    -   Click **Add repository** $\rightarrow$ select your target repository
+        $\rightarrow$ select role **Read**.
+5.  In your caller workflow, ensure the top-level permissions block contains
+    `packages: read`.
+
+--------------------------------------------------------------------------------
 
 ### Step 4: Add Caller Workflow (`.github/workflows/codemender.yml`)
 
-Add `.github/workflows/codemender.yml` to the default branch of the target repository:
+Add `.github/workflows/codemender.yml` to the default branch of the target
+repository:
 
 #### Calling Reusable Workflow (Organizations & Public Workflow Repos)
+
 ```yaml
 name: CodeMender Security Remediation
 
@@ -354,16 +575,20 @@ jobs:
 ```
 
 #### Calling Local Workflow (Personal Accounts with Private Repositories)
+
 > [!NOTE]
-> GitHub disallows cross-repository reusable workflow calls between private repositories under personal user accounts.
-> For private personal repositories, copy `codemender_parallel.yml` into `.github/workflows/` of the target repository and call it locally:
+> GitHub disallows cross-repository reusable workflow calls between
+> private repositories under personal user accounts. For private personal
+> repositories, copy `codemender_parallel.yml` into `.github/workflows/` of the
+> target repository and call it locally:
+
 ```yaml
     uses: ./.github/workflows/codemender_parallel.yml
 ```
 
 --------------------------------------------------------------------------------
 
-## 5. Example Caller Workflows
+## 7. Example Caller Workflows
 
 Create a workflow file in your repository at `.github/workflows/codemender.yml`.
 
@@ -515,7 +740,7 @@ gh workflow run codemender.yml --ref main -f scan_target="." -f max_tasks="10"
 
 --------------------------------------------------------------------------------
 
-## 6. Building & Publishing the Standard Runner Base Image
+## 8. Building & Publishing the Standard Runner Base Image
 
 The CodeMender runner base image (`ghcr.io/<org>/codemender-runner:latest`)
 contains the pre-baked standard LTS language runtimes (Python 3.11, Node.js 20
@@ -588,7 +813,7 @@ Actions workflows in your repositories to pull the runner image:
 
 --------------------------------------------------------------------------------
 
-## 7. Bring-Your-Own-Image (BYOI) Custom Toolchains
+## 9. Bring-Your-Own-Image (BYOI) Custom Toolchains
 
 If your repository requires specialized build tools (such as Rust, PHP, C++,
 custom SDKs, or database engines for unit test validation), you can create a
@@ -631,7 +856,7 @@ Build and push your image to GitHub Container Registry
 
 --------------------------------------------------------------------------------
 
-## 8. Reviewing & Triaging Remediations
+## 10. Reviewing & Triaging Remediations
 
 CodeMender provides 4 integrated review surfaces:
 
@@ -677,20 +902,65 @@ run overview, showing:
 
 --------------------------------------------------------------------------------
 
-## 9. Configuration Reference Table
+## 11. Configuration Reference Table
 
 ### Workflow Inputs (`with:`)
 
-Parameter                              | Type      | Default                                  | Description
-:------------------------------------- | :-------- | :--------------------------------------- | :----------
-`runner_image`                         | `string`  | `ghcr.io/<org>/codemender-runner:latest` | Container image for runner execution.
-`runner_type`                          | `string`  | `ubuntu-latest`                          | GitHub Actions runner label.
-`scan_target`                          | `string`  | `.`                                      | Target directory or semicolon-separated paths to scan.
-`build_command`                        | `string`  | `""`                                     | Custom build/test command for verification.
-`max_tasks`                            | `number`  | `4` (PR) / `10` (Nightly)                | Maximum parallel worker tasks in dynamic matrix.
-`intermediate_artifact_retention_days` | `number`  | `3`                                      | Retention period in days for base state & shard artifacts.
-`report_artifact_retention_days`       | `number`  | `90`                                     | Retention period in days for final HTML/JSON reports.
-`upload_sarif`                         | `boolean` | `true`                                   | Whether to upload `report.sarif` to GitHub Security Tab.
+| Parameter                              | Type      | Default                                   | Description          |
+| :------------------------------------- | :-------- | :---------------------------------------- | :------------------- |
+| `runner_image`                         | `string`  | `ghcr.io/ilbzzz/codemender-runner:latest` | Universal container  |
+:                                        :           :                                           : runner image or      :
+:                                        :           :                                           : Bring-Your-Own-Image :
+:                                        :           :                                           : (BYOI).              :
+| `runner_type`                          | `string`  | `ubuntu-latest`                           | GitHub Actions       |
+:                                        :           :                                           : runner machine       :
+:                                        :           :                                           : label.               :
+| `scan_target`                          | `string`  | `.`                                       | Target subdirectory  |
+:                                        :           :                                           : path(s) to scan.     :
+| `build_command`                        | `string`  | `""`                                      | Custom build/test    |
+:                                        :           :                                           : verification command :
+:                                        :           :                                           : (auto-detected if    :
+:                                        :           :                                           : omitted).            :
+| `max_tasks`                            | `number`  | `10`                                      | Maximum number of    |
+:                                        :           :                                           : parallel worker      :
+:                                        :           :                                           : tasks in dynamic     :
+:                                        :           :                                           : matrix.              :
+| `sandbox_enabled`                      | `boolean` | `true`                                    | Enable `cm` sandbox  |
+:                                        :           :                                           : filesystem & network :
+:                                        :           :                                           : isolation in         :
+:                                        :           :                                           : container.           :
+| `intermediate_artifact_retention_days` | `number`  | `3`                                       | Retention period     |
+:                                        :           :                                           : (days) for base      :
+:                                        :           :                                           : state and worker     :
+:                                        :           :                                           : shard artifacts.     :
+| `report_artifact_retention_days`       | `number`  | `90`                                      | Retention period     |
+:                                        :           :                                           : (days) for final     :
+:                                        :           :                                           : HTML, JSON, and      :
+:                                        :           :                                           : SARIF triage         :
+:                                        :           :                                           : reports.             :
+| `upload_sarif`                         | `boolean` | `true`                                    | Upload generated     |
+:                                        :           :                                           : `report.sarif`       :
+:                                        :           :                                           : findings to GitHub   :
+:                                        :           :                                           : Security Tab.        :
+| `model`                                | `string`  | `""`                                      | Default Gemini model |
+:                                        :           :                                           : across all stages    :
+:                                        :           :                                           : (e.g.                :
+:                                        :           :                                           : `gemini-1.5-pro`).   :
+| `find_model`                           | `string`  | `""`                                      | Dedicated model for  |
+:                                        :           :                                           : Stage 1              :
+:                                        :           :                                           : vulnerability        :
+:                                        :           :                                           : discovery (`cm       :
+:                                        :           :                                           : find`).              :
+| `verify_model`                         | `string`  | `""`                                      | Dedicated model for  |
+:                                        :           :                                           : Stage 2 exploit      :
+:                                        :           :                                           : verification (`cm    :
+:                                        :           :                                           : verify`).            :
+| `fix_model`                            | `string`  | `""`                                      | Dedicated model for  |
+:                                        :           :                                           : Stage 2 patch        :
+:                                        :           :                                           : synthesis (`cm       :
+:                                        :           :                                           : fix`).               :
+
+--------------------------------------------------------------------------------
 
 ### Workflow Secrets (`secrets:`)
 
@@ -700,45 +970,33 @@ Parameter                              | Type      | Default                    
 :                                  :              : Identity Provider resource :
 :                                  :              : URI.                       :
 | `gcp_service_account`            | Yes (if WIF) | Google Cloud Service       |
-:                                  :              : Account email for          :
-:                                  :              : impersonation.             :
+:                                  :              : Account email for Vertex   :
+:                                  :              : AI impersonation.          :
 | `gcp_sa_key`                     | Optional     | Direct Service Account     |
 :                                  :              : JSON key (alternative to   :
-:                                  :              : WIF).                      :
-| `github_app_id`                  | Recommended  | GitHub App ID for token    |
-:                                  :              : generation.                :
-| `github_app_private_key`         | Recommended  | GitHub App Private Key     |
-:                                  :              : (`.pem`) for token         :
-:                                  :              : generation.                :
-| `custom_github_token`            | Optional     | Fallback GitHub Token /    |
-:                                  :              : PAT (if GitHub App not     :
+:                                  :              : Workload Identity).        :
+| `github_app_id`                  | Recommended  | GitHub App ID for          |
+:                                  :              : automatic 60-minute        :
+:                                  :              : installation token         :
+:                                  :              : minting.                   :
+| `github_app_private_key`         | Recommended  | GitHub App private key     |
+:                                  :              : (`.pem`) for installation  :
+:                                  :              : token minting.             :
+| `custom_github_token`            | Optional     | Fallback GitHub Token or   |
+:                                  :              : PAT (if GitHub App is not  :
 :                                  :              : configured).               :
+
+--------------------------------------------------------------------------------
 
 ### Advanced AI Model & Execution Flags (`env:`)
 
-| Environment Variable                   | Default          | Description      |
-| :------------------------------------- | :--------------- | :--------------- |
-| `CODEMENDER_MODEL`                     | `gemini-1.5-pro` | Base Gemini LLM  |
-:                                        :                  : used across all  :
-:                                        :                  : discovery,       :
-:                                        :                  : verification,    :
-:                                        :                  : and fix stages.  :
-| `CODEMENDER_FIND_MODEL`                | *(inherits       | Dedicated model  |
-:                                        : base)*           : for Stage 1      :
-:                                        :                  : vulnerability    :
-:                                        :                  : discovery.       :
-| `CODEMENDER_VERIFY_MODEL`              | *(inherits       | Dedicated model  |
-:                                        : base)*           : for Stage 2      :
-:                                        :                  : exploit PoC      :
-:                                        :                  : generation and   :
-:                                        :                  : verification.    :
-| `CODEMENDER_FIX_MODEL`                 | *(inherits       | Dedicated model  |
-:                                        : base)*           : for Stage 2 code :
-:                                        :                  : remediation.     :
-| `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | `false`          | When set to      |
-:                                        :                  : `true`, skips    :
-:                                        :                  : writing dynamic  :
-:                                        :                  : exploit PoCs and :
-:                                        :                  : goes directly to :
-:                                        :                  : patch            :
-:                                        :                  : generation.      :
+Environment Variable                   | Default           | Description
+:------------------------------------- | :---------------- | :----------
+`CODEMENDER_MODEL`                     | `gemini-1.5-pro`  | Base Gemini model used across all discovery, verification, and fix stages.
+`CODEMENDER_FIND_MODEL`                | *(inherits base)* | Dedicated model override for Stage 1 vulnerability discovery (`cm find`).
+`CODEMENDER_VERIFY_MODEL`              | *(inherits base)* | Dedicated model override for Stage 2 exploit PoC generation & verification.
+`CODEMENDER_FIX_MODEL`                 | *(inherits base)* | Dedicated model override for Stage 2 code patch synthesis (`cm fix`).
+`CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | `false`           | When `true`, skips dynamic exploit verification and generates patches directly.
+`CODEMENDER_SANDBOX_ENABLED`           | `true`            | Enable `cm` process namespace and filesystem isolation.
+`CODEMENDER_SANDBOX_NETWORK_PROFILE`   | `permissive-open` | Sandbox network policy (`permissive-open` or `restricted-local`).
+`CODEMENDER_FORCE_OVERWRITE`           | `false`           | When `true`, overwrites existing branches and PRs instead of skipping duplicates.

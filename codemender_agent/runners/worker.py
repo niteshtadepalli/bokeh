@@ -337,27 +337,59 @@ def _process_finding(
     )
     return
 
-  # 3. Apply Automated Fix (Executes 'cm fix')
-  logger.info("Applying fix for finding %s...", finding_id)
-  fix_cmd = build_cm_command(
-      cm_binary, "fix", finding_id, cli_version=cli_version
-  )
-  fix_res = run_command(
-      fix_cmd,
-      cwd=repo_dir,
-      env=scrubbed_env,
-      check=False,
-  )
-  token_usage = getattr(fix_res, "token_usage", None)
-  if isinstance(token_usage, dict):
-    accumulate_model_token_usage(worker_token_usage, fix_model, token_usage)
+  # 3. Apply Automated Fix (Executes 'cm fix' with up to 3 attempts)
+  max_fix_attempts = 3
+  fixed = False
+  for attempt in range(1, max_fix_attempts + 1):
+    logger.info(
+        "Applying fix for finding %s (Attempt %d/%d)...",
+        finding_id,
+        attempt,
+        max_fix_attempts,
+    )
+    # Ensure a clean workspace before each fix attempt
+    run_command(["git", "checkout", "-f", working_base_ref], cwd=repo_dir)
+    run_command(
+        ["git", "clean", "-fd", "-e", ".cm_project", "-e", ".exploit"],
+        cwd=repo_dir,
+    )
+    for port in get_cleanup_ports(config=config):
+      free_port(port)
 
-  for port in get_cleanup_ports(config=config):
-    free_port(port)
+    fix_cmd = build_cm_command(
+        cm_binary, "fix", finding_id, cli_version=cli_version
+    )
+    fix_res = run_command(
+        fix_cmd,
+        cwd=repo_dir,
+        env=scrubbed_env,
+        check=False,
+    )
+    token_usage = getattr(fix_res, "token_usage", None)
+    if isinstance(token_usage, dict):
+      accumulate_model_token_usage(worker_token_usage, fix_model, token_usage)
 
-  finding_status = get_finding_status(state_db_path, finding_id)
+    for port in get_cleanup_ports(config=config):
+      free_port(port)
 
-  if fix_res.returncode != 0 or finding_status != "FIXED":
+    finding_status = get_finding_status(state_db_path, finding_id)
+
+    if fix_res.returncode == 0 and finding_status == "FIXED":
+      logger.info("Successfully applied fix for finding %s.", finding_id)
+      fixed = True
+      break
+    else:
+      logger.warning(
+          "Attempt %d failed to fix finding %s (status: %s, returncode: %d).",
+          attempt,
+          finding_id,
+          finding_status,
+          fix_res.returncode,
+      )
+      if attempt < max_fix_attempts:
+        time.sleep(5)
+
+  if not fixed:
     logger.warning(
         "Fix failed for finding %s (status: %s)", finding_id, finding_status
     )

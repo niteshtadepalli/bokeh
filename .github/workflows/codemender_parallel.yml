@@ -331,7 +331,7 @@ jobs:
         run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
 
       - name: Upload SARIF Report
-        if: ${{ inputs.upload_sarif }}
+        if: ${{ inputs.upload_sarif && hashFiles('report.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v3
         continue-on-error: true
         with:
