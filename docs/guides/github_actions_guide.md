@@ -603,10 +603,10 @@ on:
         required: false
         default: '6'
         type: string
-      fail_on_findings:
-        description: 'Enforce blocking Security Quality Gate on PR (fail status check if findings exist)'
+      skip_exploit_verification:
+        description: 'Skip dynamic exploit verification (cm verify --skip-exploit-verification)'
         required: false
-        default: true
+        default: false
         type: boolean
       model:
         description: 'Default Gemini model across all stages (leave empty for CodeMender default)'
@@ -646,11 +646,21 @@ jobs:
 
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
 
+    # Environment variables passed to CodeMender stages
+    env:
+      # Optional: set to 'true' to skip dynamic exploit verification in Stage 2
+      CODEMENDER_SKIP_EXPLOIT_VERIFICATION: ${{ inputs.skip_exploit_verification || 'false' }}
+
     with:
       # =======================================================================
-      # 1. RUNNER & INFRASTRUCTURE CONFIGURATION
+      # 1. RUNNER & INFRASTRUCTURE CONFIGURATION (OPTIONAL)
       # =======================================================================
+      # Optional: Specify a Bring-Your-Own-Image (BYOI) if your build requires specialized toolchains.
+      # Default: 'ghcr.io/ilbzzz/codemender-runner:latest'
       runner_image: 'ghcr.io/ilbzzz/codemender-runner:latest'
+
+      # Optional: Custom runner sizing (e.g. 'ubuntu-latest-8-cores') or self-hosted runner labels.
+      # Default: 'ubuntu-latest'
       runner_type: 'ubuntu-latest'
 
       # =======================================================================
@@ -673,24 +683,7 @@ jobs:
       max_tasks: ${{ inputs.max_tasks && fromJson(inputs.max_tasks) || 6 }}
 
       # =======================================================================
-      # 4. SECURITY QUALITY GATE & CI POLICIES
-      # =======================================================================
-      # Enforce blocking Security Quality Gate on Pull Requests.
-      # ⚠️ Fallback Default (true): Blocks PR merge with exit code 1 if active vulnerabilities exist on PR diff.
-      fail_on_findings: ${{ inputs.fail_on_findings != '' && inputs.fail_on_findings || true }}
-
-      # Enable cm process sandbox isolation using Linux namespaces and mount protection.
-      sandbox_enabled: true
-
-      # =======================================================================
-      # 5. REPORTING, SARIF, & ARTIFACT RETENTION
-      # =======================================================================
-      upload_sarif: true
-      intermediate_artifact_retention_days: 3
-      report_artifact_retention_days: 90
-
-      # =======================================================================
-      # 6. AI MODEL CONFIGURATION (OPTIONAL)
+      # 4. AI MODEL CONFIGURATION (OPTIONAL)
       # =======================================================================
       # ⚠️ Fallback Defaults: During automated PR and Nightly scans, inputs.* is null.
       # If you want a specific model used on PR scans, specify it as the fallback value after '||'.
@@ -704,7 +697,7 @@ jobs:
 
     secrets:
       # =======================================================================
-      # 7. GCP AUTHENTICATION (CHOOSE WIF OR STATIC SA KEY)
+      # 5. GCP AUTHENTICATION (CHOOSE WIF OR STATIC SA KEY)
       # =======================================================================
       # Option A: Workload Identity Federation (WIF) - RECOMMENDED (Keyless)
       gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -714,7 +707,7 @@ jobs:
       # gcp_sa_key: ${{ secrets.GCP_SA_KEY }}
 
       # =======================================================================
-      # 8. GITHUB AUTHENTICATION (CHOOSE GITHUB APP OR CUSTOM PAT)
+      # 6. GITHUB AUTHENTICATION (CHOOSE GITHUB APP OR CUSTOM PAT)
       # =======================================================================
       # Option A: GitHub App Credentials - RECOMMENDED (Bypasses branch protection & posts as bot)
       github_app_id: ${{ secrets.GH_APP_ID }}

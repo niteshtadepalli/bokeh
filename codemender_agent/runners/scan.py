@@ -25,7 +25,8 @@ import time
 from typing import Optional
 import uuid
 
-# CodeMender CLI JSON parser
+# CodeMender CLI JSON parser and version logging
+from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
 # Configuration injection and credentials
 from codemender_agent.config import OrchestratorConfig
@@ -747,6 +748,7 @@ def run_scan_pipeline() -> None:
 
   # 4. Initialize CodeMender CLI environment
   cm_binary = shutil.which("cm") or "cm"
+  log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   _init_codemender(repo_dir, scrubbed_env, cm_binary, config=config)
 
   # 5. Parse scan targets (normalized to absolute paths to prevent sandbox mount errors)

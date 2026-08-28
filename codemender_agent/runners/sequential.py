@@ -23,6 +23,7 @@ import sys
 import time
 
 from codemender_agent.codemender.cli import extract_session_id
+from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.db import get_finding_status
 from codemender_agent.codemender.db import is_finding_verified
@@ -126,6 +127,7 @@ def run_sequential_pipeline() -> None:
   # Step 2: Initialize CodeMender CLI
   logger.info("Initializing CodeMender CLI...")
   cm_binary = shutil.which("cm") or "cm"
+  log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
 
   try:
     init_cmd = build_cm_command(cm_binary, "init", cli_version=cli_version)

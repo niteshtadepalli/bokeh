@@ -130,3 +130,45 @@ def extract_session_id(find_stdout: str) -> Optional[str]:
   if match:
     return match.group(1)
   return None
+
+
+def log_cm_version(
+    cm_binary: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
+) -> Optional[str]:
+  """Runs `cm --version` and logs the CodeMender CLI binary version.
+
+  Args:
+    cm_binary: Path or name of the cm executable.
+    env: Environment variables for the subprocess.
+    cwd: Working directory for running the command.
+
+  Returns:
+    The output version string if successfully retrieved, or None.
+  """
+  bin_path = cm_binary or shutil.which("cm") or "cm"
+  try:
+    res = run_command(
+        [bin_path, "--version"],
+        cwd=cwd,
+        env=env,
+        check=False,
+        capture_stderr=True,
+    )
+    if res.returncode == 0:
+      version_str = res.stdout.strip()
+      if version_str:
+        logger.info("CodeMender CLI version: %s", version_str)
+        return version_str
+      logger.warning("CodeMender CLI returned empty version output.")
+    else:
+      logger.warning(
+          "Failed to retrieve CodeMender CLI version (exit code %d): %s",
+          res.returncode,
+          res.stderr.strip() if getattr(res, "stderr", None) else "",
+      )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Error checking CodeMender CLI version: %s", e)
+  return None
+

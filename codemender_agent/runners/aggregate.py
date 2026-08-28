@@ -26,6 +26,7 @@ import tarfile
 import time
 from typing import Optional, Set
 
+from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.config import OrchestratorConfig
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
@@ -1233,6 +1234,7 @@ def run_aggregate_pipeline() -> None:
   inject_codemender_config(repo_dir, config=config)
   # Resolve path to CodeMender 'cm' executable
   cm_binary = shutil.which("cm") or "cm"
+  log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   # Invoke report generation and upload routine with full run parameters
   _generate_and_upload_report(
       repo_dir,

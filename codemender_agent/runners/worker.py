@@ -27,6 +27,7 @@ import tarfile
 import time
 from typing import Optional
 
+from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.db import get_finding_status
 from codemender_agent.codemender.db import is_finding_verified
@@ -820,6 +821,7 @@ def run_worker_pipeline() -> None:
   # 8. Inject project configurations and verify CLI binary
   inject_codemender_config(repo_dir, config=config)
   cm_binary = shutil.which("cm") or "cm"
+  log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   cli_version = config.cli_version
 
   # 9. Query restored SQLite state.db for finding metadata
