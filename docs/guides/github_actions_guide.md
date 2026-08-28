@@ -146,33 +146,16 @@ is triggered on a recurring schedule or against an active Pull Request:
 
 ### Execution Modes Comparison
 
-| Feature       | Scheduled Nightly    | Internal Pull Request  | Fork Pull Request Scan |
-:               : Scan                 : Scan                   :                        :
-| :------------ | :------------------- | :--------------------- | :--------------------- |
-| **Trigger     | `schedule` (cron) /  | `pull_request`         | `pull_request`         |
-: Event**       : `workflow_dispatch`  : (`opened`,             : (`opened`,             :
-:               :                      : `synchronize`,         : `synchronize`,         :
-:               :                      : `labeled`)             : `labeled`)             :
-| **Activation  | Cron triggers on     | `security-scan` label  | `security-scan` label  |
-: Condition**   : default branch       : on PR                  : on PR                  :
-| **Target Base | Default branch       | PR Base branch (e.g.   | PR Base branch         |
-: Ref**         : (`main` / `master`)  : `main`)                :                        :
-| **Scan        | Entire repository    | Differential: PR       | Differential: PR       |
-: Scope**       : (`cm find .`)        : changed lines only     : changed lines only     :
-| **Legacy Tech | Discovered & triaged | Marked                 | Marked                 |
-: Debt**        :                      : `PRE_EXISTING_IGNORED` : `PRE_EXISTING_IGNORED` :
-:               :                      : & suppressed           : & suppressed           :
-| **Duplicate   | Marked               | Skipped if fix         | Skipped if fix         |
-: Handling**    : `SKIPPED_DUPLICATE`  : branch/PR exists       : branch/PR exists       :
-:               : (kept in SARIF as    :                        :                        :
-:               : `underReview`)       :                        :                        :
-| **Remediation | Pushes               | Pushes                 | Posts Markdown review  |
-: Action**      : `codemender/fix-...` : `codemender/fix-...` & : comment with diff on   :
-:               : & opens PR to `main` : opens Child PR to      : Fork PR                :
-:               :                      : developer branch       :                        :
-| **Reporting   | Full SARIF alert     | PR-scoped SARIF, Child | PR-scoped SARIF, PR    |
-: Output**      : inventory, HTML,     : PR, Step Summary       : Review Comment, Step   :
-:               : JSON, Step Summary   :                        : Summary                :
+| Feature | Scheduled Nightly Scan | Internal Pull Request Scan | Fork Pull Request Scan |
+| :--- | :--- | :--- | :--- |
+| **Trigger Event** | `schedule` (cron) / `workflow_dispatch` | `pull_request` (`opened`, `synchronize`, `labeled`) | `pull_request` (`opened`, `synchronize`, `labeled`) |
+| **Activation Condition** | Cron triggers on default branch | `security-scan` label on PR | `security-scan` label on PR |
+| **Target Base Ref** | Default branch (`main` / `master`) | PR Base branch (e.g. `main`) | PR Base branch |
+| **Scan Scope** | Entire repository (`cm find .`) | Differential: PR changed lines only | Differential: PR changed lines only |
+| **Legacy Tech Debt** | Discovered & triaged | Marked `PRE_EXISTING_IGNORED` & suppressed | Marked `PRE_EXISTING_IGNORED` & suppressed |
+| **Duplicate Handling** | Marked `SKIPPED_DUPLICATE` (kept in SARIF as `underReview`) | Skipped if fix branch/PR exists | Skipped if fix branch/PR exists |
+| **Remediation Action** | Pushes `codemender/fix-...` & opens PR to `main` | Pushes `codemender/fix-...` & opens Child PR to developer branch | Posts Markdown review comment with diff on Fork PR |
+| **Reporting Output** | Full SARIF alert inventory, HTML, JSON, Step Summary | PR-scoped SARIF, Child PR, Step Summary | PR-scoped SARIF, PR Review Comment, Step Summary |
 
 --------------------------------------------------------------------------------
 
@@ -906,97 +889,46 @@ run overview, showing:
 
 ### Workflow Inputs (`with:`)
 
-| Parameter                              | Type      | Default                                   | Description          |
-| :------------------------------------- | :-------- | :---------------------------------------- | :------------------- |
-| `runner_image`                         | `string`  | `ghcr.io/ilbzzz/codemender-runner:latest` | Universal container  |
-:                                        :           :                                           : runner image or      :
-:                                        :           :                                           : Bring-Your-Own-Image :
-:                                        :           :                                           : (BYOI).              :
-| `runner_type`                          | `string`  | `ubuntu-latest`                           | GitHub Actions       |
-:                                        :           :                                           : runner machine       :
-:                                        :           :                                           : label.               :
-| `scan_target`                          | `string`  | `.`                                       | Target subdirectory  |
-:                                        :           :                                           : path(s) to scan.     :
-| `build_command`                        | `string`  | `""`                                      | Custom build/test    |
-:                                        :           :                                           : verification command :
-:                                        :           :                                           : (auto-detected if    :
-:                                        :           :                                           : omitted).            :
-| `max_tasks`                            | `number`  | `10`                                      | Maximum number of    |
-:                                        :           :                                           : parallel worker      :
-:                                        :           :                                           : tasks in dynamic     :
-:                                        :           :                                           : matrix.              :
-| `sandbox_enabled`                      | `boolean` | `true`                                    | Enable `cm` sandbox  |
-:                                        :           :                                           : filesystem & network :
-:                                        :           :                                           : isolation in         :
-:                                        :           :                                           : container.           :
-| `intermediate_artifact_retention_days` | `number`  | `3`                                       | Retention period     |
-:                                        :           :                                           : (days) for base      :
-:                                        :           :                                           : state and worker     :
-:                                        :           :                                           : shard artifacts.     :
-| `report_artifact_retention_days`       | `number`  | `90`                                      | Retention period     |
-:                                        :           :                                           : (days) for final     :
-:                                        :           :                                           : HTML, JSON, and      :
-:                                        :           :                                           : SARIF triage         :
-:                                        :           :                                           : reports.             :
-| `upload_sarif`                         | `boolean` | `true`                                    | Upload generated     |
-:                                        :           :                                           : `report.sarif`       :
-:                                        :           :                                           : findings to GitHub   :
-:                                        :           :                                           : Security Tab.        :
-| `model`                                | `string`  | `""`                                      | Default Gemini model |
-:                                        :           :                                           : across all stages    :
-:                                        :           :                                           : (e.g.                :
-:                                        :           :                                           : `gemini-1.5-pro`).   :
-| `find_model`                           | `string`  | `""`                                      | Dedicated model for  |
-:                                        :           :                                           : Stage 1              :
-:                                        :           :                                           : vulnerability        :
-:                                        :           :                                           : discovery (`cm       :
-:                                        :           :                                           : find`).              :
-| `verify_model`                         | `string`  | `""`                                      | Dedicated model for  |
-:                                        :           :                                           : Stage 2 exploit      :
-:                                        :           :                                           : verification (`cm    :
-:                                        :           :                                           : verify`).            :
-| `fix_model`                            | `string`  | `""`                                      | Dedicated model for  |
-:                                        :           :                                           : Stage 2 patch        :
-:                                        :           :                                           : synthesis (`cm       :
-:                                        :           :                                           : fix`).               :
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `runner_image` | `string` | `ghcr.io/ilbzzz/codemender-runner:latest` | Universal container runner image or Bring-Your-Own-Image (BYOI). |
+| `runner_type` | `string` | `ubuntu-latest` | GitHub Actions runner machine label. |
+| `scan_target` | `string` | `.` | Target subdirectory path(s) to scan. |
+| `build_command` | `string` | `""` | Custom build/test verification command (auto-detected if omitted). |
+| `max_tasks` | `number` | `10` | Maximum number of parallel worker tasks in dynamic matrix. |
+| `sandbox_enabled` | `boolean` | `true` | Enable `cm` sandbox filesystem & network isolation in container. |
+| `intermediate_artifact_retention_days` | `number` | `3` | Retention period (days) for base state and worker shard artifacts. |
+| `report_artifact_retention_days` | `number` | `90` | Retention period (days) for final HTML, JSON, and SARIF triage reports. |
+| `upload_sarif` | `boolean` | `true` | Upload generated `report.sarif` findings to GitHub Security Tab. |
+| `model` | `string` | `""` | Default Gemini model across all stages (e.g. `gemini-1.5-pro`). |
+| `find_model` | `string` | `""` | Dedicated model for Stage 1 vulnerability discovery (`cm find`). |
+| `verify_model` | `string` | `""` | Dedicated model for Stage 2 exploit verification (`cm verify`). |
+| `fix_model` | `string` | `""` | Dedicated model for Stage 2 patch synthesis (`cm fix`). |
 
 --------------------------------------------------------------------------------
 
 ### Workflow Secrets (`secrets:`)
 
-| Secret Name                      | Required     | Description                |
-| :------------------------------- | :----------- | :------------------------- |
-| `gcp_workload_identity_provider` | Yes (if WIF) | Google Cloud Workload      |
-:                                  :              : Identity Provider resource :
-:                                  :              : URI.                       :
-| `gcp_service_account`            | Yes (if WIF) | Google Cloud Service       |
-:                                  :              : Account email for Vertex   :
-:                                  :              : AI impersonation.          :
-| `gcp_sa_key`                     | Optional     | Direct Service Account     |
-:                                  :              : JSON key (alternative to   :
-:                                  :              : Workload Identity).        :
-| `github_app_id`                  | Recommended  | GitHub App ID for          |
-:                                  :              : automatic 60-minute        :
-:                                  :              : installation token         :
-:                                  :              : minting.                   :
-| `github_app_private_key`         | Recommended  | GitHub App private key     |
-:                                  :              : (`.pem`) for installation  :
-:                                  :              : token minting.             :
-| `custom_github_token`            | Optional     | Fallback GitHub Token or   |
-:                                  :              : PAT (if GitHub App is not  :
-:                                  :              : configured).               :
+| Secret Name | Required | Description |
+| :--- | :--- | :--- |
+| `gcp_workload_identity_provider` | Yes (if WIF) | Google Cloud Workload Identity Provider resource URI. |
+| `gcp_service_account` | Yes (if WIF) | Google Cloud Service Account email for Vertex AI impersonation. |
+| `gcp_sa_key` | Optional | Direct Service Account JSON key (alternative to Workload Identity). |
+| `github_app_id` | Recommended | GitHub App ID for automatic 60-minute installation token minting. |
+| `github_app_private_key` | Recommended | GitHub App private key (`.pem`) for installation token minting. |
+| `custom_github_token` | Optional | Fallback GitHub Token or PAT (if GitHub App is not configured). |
 
 --------------------------------------------------------------------------------
 
 ### Advanced AI Model & Execution Flags (`env:`)
 
-Environment Variable                   | Default           | Description
-:------------------------------------- | :---------------- | :----------
-`CODEMENDER_MODEL`                     | `gemini-1.5-pro`  | Base Gemini model used across all discovery, verification, and fix stages.
-`CODEMENDER_FIND_MODEL`                | *(inherits base)* | Dedicated model override for Stage 1 vulnerability discovery (`cm find`).
-`CODEMENDER_VERIFY_MODEL`              | *(inherits base)* | Dedicated model override for Stage 2 exploit PoC generation & verification.
-`CODEMENDER_FIX_MODEL`                 | *(inherits base)* | Dedicated model override for Stage 2 code patch synthesis (`cm fix`).
-`CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | `false`           | When `true`, skips dynamic exploit verification and generates patches directly.
-`CODEMENDER_SANDBOX_ENABLED`           | `true`            | Enable `cm` process namespace and filesystem isolation.
-`CODEMENDER_SANDBOX_NETWORK_PROFILE`   | `permissive-open` | Sandbox network policy (`permissive-open` or `restricted-local`).
-`CODEMENDER_FORCE_OVERWRITE`           | `false`           | When `true`, overwrites existing branches and PRs instead of skipping duplicates.
+| Environment Variable | Default | Description |
+| :--- | :--- | :--- |
+| `CODEMENDER_MODEL` | `gemini-1.5-pro` | Base Gemini model used across all discovery, verification, and fix stages. |
+| `CODEMENDER_FIND_MODEL` | *(inherits base)* | Dedicated model override for Stage 1 vulnerability discovery (`cm find`). |
+| `CODEMENDER_VERIFY_MODEL` | *(inherits base)* | Dedicated model override for Stage 2 exploit PoC generation & verification. |
+| `CODEMENDER_FIX_MODEL` | *(inherits base)* | Dedicated model override for Stage 2 code patch synthesis (`cm fix`). |
+| `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | `false` | When `true`, skips dynamic exploit verification and generates patches directly. |
+| `CODEMENDER_SANDBOX_ENABLED` | `true` | Enable `cm` process namespace and filesystem isolation. |
+| `CODEMENDER_SANDBOX_NETWORK_PROFILE` | `permissive-open` | Sandbox network policy (`permissive-open` or `restricted-local`). |
+| `CODEMENDER_FORCE_OVERWRITE` | `false` | When `true`, overwrites existing branches and PRs instead of skipping duplicates. |
