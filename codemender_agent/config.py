@@ -83,6 +83,7 @@ class OrchestratorConfig:
   pr_head_ref: Optional[str] = None
   is_fork_pr: bool = False
   pr_number: Optional[int] = None
+  fail_on_findings: bool = False
 
   # Sandbox & Security Settings
   sandbox_enabled: bool = True
@@ -194,6 +195,19 @@ class OrchestratorConfig:
       except ValueError:
         pr_number = None
 
+    fail_on_findings_env = os.environ.get("CODEMENDER_FAIL_ON_FINDINGS")
+    if fail_on_findings_env is not None and fail_on_findings_env.strip():
+      fail_on_findings = fail_on_findings_env.strip().lower() in (
+          "true",
+          "1",
+          "yes",
+      )
+    elif is_pr_scan:
+      # Default to True on PR scans (blocking security gate)
+      fail_on_findings = True
+    else:
+      fail_on_findings = False
+
     # 7. Parse Sandbox and Cleanup Port Configurations
     sandbox_env = os.environ.get("CODEMENDER_SANDBOX_ENABLED")
     if sandbox_env is not None and sandbox_env.strip():
@@ -266,6 +280,7 @@ class OrchestratorConfig:
         pr_head_ref=pr_head_ref,
         is_fork_pr=is_fork_pr,
         pr_number=pr_number,
+        fail_on_findings=fail_on_findings,
         # Sandbox execution flags and network isolation profiles
         sandbox_enabled=sandbox_enabled,
         sandbox_network_profile=sandbox_network_profile,

@@ -604,7 +604,7 @@ class TestAggregateRunner(unittest.TestCase):
     summary_file = os.path.join(self.workspace_dir, "step_summary.md")
     with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_file}):
       config = OrchestratorConfig(is_pr_scan=False)
-      summary_md = _render_step_summary(
+      summary_md, count = _render_step_summary(
           db_path,
           config,
           owner="my-org",
@@ -613,6 +613,7 @@ class TestAggregateRunner(unittest.TestCase):
           token_totals={"gemini-2.5-flash": {"in_tokens": 100, "out_tokens": 50, "total_tokens": 150}},
       )
 
+    self.assertEqual(count, 3)
     self.assertIn("# 🛡️ CodeMender Security Remediation Summary", summary_md)
     self.assertIn("my-org/my-repo", summary_md)
     self.assertIn("Nightly Repository Scan", summary_md)
@@ -637,7 +638,7 @@ class TestAggregateRunner(unittest.TestCase):
     self.create_test_db(db_path, large_findings)
 
     config = OrchestratorConfig(is_pr_scan=False)
-    summary_md = _render_step_summary(
+    summary_md, count = _render_step_summary(
         db_path,
         config,
         owner="my-org",
@@ -768,7 +769,9 @@ class TestAggregateRunner(unittest.TestCase):
             "CODEMENDER_TOTAL_WORKERS": "1",
         },
     ):
-      run_aggregate_pipeline()
+      with self.assertRaises(SystemExit) as cm:
+        run_aggregate_pipeline()
+      self.assertEqual(cm.exception.code, 1)
 
     # Verify merge_db called for shard
     mock_merge_db.assert_called()
@@ -779,6 +782,113 @@ class TestAggregateRunner(unittest.TestCase):
     sarif_called = any("report" in c and "sarif" in c for c in cmd_names)
     self.assertTrue(html_called)
     self.assertTrue(sarif_called)
+
+  @patch("codemender_agent.runners.aggregate.run_command")
+  @patch("codemender_agent.runners.aggregate.merge_db")
+  @patch("shutil.which")
+  def test_aggregate_pipeline_pr_scan_soft_gate_when_fail_on_findings_false(
+      self,
+      mock_which,
+      mock_merge_db,
+      mock_run_cmd,
+  ):
+    """Test aggregate pipeline does not exit 1 on PR scan when CODEMENDER_FAIL_ON_FINDINGS=false."""
+    mock_which.return_value = "/bin/cm"
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+    mock_run_cmd.return_value = mock_default
+
+    transit_base = os.path.join(self.workspace_dir, ".codemender_transit", "base")
+    os.makedirs(transit_base, exist_ok=True)
+    with open(os.path.join(transit_base, "manifest.json"), "w") as f:
+      json.dump({"findings_count": 1, "target_sha": "def456sha"}, f)
+
+    db_dir = os.path.join(self.workspace_dir, ".codemender")
+    os.makedirs(db_dir, exist_ok=True)
+    base_db = os.path.join(db_dir, "state.db")
+    self.create_test_db(
+        base_db,
+        [{"finding_id": "fid-1", "title": "SQL Injection", "status": "FIXED", "updated_at": "2026-08-01"}],
+    )
+
+    tarball_file = os.path.join(transit_base, "workspace_base.tar.gz")
+    with tarfile.open(tarball_file, "w:gz") as tar:
+      tar.add(db_dir, arcname=".codemender")
+
+    shard_dir = os.path.join(self.workspace_dir, ".codemender_transit", "shards", "worker_0")
+    os.makedirs(shard_dir, exist_ok=True)
+    worker_db = os.path.join(shard_dir, "worker_0_state.db")
+    self.create_test_db(
+        worker_db,
+        [{"finding_id": "fid-1", "title": "SQL Injection", "status": "FIXED", "updated_at": "2026-08-02"}],
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "CODEMENDER_FAIL_ON_FINDINGS": "false",
+            "CODEMENDER_TOTAL_WORKERS": "1",
+        },
+    ):
+      run_aggregate_pipeline()
+
+    self.assertTrue(mock_merge_db.called)
+
+  @patch("codemender_agent.runners.aggregate.run_command")
+  @patch("codemender_agent.runners.aggregate.merge_db")
+  @patch("shutil.which")
+  def test_aggregate_pipeline_nightly_mode_does_not_fail(
+      self,
+      mock_which,
+      mock_merge_db,
+      mock_run_cmd,
+  ):
+    """Test aggregate pipeline does not fail on Nightly scans even with findings."""
+    mock_which.return_value = "/bin/cm"
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+    mock_run_cmd.return_value = mock_default
+
+    transit_base = os.path.join(self.workspace_dir, ".codemender_transit", "base")
+    os.makedirs(transit_base, exist_ok=True)
+    with open(os.path.join(transit_base, "manifest.json"), "w") as f:
+      json.dump({"findings_count": 1, "target_sha": "def456sha"}, f)
+
+    db_dir = os.path.join(self.workspace_dir, ".codemender")
+    os.makedirs(db_dir, exist_ok=True)
+    base_db = os.path.join(db_dir, "state.db")
+    self.create_test_db(
+        base_db,
+        [{"finding_id": "fid-1", "title": "SQL Injection", "status": "DETECTED", "updated_at": "2026-08-01"}],
+    )
+
+    tarball_file = os.path.join(transit_base, "workspace_base.tar.gz")
+    with tarfile.open(tarball_file, "w:gz") as tar:
+      tar.add(db_dir, arcname=".codemender")
+
+    shard_dir = os.path.join(self.workspace_dir, ".codemender_transit", "shards", "worker_0")
+    os.makedirs(shard_dir, exist_ok=True)
+    worker_db = os.path.join(shard_dir, "worker_0_state.db")
+    self.create_test_db(
+        worker_db,
+        [{"finding_id": "fid-1", "title": "SQL Injection", "status": "FIXED", "updated_at": "2026-08-02"}],
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "false",
+            "CODEMENDER_TOTAL_WORKERS": "1",
+        },
+    ):
+      run_aggregate_pipeline()
+
+    self.assertTrue(mock_merge_db.called)
 
   def test_render_step_summary_pr_scan_omits_pre_existing_findings(self):
     """Verify that _render_step_summary omits PRE_EXISTING_IGNORED findings on PR scans."""
@@ -798,7 +908,7 @@ class TestAggregateRunner(unittest.TestCase):
 
     summary_file = os.path.join(self.workspace_dir, "pr_step_summary.md")
     cfg = OrchestratorConfig(is_pr_scan=True, github_step_summary=summary_file)
-    summary_md = _render_step_summary(
+    summary_md, count = _render_step_summary(
         base_db,
         cfg,
         owner="ilbzzz",
@@ -806,7 +916,9 @@ class TestAggregateRunner(unittest.TestCase):
         target_sha="1e677199",
     )
 
+    self.assertEqual(count, 1)
     self.assertIn("Pull Request Scan (Clean as You Code)", summary_md)
+    self.assertIn("Security Gate Status: FAILED", summary_md)
     # Total should reflect ONLY the 1 PR-scoped finding
     self.assertIn("| 1 | 1 | 0 | 0 | 0 | 0 |", summary_md)
     # fid-1 should be listed in the table

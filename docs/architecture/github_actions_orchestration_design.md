@@ -161,7 +161,7 @@ full support for **Bring-Your-Own-Image (BYOI)** custom toolchains.
         1.  **Manual trigger** (`workflow_dispatch`)
         2.  **Nightly scan** (`schedule` on default branch)
         3.  **Certain PRs** (targeting `main`/`master` branch only) triggered by
-            a specific tag/label only (e.g. `security-scan`).
+            a specific tag/label only (e.g. `codemender-scan`).
     *   **Internal PR Scans**: Run with secure access to repository secrets.
         Propose remediation via Child PRs targeting the developer's feature
         branch (`pr_head_ref`).

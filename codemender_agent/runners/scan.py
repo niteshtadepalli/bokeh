@@ -452,7 +452,8 @@ def _filter_findings(
           if start_line > 0
           else {0}
       )
-      if not (file_changed_lines & finding_lines):
+      intersection = file_changed_lines & finding_lines
+      if not intersection:
         logger.info(
             "PR Differential Scan: Finding %s in %s (lines %d-%d) is"
             " pre-existing legacy debt (not modified in PR). Marking"
@@ -464,6 +465,15 @@ def _filter_findings(
         )
         ignored_finding_ids.append(finding_id)
         continue
+      else:
+        logger.info(
+            "PR Differential Scan: Finding %s in %s (lines %d-%d) matches PR modified lines %s. Retaining as active.",
+            finding_id,
+            file_path,
+            start_line,
+            end_line,
+            sorted(intersection),
+        )
 
     # 2. Universal Deduplication: Check if remote branch or PR already exists
     vuln_type = finding.get("VulnType") or "vulnerability"

@@ -62,7 +62,7 @@ buckets or dedicated compute infrastructure:
 graph TD
     subgraph Triggers["Trigger Events"]
         Cron["⏰ Scheduled Cron (Nightly)"]
-        PR["🏷️ Labeled PR ('security-scan')"]
+        PR["🏷️ Labeled PR ('codemender-scan')"]
         Manual["▶️ Manual (workflow_dispatch)"]
     end
 
@@ -94,7 +94,7 @@ graph TD
 
     subgraph AuthServices["Authentication & Cloud AI"]
         WIF["GCP Workload Identity Federation (WIF)"]
-        VertexAI["Google Cloud Vertex AI (Gemini 1.5 Pro)"]
+        VertexAI["Google Cloud Vertex AI (Gemini Models)"]
         GHApp["GitHub App (60-min installation token)"]
     end
 
@@ -150,7 +150,7 @@ is triggered on a recurring schedule or against an active Pull Request:
 | Feature | Scheduled Nightly Scan | Internal Pull Request Scan | Fork Pull Request Scan |
 | :--- | :--- | :--- | :--- |
 | **Trigger Event** | `schedule` (cron) / `workflow_dispatch` | `pull_request` (`types: [labeled]`) | `pull_request` (`types: [labeled]`) |
-| **Activation Condition** | Cron triggers on default branch | `security-scan` label on PR | `security-scan` label on PR |
+| **Activation Condition** | Cron triggers on default branch | `codemender-scan` label on PR | `codemender-scan` label on PR |
 | **Target Base Ref** | Default branch (`main` / `master`) | PR Base branch (e.g. `main`) | PR Base branch |
 | **Scan Scope** | Entire repository (`cm find .`) | Differential: PR changed lines only | Differential: PR changed lines only |
 | **Legacy Tech Debt** | Discovered & triaged | Marked `PRE_EXISTING_IGNORED` & suppressed | Marked `PRE_EXISTING_IGNORED` & suppressed |
@@ -201,7 +201,7 @@ pull requests.
 
 1.  **Triggering & Labeling (`types: [labeled]`)**:
     *   Triggered on `pull_request` events when a PR is **`labeled`** with the
-        **`security-scan`** label.
+        **`codemender-scan`** label.
     *   **Zero Noise & Skipped Runs**: By configuring `types: [labeled]` (rather
         than `opened` or `synchronize`), GitHub Actions will NOT spawn 1-second
         "Skipped" workflow runs when regular PRs are opened or pushed to. The
@@ -550,11 +550,14 @@ jobs:
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'security-scan'))
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
     with:
       # Optional: custom test verification command for target repo
       build_command: 'npm test'
+      # Optional: AI Model Configuration (omit to use CodeMender's up-to-date default)
+      # Check latest defaults & supported models: https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model
+      # model: ''
     secrets:
       gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
@@ -603,12 +606,18 @@ permissions:
 
 jobs:
   remediate:
-    # Only run on Schedule, Manual Trigger, or PRs with 'security-scan' label
+    # Only run on Schedule, Manual Trigger, or PRs with 'codemender-scan' label
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'security-scan'))
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
+    with:
+      # Optional: custom test verification command for target repo
+      build_command: 'npm test'
+      # Optional: specify Gemini models (omit to use CodeMender's up-to-date default)
+      # Check latest supported models: https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model
+      # model: ''
     secrets:
       gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
@@ -646,6 +655,26 @@ on:
         required: false
         default: '6'
         type: string
+      model:
+        description: 'Default Gemini model (leave empty for CodeMender default: https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model)'
+        required: false
+        default: ''
+        type: string
+      find_model:
+        description: 'Dedicated model override for Stage 1 discovery (cm find)'
+        required: false
+        default: ''
+        type: string
+      verify_model:
+        description: 'Dedicated model override for Stage 2 verification (cm verify)'
+        required: false
+        default: ''
+        type: string
+      fix_model:
+        description: 'Dedicated model override for Stage 2 patch synthesis (cm fix)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   id-token: write
@@ -660,7 +689,7 @@ jobs:
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'security-scan'))
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
     with:
       # Container image for runner execution (Default: ghcr.io/<org>/codemender-runner:latest)
@@ -677,6 +706,13 @@ jobs:
 
       # Maximum parallel worker tasks in Stage 2 (Default: 10 for Nightly, 4 for PR)
       max_tasks: ${{ inputs.max_tasks && fromJson(inputs.max_tasks) || 6 }}
+
+      # AI Model Configuration (leave empty to use CodeMender's up-to-date defaults)
+      # Check latest supported models: https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model
+      model: ${{ inputs.model }}
+      find_model: ${{ inputs.find_model }}
+      verify_model: ${{ inputs.verify_model }}
+      fix_model: ${{ inputs.fix_model }}
 
       # Upload SARIF report to GitHub Security Tab (Default: true)
       upload_sarif: true
@@ -905,10 +941,11 @@ run overview, showing:
 | `intermediate_artifact_retention_days` | `number` | `3` | Retention period (days) for base state and worker shard artifacts. |
 | `report_artifact_retention_days` | `number` | `90` | Retention period (days) for final HTML, JSON, and SARIF triage reports. |
 | `upload_sarif` | `boolean` | `true` | Upload generated `report.sarif` findings to GitHub Security Tab. |
-| `model` | `string` | `""` | Default Gemini model across all stages (e.g. `gemini-1.5-pro`). |
-| `find_model` | `string` | `""` | Dedicated model for Stage 1 vulnerability discovery (`cm find`). |
-| `verify_model` | `string` | `""` | Dedicated model for Stage 2 exploit verification (`cm verify`). |
-| `fix_model` | `string` | `""` | Dedicated model for Stage 2 patch synthesis (`cm fix`). |
+| `fail_on_findings` | `boolean` | `true` *(on PR)*, `false` *(on Nightly)* | Exit with non-zero code in Stage 3 if actionable vulnerabilities are detected on PR diff. |
+| `model` | `string` | `""` *(CodeMender default)* | Global Gemini model override across all stages. Check up-to-date defaults & supported models [here](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model). |
+| `find_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 1 vulnerability discovery (`cm find`). |
+| `verify_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 2 exploit verification (`cm verify`). |
+| `fix_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 2 patch synthesis (`cm fix`). |
 
 --------------------------------------------------------------------------------
 
@@ -929,10 +966,11 @@ run overview, showing:
 
 | Environment Variable | Default | Description |
 | :--- | :--- | :--- |
-| `CODEMENDER_MODEL` | `gemini-1.5-pro` | Base Gemini model used across all discovery, verification, and fix stages. |
+| `CODEMENDER_MODEL` | *(CodeMender default)* | Base Gemini model override used across all discovery, verification, and fix stages. Check up-to-date defaults & supported models [here](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model). |
 | `CODEMENDER_FIND_MODEL` | *(inherits base)* | Dedicated model override for Stage 1 vulnerability discovery (`cm find`). |
 | `CODEMENDER_VERIFY_MODEL` | *(inherits base)* | Dedicated model override for Stage 2 exploit PoC generation & verification. |
 | `CODEMENDER_FIX_MODEL` | *(inherits base)* | Dedicated model override for Stage 2 code patch synthesis (`cm fix`). |
+| `CODEMENDER_FAIL_ON_FINDINGS` | `true` *(on PR)*, `false` *(on Nightly)* | Exit with non-zero status in Stage 3 if actionable vulnerabilities are detected on PR. |
 | `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | `false` | When `true`, skips dynamic exploit verification and generates patches directly. |
 | `CODEMENDER_SANDBOX_ENABLED` | `true` | Enable `cm` process namespace and filesystem isolation. |
 | `CODEMENDER_SANDBOX_NETWORK_PROFILE` | `permissive-open` | Sandbox network policy (`permissive-open` or `restricted-local`). |

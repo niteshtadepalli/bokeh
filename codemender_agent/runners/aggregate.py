@@ -610,14 +610,40 @@ def _render_step_summary(
       f"- **Repository:** `{owner}/{repo_name}`",
       f"- **Target Commit:** `{commit_desc}`",
       f"- **Execution Mode:** `{mode_desc}`",
-      "",
+  ]
+
+  if config.is_pr_scan:
+    if findings_stats["total"] > 0:
+      lines.extend([
+          "- **Security Gate:** ❌ **FAILED (Action Required)**",
+          "",
+          "> [!CAUTION]",
+          f"> **Security Gate Status: FAILED ({findings_stats['total']} actionable vulnerability(ies) detected)**",
+          "> ",
+          "> Remediations have been synthesized. Please review and merge the proposed Child Pull Request into your feature branch (or apply the patches) to resolve.",
+          "",
+      ])
+    else:
+      lines.extend([
+          "- **Security Gate:** ✅ **PASSED (Clean as You Code)**",
+          "",
+          "> [!NOTE]",
+          "> **Security Gate Status: PASSED**",
+          "> ",
+          "> No new actionable security vulnerabilities detected in the pull request diff.",
+          "",
+      ])
+  else:
+    lines.append("")
+
+  lines.extend([
       "### 📊 Remediation Overview",
       "",
       "| Total Discovered | Remediated (Fixed) | Verified (Exploitable) | Pre-Existing Ignored | Skipped Duplicates | Other / Unfixed |",
       "| :---: | :---: | :---: | :---: | :---: | :---: |",
       f"| {findings_stats['total']} | {findings_stats['fixed']} | {findings_stats['verified']} | {findings_stats['pre_existing_ignored']} | {findings_stats['skipped_duplicate']} | {findings_stats['unfixed']} |",
       "",
-  ]
+  ])
 
   # 4. Construct table of individual findings and remediation outcomes
   if findings_list:
@@ -668,7 +694,7 @@ def _render_step_summary(
     except Exception as e:  # pylint: disable=broad-exception-caught
       logger.warning("Failed to write to GITHUB_STEP_SUMMARY (%s): %s", summary_file, e)
 
-  return summary_md
+  return summary_md, findings_stats["total"]
 
 
 def _sanitize_sarif_file(
@@ -1162,7 +1188,7 @@ def run_aggregate_pipeline() -> None:
     )
 
   # 8. Render Step Summary before DB cleanup (preserves differential statistics)
-  _render_step_summary(
+  _, active_findings_count = _render_step_summary(
       base_db_path,
       config,
       owner,
@@ -1224,6 +1250,15 @@ def run_aggregate_pipeline() -> None:
       storage_mode=config.storage_mode,
       config=config,
   )
+
+  # 12. Enforce Security Gate for Pull Request Scans
+  if config.is_pr_scan and config.fail_on_findings and active_findings_count > 0:
+    logger.error(
+        "❌ CodeMender Security Gate FAILED: %d actionable vulnerability(ies)"
+        " detected on PR diff. Exiting with non-zero status to block PR merge.",
+        active_findings_count,
+    )
+    sys.exit(1)
 
   # Log final aggregator completion notice
   logger.info("Stage 3 (Aggregate) completed successfully.")

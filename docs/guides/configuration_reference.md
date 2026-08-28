@@ -51,7 +51,7 @@ when running in Docker or Cloud Run.
 *   `CODEMENDER_CLI_VERSION`: Determines CLI flag compatibility syntax.
     *   `preview` (default): Uses Public Preview CLI flag syntax (`-y`, `--bypass-warning`, `--skip-exploit-verification`, `--model`).
     *   `legacy`: Uses legacy CLI flag syntax (`cm find verify <ID> --yes`, `cm fix <ID> --yes`).
-*   `CODEMENDER_MODEL`: Sets the global LLM model selection override across all CodeMender stages (e.g. `"gemini-2.5-flash"`).
+*   `CODEMENDER_MODEL`: Sets the global LLM model selection override across all CodeMender stages. If omitted, CodeMender uses its latest default model. Check up-to-date defaults and supported models in the [CodeMender documentation](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model).
 *   `CODEMENDER_FIND_MODEL`: Overrides the LLM model specifically for the Stage 1 scan (`cm find`) phase.
 *   `CODEMENDER_VERIFY_MODEL`: Overrides the LLM model specifically for the Stage 2 verification (`cm verify`) phase.
 *   `CODEMENDER_FIX_MODEL`: Overrides the LLM model specifically for the Stage 2 fix (`cm fix`) phase.

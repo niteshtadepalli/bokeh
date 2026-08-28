@@ -68,6 +68,11 @@ on:
         required: false
         default: true
         type: boolean
+      fail_on_findings:
+        description: 'Exit with non-zero status in Stage 3 if actionable vulnerabilities are detected on PR (Default: true on PR, false on Nightly)'
+        required: false
+        default: true
+        type: boolean
     secrets:
       gcp_workload_identity_provider:
         description: 'GCP Workload Identity Provider resource name'
@@ -326,13 +331,14 @@ jobs:
           CODEMENDER_TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
           CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
           CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
+          CODEMENDER_FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
           GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
           WORKSPACE_DIR: ${{ github.workspace }}
         run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
 
       - name: Upload SARIF Report
-        if: ${{ inputs.upload_sarif && hashFiles('report.sarif') != '' }}
+        if: always() && inputs.upload_sarif && hashFiles('report.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         continue-on-error: true
         with:
