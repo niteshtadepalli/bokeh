@@ -288,16 +288,36 @@ class OrchestratorConfig:
     )
 
 
-def get_scrubbed_env() -> Dict[str, str]:
-  """Returns a copy of environment variables with sensitive credentials removed.
+def get_scrubbed_env(repo_dir: Optional[str] = None) -> Dict[str, str]:
+  """Returns a copy of environment variables with sensitive credentials removed and local sandbox cache paths configured.
 
   This prevents credential exfiltration during untrusted LLM code execution
-  inside the child subprocesses.
+  inside the child subprocesses and redirects tool cache directories into repo_dir.
   """
   env = dict(os.environ)
   for var in SENSITIVE_ENV_VARS:
     if var in env:
       del env[var]
+
+  if repo_dir:
+    cache_dir = os.path.join(repo_dir, ".codemender_cache")
+    tmp_dir = os.path.join(cache_dir, "tmp")
+    npm_dir = os.path.join(cache_dir, "npm")
+    pip_dir = os.path.join(cache_dir, "pip")
+    try:
+      os.makedirs(tmp_dir, exist_ok=True)
+      os.makedirs(npm_dir, exist_ok=True)
+      os.makedirs(pip_dir, exist_ok=True)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Could not initialize .codemender_cache directory: %s", e)
+
+    env["XDG_CACHE_HOME"] = cache_dir
+    env["npm_config_cache"] = npm_dir
+    env["TMPDIR"] = tmp_dir
+    env["TEMP"] = tmp_dir
+    env["TMP"] = tmp_dir
+    env["PIP_CACHE_DIR"] = pip_dir
+
   return env
 
 

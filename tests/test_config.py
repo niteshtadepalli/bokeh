@@ -51,6 +51,19 @@ class TestConfig(unittest.TestCase):
       self.assertNotIn("GH_TOKEN", scrubbed)
       self.assertNotIn("GITHUB_SECRET", scrubbed)
 
+  def test_get_scrubbed_env_with_repo_dir(self):
+    """Verify get_scrubbed_env creates and configures local .codemender_cache paths."""
+    with tempfile.TemporaryDirectory() as repo_dir:
+      scrubbed = get_scrubbed_env(repo_dir=repo_dir)
+      expected_cache = os.path.join(repo_dir, ".codemender_cache")
+      self.assertEqual(scrubbed.get("XDG_CACHE_HOME"), expected_cache)
+      self.assertEqual(scrubbed.get("npm_config_cache"), os.path.join(expected_cache, "npm"))
+      self.assertEqual(scrubbed.get("TMPDIR"), os.path.join(expected_cache, "tmp"))
+      self.assertEqual(scrubbed.get("PIP_CACHE_DIR"), os.path.join(expected_cache, "pip"))
+      self.assertTrue(os.path.isdir(os.path.join(expected_cache, "tmp")))
+      self.assertTrue(os.path.isdir(os.path.join(expected_cache, "npm")))
+      self.assertTrue(os.path.isdir(os.path.join(expected_cache, "pip")))
+
   def test_get_github_credentials_success(self):
     """Verify credentials extraction from environment."""
     test_env = {

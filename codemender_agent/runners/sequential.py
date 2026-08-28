@@ -42,6 +42,7 @@ from codemender_agent.vcs.git import clean_workspace
 from codemender_agent.vcs.git import generate_branch_name
 from codemender_agent.vcs.git import get_git_auth_header
 from codemender_agent.vcs.git import parse_repo_owner_and_name
+from codemender_agent.vcs.git import sanitize_exploit_and_artifacts
 from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
 from codemender_agent.vcs.github import check_remote_branch_exists
@@ -59,13 +60,13 @@ def run_sequential_pipeline() -> None:
   repo_url, token = get_github_credentials()
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
-  scrubbed_env = get_scrubbed_env()
 
   workspace_dir = os.environ.get("WORKSPACE_DIR", os.getcwd())
 
   # Step 1: Single-Sync Git Rule - clone repository if not present or pull latest
   logger.info("Syncing repository: %s", clean_repo_url)
   repo_dir = os.path.join(workspace_dir, repo_name)
+  scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
 
   if not os.path.exists(os.path.join(repo_dir, ".git")):
     clone_cmd = [
@@ -337,7 +338,15 @@ def run_sequential_pipeline() -> None:
           finding_id,
           max_verify_attempts,
       )
+      sanitize_exploit_and_artifacts(
+          repo_dir, codemender_home=os.path.dirname(state_db_path)
+      )
       continue
+
+    # Sanitize any accidental package/build caches from .exploit before fix starts
+    sanitize_exploit_and_artifacts(
+        repo_dir, codemender_home=os.path.dirname(state_db_path)
+    )
 
     logger.info(
         "Applying fix for finding %s on %s branch...",
@@ -370,10 +379,7 @@ def run_sequential_pipeline() -> None:
           finding_status,
       )
       run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
-      run_command(
-          ["git", "clean", "-fd", "-e", ".cm_project", "-e", ".exploit"],
-          cwd=repo_dir,
-      )
+      clean_workspace(repo_dir)
       continue
 
     status_res = run_command(["git", "status", "--porcelain"], cwd=repo_dir)

@@ -19,6 +19,7 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 from typing import Optional, Tuple
 
 from codemender_agent.utils import retry_on_exception
@@ -130,7 +131,7 @@ def generate_branch_name(vuln_type: str, fingerprint: str) -> str:
 def clean_workspace(repo_dir: str, exclude_dirs: Optional[Tuple[str, ...]] = None) -> None:
   """Resets working directory and cleans untracked files while preserving CLI metadata directories."""
   if exclude_dirs is None:
-    exclude_dirs = (".cm_project", ".exploit")
+    exclude_dirs = (".cm_project", ".exploit", ".codemender_cache")
 
   cmd = ["git", "clean", "-fd"]
   for ex in exclude_dirs:
@@ -152,7 +153,7 @@ def setup_local_git_excludes(repo_dir: str) -> None:
         existing_content = f.read()
 
     new_entries = []
-    for entry in [".cm_project", ".exploit"]:
+    for entry in [".cm_project", ".exploit", ".codemender_cache"]:
       if entry not in existing_content:
         new_entries.append(entry)
 
@@ -164,6 +165,52 @@ def setup_local_git_excludes(repo_dir: str) -> None:
       logger.info("Successfully added local git excludes: %s", new_entries)
   except Exception as e:
     logger.warning("Failed to configure local git excludes: %s", e)
+
+
+def sanitize_exploit_and_artifacts(
+    repo_dir: str, codemender_home: Optional[str] = None
+) -> None:
+  """Prunes heavy non-reproduction build caches from .exploit/ and ~/.codemender/artifacts/."""
+  junk_dirs = {
+      ".cache",
+      "node_modules",
+      ".npm",
+      ".node-gyp",
+      ".tmp",
+      "tmp",
+      "venv",
+      ".venv",
+      "__pycache__",
+      ".pytest_cache",
+  }
+
+  # 1. Clean repo_dir/.exploit/
+  exploit_dir = os.path.join(repo_dir, ".exploit")
+  if os.path.isdir(exploit_dir):
+    try:
+      for entry in os.listdir(exploit_dir):
+        entry_path = os.path.join(exploit_dir, entry)
+        if os.path.isdir(entry_path) and entry in junk_dirs:
+          shutil.rmtree(entry_path, ignore_errors=True)
+          logger.info("Sanitized junk build cache directory: %s", entry_path)
+    except Exception as e:
+      logger.warning("Failed to sanitize .exploit directory: %s", e)
+
+  # 2. Clean ~/.codemender/artifacts/
+  cm_home = codemender_home or os.path.expanduser("~/.codemender")
+  artifacts_dir = os.path.join(cm_home, "artifacts")
+  if os.path.isdir(artifacts_dir):
+    try:
+      for root, dirs, _ in os.walk(artifacts_dir, topdown=True):
+        for d in list(dirs):
+          if d in junk_dirs:
+            target_path = os.path.join(root, d)
+            shutil.rmtree(target_path, ignore_errors=True)
+            dirs.remove(d)
+            logger.info("Sanitized artifact build cache directory: %s", target_path)
+    except Exception as e:
+      logger.warning("Failed to sanitize artifacts directory: %s", e)
+
 
 
 def get_pr_changed_lines(repo_dir: str, base_ref: str) -> Optional[dict[str, set[int]]]:

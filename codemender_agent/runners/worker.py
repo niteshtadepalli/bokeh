@@ -50,6 +50,7 @@ from codemender_agent.vcs.git import get_git_auth_header
 from codemender_agent.vcs.git import normalize_repo_relative_path
 from codemender_agent.vcs.git import parse_repo_owner_and_name
 from codemender_agent.vcs.git import push_branch_to_remote
+from codemender_agent.vcs.git import sanitize_exploit_and_artifacts
 from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
 from codemender_agent.vcs.github import check_remote_branch_exists
@@ -337,7 +338,15 @@ def _process_finding(
     logger.error(
         "Verification failed for finding %s. Skipping fix.", finding_id
     )
+    sanitize_exploit_and_artifacts(
+        repo_dir, codemender_home=os.path.dirname(state_db_path)
+    )
     return
+
+  # Sanitize any accidental package/build caches from .exploit before fix starts
+  sanitize_exploit_and_artifacts(
+      repo_dir, codemender_home=os.path.dirname(state_db_path)
+  )
 
   # 3. Apply Automated Fix (Executes 'cm fix' with up to 3 attempts)
   max_fix_attempts = 3
@@ -351,10 +360,7 @@ def _process_finding(
     )
     # Ensure a clean workspace before each fix attempt
     run_command(["git", "checkout", "-f", working_base_ref], cwd=repo_dir)
-    run_command(
-        ["git", "clean", "-fd", "-e", ".cm_project", "-e", ".exploit"],
-        cwd=repo_dir,
-    )
+    clean_workspace(repo_dir)
     for port in get_cleanup_ports(config=config):
       free_port(port)
 
@@ -778,7 +784,7 @@ def run_worker_pipeline() -> None:
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
   repo_dir = os.path.join(workspace_dir, repo_name)
-  scrubbed_env = get_scrubbed_env()
+  scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
 
   # 5. Clone repository and setup target SHA / working base ref
   target_sha = config.target_sha

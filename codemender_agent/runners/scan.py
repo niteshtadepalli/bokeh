@@ -63,6 +63,7 @@ EXCLUDED_TAR_PATTERNS = {
     ".venv",
     "node_modules",
     ".pytest_cache",
+    ".codemender_cache",
 }
 
 
@@ -733,7 +734,7 @@ def run_scan_pipeline() -> None:
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
   repo_dir = os.path.join(workspace_dir, repo_name)
-  scrubbed_env = get_scrubbed_env()
+  scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
 
   # 3. Synchronize repository and record the target commit SHA
   target_sha = _sync_repository(
