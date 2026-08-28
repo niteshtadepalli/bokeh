@@ -821,37 +821,22 @@ repository to implement native GitHub Actions support.
 
 ## 5. Summary Reference Table
 
-| Dimension         | GCP Cloud Run Mode (Existing)  | GitHub Actions Mode (New)                     |
-| :---------------- | :----------------------------- | :-------------------------------------------- |
-| **Trigger         | Cloud Scheduler $\rightarrow$  | GitHub Schedule (cron), `workflow_dispatch`,  |
-: Mechanism**       : Cloud Workflows JSON payload   : or `pull_request` label                       :
-| **Control Plane** | Google Cloud Workflows         | GHA Reusable Workflow                         |
-:                   : (`gcp_parallel_workflow.yaml`) : (`.github/workflows/codemender_parallel.yml`) :
-| **Worker          | Cloud Run Job Task Array       | GHA Dynamic Matrix (`strategy.matrix:         |
-: Scaling**         : (`taskCount\: N`)              : [0..N-1]`, `fail-fast\: false`)               :
-| **State Transit** | Google Cloud Storage Bucket +  | GHA Run Artifacts v4                          |
-:                   : Signed URLs                    : (`.codemender_transit/shards/worker_${i}/`)   :
-| **Container       | Cloud Run Container Instance   | Universal Base (`codemender-runner`) or BYOI  |
-: Runtime**         :                                : Custom Image (`runner_image`)                 :
-| **Backend Auth**  | Cloud Run Service Account      | Workload Identity Federation (OIDC) or SA Key |
-:                   : (built-in)                     : JSON                                          :
-| **Token           | Secret Manager                 | `actions/create-github-app-token@v1` or       |
-: Lifecycle**       : (`GITHUB_APP_TOKEN`)           : `GITHUB_TOKEN` ($\le 55\text{ min}$ timeout)  :
-| **Nightly         | Top-level PRs against `main`   | Top-level PRs against `main`                  |
-: Remediation**     : (`codemender/fix-...`)         : (`codemender/fix-...`)                        :
-| **Internal PR     | N/A                            | **Child PRs targeting developer's feature     |
-: Remediation**     :                                : branch (`pr_head_ref`)**                      :
-| **Fork PR         | N/A                            | **Markdown review comments on Fork PR         |
-: Remediation**     :                                : (`pr_number`) with diff & apply**             :
-| **PR Finding      | N/A                            | **Differential PR Scan (Untouched findings    |
-: Scope**           :                                : ignored & omitted from PR reports)**          :
-| **Staging         | `git add -u`                   | **Surgical Staging (`patches.edited_files`    |
-: Mechanism**       :                                : with 3-tier fallback)**                       :
-| **Reporting       | GCS HTML Report (Signed URL in | Scoped SARIF (Security Tab) +                 |
-: Surfaces**        : logs)                          : `$GITHUB_STEP_SUMMARY` + GHA Artifact         :
-| **Deduplication** | Global deterministic branch    | Global deterministic branch hash (`git        |
-:                   : hash                           : ls-remote` + open PR check on all scans)      :
-:                   : (`check_remote_branch_exists`) :                                               :
+| Dimension | GCP Cloud Run Mode (Existing) | GitHub Actions Mode (New) |
+| :--- | :--- | :--- |
+| **Trigger Mechanism** | Cloud Scheduler $\rightarrow$ Cloud Workflows JSON payload | GitHub Schedule (cron), `workflow_dispatch`, or `pull_request` label |
+| **Control Plane** | Google Cloud Workflows (`gcp_parallel_workflow.yaml`) | GHA Reusable Workflow (`.github/workflows/codemender_parallel.yml`) |
+| **Worker Scaling** | Cloud Run Job Task Array (`taskCount: N`) | GHA Dynamic Matrix (`strategy.matrix: [0..N-1]`, `fail-fast: false`) |
+| **State Transit** | Google Cloud Storage Bucket + Signed URLs | GHA Run Artifacts v4 (`.codemender_transit/shards/worker_${i}/`) |
+| **Container Runtime** | Cloud Run Container Instance | Universal Base (`codemender-runner`) or BYOI Custom Image (`runner_image`) |
+| **Backend Auth** | Cloud Run Service Account (built-in) | Workload Identity Federation (OIDC) or SA Key JSON |
+| **Token Lifecycle** | Secret Manager (`GITHUB_APP_TOKEN`) | `actions/create-github-app-token@v1` or `GITHUB_TOKEN` ($\le 55\text{ min}$ timeout) |
+| **Nightly Remediation** | Top-level PRs against `main` (`codemender/fix-...`) | Top-level PRs against `main` (`codemender/fix-...`) |
+| **Internal PR Remediation** | N/A | **Child PRs targeting developer's feature branch (`pr_head_ref`)** |
+| **Fork PR Remediation** | N/A | **Markdown review comments on Fork PR (`pr_number`) with diff & apply** |
+| **PR Finding Scope** | N/A | **Differential PR Scan (Untouched findings ignored & omitted from PR reports)** |
+| **Staging Mechanism** | `git add -u` | **Surgical Staging (`patches.edited_files` with 3-tier fallback)** |
+| **Reporting Surfaces** | GCS HTML Report (Signed URL in logs) | Scoped SARIF (Security Tab) + `$GITHUB_STEP_SUMMARY` + GHA Artifact |
+| **Deduplication** | Global deterministic branch hash (`check_remote_branch_exists`) | Global deterministic branch hash (`git ls-remote` + open PR check on all scans) |
 
 --------------------------------------------------------------------------------
 

@@ -136,35 +136,16 @@ multiple environments via `codemender_agent/storage.py`:
 The GitHub Actions workflow uniquely provides **two tailored scanning modes**
 optimized for CI/CD developer feedback and ongoing repository health:
 
-| Feature            | Scheduled Nightly Scan    | Pull Request Scan ("Clean   |
-:                    :                           : as You Code")               :
-| :----------------- | :------------------------ | :-------------------------- |
-| **Trigger**        | Schedule                  | Pull Request labeled        |
-:                    : (`schedule.cron`) or      : (`codemender-scan`),        :
-:                    : manual                    : opened, or synchronized     :
-:                    : (`workflow_dispatch`)     :                             :
-| **Scope**          | Full repository audit     | **Differential scan**:      |
-:                    : against default branch    : Analyzes only lines changed :
-:                    : (`main`)                  : in the PR merge-base diff   :
-| **Base Ref**       | Default branch head       | Pull Request target base    |
-:                    : commit                    : ref (`origin/<base_ref>`)   :
-| **Remediation**    | Opens Child PRs targeting | Opens Child PRs targeting   |
-:                    : default branch (`main`)   : the developer's PR feature  :
-:                    :                           : branch (`pr_head_ref`)      :
-| **Fork PRs**       | N/A (runs on upstream     | Posts an inline PR review   |
-:                    : repository)               : comment with patch diff and :
-:                    :                           : git apply commands          :
-| **Alerts & SARIF** | Uploads full SARIF alert  | Scoped SARIF upload         |
-:                    : inventory with            : creating inline annotations :
-:                    : `underReview`             : on PR **Files changed** and :
-:                    : suppressions              : **Checks** tabs             :
-| **Quality Gate**   | Non-blocking              | **Blocking Quality Gate**   |
-:                    : (informational audit &    : (`fail_on_findings=true`)\: :
-:                    : remediation pipeline)     : Fails check if active       :
-:                    :                           : vulnerabilities remain      :
-| **Step Summary**   | Full repository finding   | Scoped PR table; suppresses |
-:                    : breakdown with LLM token  : legacy untouched tech debt  :
-:                    : metrics                   : (`PRE_EXISTING_IGNORED`)    :
+| Feature | Scheduled Nightly Scan | Pull Request Scan ("Clean as You Code") |
+| :--- | :--- | :--- |
+| **Trigger** | Schedule (`schedule.cron`) or manual (`workflow_dispatch`) | Pull Request labeled (`codemender-scan`), opened, or synchronized |
+| **Scope** | Full repository audit against default branch (`main`) | **Differential scan**: Analyzes only lines changed in the PR merge-base diff |
+| **Base Ref** | Default branch head commit | Pull Request target base ref (`origin/<base_ref>`) |
+| **Remediation** | Opens PRs targeting default branch (`main`) | Opens Child PRs targeting the developer's PR feature branch (`pr_head_ref`) |
+| **Fork PRs** | N/A (runs on upstream repository) | Posts an inline PR review comment with patch diff and git apply commands |
+| **Alerts & SARIF** | Uploads full SARIF alert inventory with `underReview` suppressions | Scoped SARIF upload creating inline annotations on PR **Files changed** and **Checks** tabs |
+| **Quality Gate** | Non-blocking (informational audit & remediation pipeline) | **Blocking Quality Gate** (`fail_on_findings=true`): Fails check if active vulnerabilities remain |
+| **Step Summary** | Full repository finding breakdown with LLM token metrics | Scoped PR table; suppresses legacy untouched tech debt (`PRE_EXISTING_IGNORED`) |
 
 *   **Mode A: Scheduled Nightly Audits**: Designed to run off-peak (e.g. weekly
     or nightly) to perform a full codebase sweep, deduplicate against existing

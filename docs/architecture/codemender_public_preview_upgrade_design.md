@@ -518,14 +518,14 @@ with precise rationale and behavioral specifications.
 
 ## 5. Behavioral Reference Summary Table
 
-Operation / Component   | `CODEMENDER_CLI_VERSION == "preview"` (Universal Default)                                  | `CODEMENDER_CLI_VERSION == "legacy"` (Backward Compatibility Mode)
-:---------------------- | :----------------------------------------------------------------------------------------- | :-----------------------------------------------------------------
-**Scan (`find`)**       | `cm find -y [--model $FIND_MODEL] <target>`                                                | `cm find <target>`
-**Verify (`verify`)**   | `cm verify -y --bypass-warning [--skip-exploit-verification] [--model $VERIFY_MODEL] <ID>` | `cm find verify <ID> --yes`
-**Fix (`fix`)**         | `cm fix -y --bypass-warning [--model $FIX_MODEL] <ID>`                                     | `cm fix <ID> --yes`
-**Init (`init`)**       | `cm init` AND `cm init --verify`                                                           | `cm init` AND `cm init --verify`
-**Report (`report`)**   | `cm report -f html` / `cm report --format json`                                            | `cm report -f html` / `cm report --format json`
-**Guardrails Config**   | `tools.confirm_commands: false`<br/>`tools.confirm_writes: false`                          | `tools.confirm_commands: false`<br/>`tools.confirm_writes: false`
-**SQLite Verify Check** | `SELECT status FROM findings WHERE finding_id = ?`<br/>True if `status == "VERIFIED"`      | `SELECT status FROM findings WHERE finding_id = ?`<br/>True if `status == "VERIFIED"`
-**PR Spam Status**      | `status = 'SKIPPED_DUPLICATE'` (deleted from SQLite before `cm report`)                    | `status = 'SKIPPED_DUPLICATE'` (deleted from SQLite before `cm report`)
-**Token Logging**       | Parse **last match** of `Tokens: ...` via `re.findall`; parse `k`/`M` suffixes             | Dropped entirely (`token_usage = None`, no report header)
+| Operation / Component | `CODEMENDER_CLI_VERSION == "preview"` (Universal Default) | `CODEMENDER_CLI_VERSION == "legacy"` (Backward Compatibility Mode) |
+| :--- | :--- | :--- |
+| **Scan (`find`)** | `cm find -y [--model $FIND_MODEL] <target>` | `cm find <target>` |
+| **Verify (`verify`)** | `cm verify -y --bypass-warning [--skip-exploit-verification] [--model $VERIFY_MODEL] <ID>` | `cm find verify <ID> --yes` |
+| **Fix (`fix`)** | `cm fix -y --bypass-warning [--model $FIX_MODEL] <ID>` | `cm fix <ID> --yes` |
+| **Init (`init`)** | `cm init` AND `cm init --verify` | `cm init` AND `cm init --verify` |
+| **Report (`report`)** | `cm report -f html` / `cm report --format json` | `cm report -f html` / `cm report --format json` |
+| **Guardrails Config** | `tools.confirm_commands: false`<br/>`tools.confirm_writes: false` | `tools.confirm_commands: false`<br/>`tools.confirm_writes: false` |
+| **SQLite Verify Check** | `SELECT status FROM findings WHERE finding_id = ?`<br/>True if `status == "VERIFIED"` | `SELECT status FROM findings WHERE finding_id = ?`<br/>True if `status == "VERIFIED"` |
+| **PR Spam Status** | `status = 'SKIPPED_DUPLICATE'` (deleted from SQLite before `cm report`) | `status = 'SKIPPED_DUPLICATE'` (deleted from SQLite before `cm report`) |
+| **Token Logging** | Parse **last match** of `Tokens: ...` via `re.findall`; parse `k`/`M` suffixes | Dropped entirely (`token_usage = None`, no report header) |
