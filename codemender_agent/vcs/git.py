@@ -31,11 +31,26 @@ def normalize_repo_relative_path(path: str, repo_dir: Optional[str] = None) -> s
   if not path:
     return ""
   p = path.strip().replace("\\", "/")
-  if repo_dir and os.path.isabs(p):
-    try:
-      p = os.path.relpath(p, repo_dir).replace("\\", "/")
-    except ValueError:
-      pass
+  if repo_dir:
+    clean_repo_dir = os.path.abspath(repo_dir).replace("\\", "/")
+    if p == clean_repo_dir:
+      return ""
+    if p.startswith(clean_repo_dir + "/"):
+      p = p[len(clean_repo_dir) + 1 :]
+    elif os.path.isabs(p):
+      try:
+        rel = os.path.relpath(p, clean_repo_dir).replace("\\", "/")
+        if not rel.startswith("../") and rel != "..":
+          p = rel
+      except ValueError:
+        pass
+
+  # Strip leading CI runner mount patterns if present (e.g. /__w/<owner>/<repo>/... or /github/workspace/...)
+  p = re.sub(r"^/?__w/[^/]+/[^/]+(?:/[^/]+)?/", "", p)
+  p = re.sub(r"^/?github/workspace/", "", p)
+
+  # Strip any leading slashes, dots, or relative traversal markers
+  p = re.sub(r"^(\.\./)+", "", p)
   p = re.sub(r"^\.?/+", "", p)
   return p
 

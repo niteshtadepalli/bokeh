@@ -20,7 +20,11 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from codemender_agent.utils import build_cm_command, run_command
+from codemender_agent.utils import (
+    build_cm_command,
+    extract_json_from_output,
+    run_command,
+)
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -88,28 +92,9 @@ class CodeMenderCLIAdapter:
 
 def parse_findings_json(json_str: str) -> List[Dict[str, Any]]:
   """Parses `cm report --format json` output handling empty strings for optional fields."""
-  clean_str = json_str.strip()
-  if not clean_str:
-    return []
-
-  # Find the start of the JSON array or object
-  start_idx = clean_str.find("[")
-  if start_idx == -1:
-    start_idx = clean_str.find("{")
-
-  if start_idx == -1:
+  data = extract_json_from_output(json_str)
+  if data is None:
     logger.error("No valid JSON array or object found in report.")
-    return []
-
-  try:
-    decoder = json.JSONDecoder()
-    data, _ = decoder.raw_decode(clean_str, start_idx)
-  except json.JSONDecodeError as e:
-    logger.error(
-        "Failed to parse JSON findings report: %s\nOriginal string: %s",
-        e,
-        json_str,
-    )
     return []
 
   if isinstance(data, dict):

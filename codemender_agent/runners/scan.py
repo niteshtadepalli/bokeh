@@ -120,7 +120,9 @@ def _render_zero_findings_summary(
   )
   commit_desc = target_sha[:8] if target_sha else "HEAD"
   reason_note = (
-      f"\n- **Note:** {filtered_reasons}" if filtered_reasons else ""
+      f"\n- **Note:** {filtered_reasons}"
+      if filtered_reasons and not is_pr_scan
+      else ""
   )
 
   summary_md = f"""# 🛡️ CodeMender Security Remediation Summary
@@ -832,8 +834,12 @@ def run_scan_pipeline() -> None:
   if active_findings_count == 0:
     logger.info("Zero active findings after filtering. Exiting Stage 1.")
     filtered_reason = (
-        f"{len(ignored_finding_ids)} pre-existing findings and"
-        f" {len(skipped_finding_ids)} duplicate branches/PRs dismissed."
+        None
+        if config.is_pr_scan
+        else (
+            f"{len(ignored_finding_ids)} pre-existing findings and"
+            f" {len(skipped_finding_ids)} duplicate branches/PRs dismissed."
+        )
     )
     # Render clean Step Summary before exiting
     _render_zero_findings_summary(

@@ -153,6 +153,7 @@ jobs:
           CODEMENDER_RUN_MODE: scan
           CODEMENDER_STORAGE_MODE: github_actions
           CODEMENDER_SCAN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          CODEMENDER_TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
           CODEMENDER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
           CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}

@@ -15,17 +15,48 @@
 """System and Subprocess utilities for CodeMender Agent."""
 
 from functools import wraps
+import json
 import logging
 import os
 import re
 import subprocess
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import requests
 
 logger = logging.getLogger("codemender-orchestrator")
+
+
+def extract_json_from_output(raw_str: Optional[str]) -> Optional[Any]:
+  """Extracts and parses the first JSON object or array from a string.
+
+  Handles CLI outputs where extra log lines, session info, or trailing non-JSON
+  characters are printed before or after the JSON payload.
+  """
+  if not raw_str:
+    return None
+  clean = raw_str.strip()
+  if not clean:
+    return None
+
+  # Find the first opening bracket '{' or '['
+  start_idx = -1
+  for i, ch in enumerate(clean):
+    if ch in ("{", "["):
+      start_idx = i
+      break
+
+  if start_idx == -1:
+    return None
+
+  try:
+    decoder = json.JSONDecoder()
+    data, _ = decoder.raw_decode(clean, start_idx)
+    return data
+  except (json.JSONDecodeError, ValueError):
+    return None
 
 
 def parse_token_metric(token_str: str) -> int:

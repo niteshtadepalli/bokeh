@@ -36,8 +36,10 @@ from codemender_agent.storage import list_gcs_blobs
 from codemender_agent.storage import upload_and_sign_report
 from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
+from codemender_agent.utils import extract_json_from_output
 from codemender_agent.utils import run_command
 from codemender_agent.vcs.git import get_git_auth_header
+from codemender_agent.vcs.git import normalize_repo_relative_path
 from codemender_agent.vcs.git import parse_repo_owner_and_name
 from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
@@ -531,8 +533,12 @@ def _render_step_summary(
     repo_name: str,
     target_sha: Optional[str] = None,
     token_totals: Optional[dict[str, dict[str, int]]] = None,
+    repo_dir: Optional[str] = None,
 ) -> str:
   """Renders a comprehensive GitHub Actions Step Summary Markdown dashboard."""
+  if not repo_dir and config.workspace_dir and repo_name:
+    repo_dir = os.path.join(config.workspace_dir, repo_name)
+
   findings_stats = {
       "total": 0,
       "fixed": 0,
@@ -560,6 +566,11 @@ def _render_step_summary(
             row_dict = dict(zip(avail_cols, row))
             fid = row_dict.get("finding_id", "")
             status = (row_dict.get("status") or "").upper()
+
+            # In PR scans (Clean as You Code), omit pre-existing ignored and dismissed findings
+            if config.is_pr_scan and status in ("PRE_EXISTING_IGNORED", "DISMISSED"):
+              continue
+
             findings_stats["total"] += 1
             if status in ("FIXED", "REMEDIATED"):
               findings_stats["fixed"] += 1
@@ -573,11 +584,16 @@ def _render_step_summary(
               # Fold DISMISSED, PR_CREATION_FAILED, and all other unclassified statuses into unfixed
               findings_stats["unfixed"] += 1
 
+            raw_file_path = row_dict.get("file_path", "")
+            clean_file_path = normalize_repo_relative_path(
+                raw_file_path, repo_dir=repo_dir
+            )
+
             findings_list.append({
                 "finding_id": fid,
                 "title": row_dict.get("title", ""),
                 "status": status or "DETECTED",
-                "file_path": row_dict.get("file_path", ""),
+                "file_path": clean_file_path,
                 "start_line": row_dict.get("start_line", 0),
                 "vuln_type": row_dict.get("vuln_type", ""),
             })
@@ -667,7 +683,12 @@ def _sanitize_sarif_file(
 
   try:
     with open(sarif_path, "r", encoding="utf-8") as f:
-      data = json.load(f)
+      content = f.read()
+
+    data = extract_json_from_output(content)
+    if not isinstance(data, dict):
+      logger.warning("Failed to extract valid SARIF JSON from %s", sarif_path)
+      return
 
     clean_repo_dir = os.path.abspath(repo_dir)
 
@@ -790,11 +811,23 @@ def _generate_and_upload_report(
         check=False,
     )
     local_json_path = os.path.join(codemender_home, "reports/report.json")
-    if not os.path.exists(local_json_path) and getattr(json_res, "stdout", "").strip().startswith(("[", "{")):
+    if not os.path.exists(local_json_path) and hasattr(json_res, "stdout"):
+      json_data = extract_json_from_output(json_res.stdout)
+      if json_data is not None:
+        try:
+          os.makedirs(os.path.dirname(local_json_path), exist_ok=True)
+          with open(local_json_path, "w", encoding="utf-8") as f:
+            json.dump(json_data, f, indent=2)
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+    elif os.path.exists(local_json_path):
       try:
-        os.makedirs(os.path.dirname(local_json_path), exist_ok=True)
-        with open(local_json_path, "w", encoding="utf-8") as f:
-          f.write(json_res.stdout.strip())
+        with open(local_json_path, "r", encoding="utf-8") as f:
+          raw_json_str = f.read()
+        json_data = extract_json_from_output(raw_json_str)
+        if json_data is not None:
+          with open(local_json_path, "w", encoding="utf-8") as f:
+            json.dump(json_data, f, indent=2)
       except Exception:  # pylint: disable=broad-exception-caught
         pass
 
@@ -877,16 +910,18 @@ def _generate_and_upload_report(
       found_sarif = sc
       break
 
-  # If cm report printed SARIF to stdout instead of disk, write fallback to reports/report.sarif
-  if not found_sarif and getattr(sarif_res, "stdout", "").strip().startswith("{"):
-    fallback_sarif = os.path.join(codemender_home, "reports/report.sarif")
-    try:
-      os.makedirs(os.path.dirname(fallback_sarif), exist_ok=True)
-      with open(fallback_sarif, "w", encoding="utf-8") as f:
-        f.write(sarif_res.stdout.strip())
-      found_sarif = fallback_sarif
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      logger.warning("Failed to write SARIF stdout fallback to disk: %s", e)
+  # If cm report printed SARIF to stdout instead of disk, write clean parsed JSON to fallback file
+  if not found_sarif and hasattr(sarif_res, "stdout"):
+    sarif_data = extract_json_from_output(sarif_res.stdout)
+    if sarif_data is not None:
+      fallback_sarif = os.path.join(codemender_home, "reports/report.sarif")
+      try:
+        os.makedirs(os.path.dirname(fallback_sarif), exist_ok=True)
+        with open(fallback_sarif, "w", encoding="utf-8") as f:
+          json.dump(sarif_data, f, indent=2)
+        found_sarif = fallback_sarif
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.warning("Failed to write SARIF stdout fallback to disk: %s", e)
 
   # 7. Sanitize SARIF paths and copy to standard upload locations
   if found_sarif:
@@ -1134,6 +1169,7 @@ def run_aggregate_pipeline() -> None:
       repo_name,
       target_sha=target_sha,
       token_totals=token_totals,
+      repo_dir=repo_dir,
   )
 
   # 9. Collect SKIPPED_DUPLICATE IDs for Nightly SARIF suppression

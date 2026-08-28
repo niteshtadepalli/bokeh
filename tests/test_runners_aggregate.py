@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 
 from codemender_agent.runners.aggregate import (
     _inject_token_metrics_into_html,
+    _render_step_summary,
     merge_db,
     run_aggregate_pipeline,
 )
@@ -602,7 +603,7 @@ class TestAggregateRunner(unittest.TestCase):
 
     summary_file = os.path.join(self.workspace_dir, "step_summary.md")
     with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_file}):
-      config = OrchestratorConfig(is_pr_scan=True)
+      config = OrchestratorConfig(is_pr_scan=False)
       summary_md = _render_step_summary(
           db_path,
           config,
@@ -614,7 +615,7 @@ class TestAggregateRunner(unittest.TestCase):
 
     self.assertIn("# 🛡️ CodeMender Security Remediation Summary", summary_md)
     self.assertIn("my-org/my-repo", summary_md)
-    self.assertIn("Pull Request Scan (Clean as You Code)", summary_md)
+    self.assertIn("Nightly Repository Scan", summary_md)
     self.assertIn("fid-1", summary_md)
     self.assertIn("FIXED", summary_md)
     self.assertIn("PRE_EXISTING_IGNORED", summary_md)
@@ -693,8 +694,9 @@ class TestAggregateRunner(unittest.TestCase):
         ],
     }
 
+    # Write raw sarif with trailing log line (simulating cm report shutdown logs)
     with open(sarif_path, "w", encoding="utf-8") as f:
-      json.dump(raw_sarif, f)
+      f.write(json.dumps(raw_sarif) + "\n2026-08-28T16:35:50Z [INFO] 📄 Session log: /github/home/log.log\n")
 
     # Sanitize for Nightly scan (is_pr_scan=False)
     _sanitize_sarif_file(sarif_path, repo_dir, skipped_finding_ids={"fid-1"}, is_pr_scan=False)
@@ -777,6 +779,42 @@ class TestAggregateRunner(unittest.TestCase):
     sarif_called = any("report" in c and "sarif" in c for c in cmd_names)
     self.assertTrue(html_called)
     self.assertTrue(sarif_called)
+
+  def test_render_step_summary_pr_scan_omits_pre_existing_findings(self):
+    """Verify that _render_step_summary omits PRE_EXISTING_IGNORED findings on PR scans."""
+    from codemender_agent.config import OrchestratorConfig
+
+    db_dir = os.path.join(self.workspace_dir, "test_pr_summary")
+    os.makedirs(db_dir, exist_ok=True)
+    base_db = os.path.join(db_dir, "state.db")
+    self.create_test_db(
+        base_db,
+        [
+            {"finding_id": "fid-1", "title": "SQL Injection in PR diff", "status": "FIXED", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-2", "title": "Pre-existing XSS", "status": "PRE_EXISTING_IGNORED", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-3", "title": "Dismissed Finding", "status": "DISMISSED", "updated_at": "2026-08-01"},
+        ],
+    )
+
+    summary_file = os.path.join(self.workspace_dir, "pr_step_summary.md")
+    cfg = OrchestratorConfig(is_pr_scan=True, github_step_summary=summary_file)
+    summary_md = _render_step_summary(
+        base_db,
+        cfg,
+        owner="ilbzzz",
+        repo_name="juice-shop-local",
+        target_sha="1e677199",
+    )
+
+    self.assertIn("Pull Request Scan (Clean as You Code)", summary_md)
+    # Total should reflect ONLY the 1 PR-scoped finding
+    self.assertIn("| 1 | 1 | 0 | 0 | 0 | 0 |", summary_md)
+    # fid-1 should be listed in the table
+    self.assertIn("`fid-1`", summary_md)
+    # fid-2 and fid-3 should NOT be in the table
+    self.assertNotIn("`fid-2`", summary_md)
+    self.assertNotIn("`fid-3`", summary_md)
+    self.assertNotIn("Pre-existing XSS", summary_md)
 
 
 if __name__ == "__main__":

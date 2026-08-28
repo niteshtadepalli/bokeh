@@ -20,7 +20,10 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from codemender_agent.runners.scan import run_scan_pipeline
+from codemender_agent.runners.scan import (
+    _render_zero_findings_summary,
+    run_scan_pipeline,
+)
 
 
 class TestScanRunner(unittest.TestCase):
@@ -486,6 +489,26 @@ class TestScanRunner(unittest.TestCase):
     self.assertIn("matrix=[0]", output_content)
     self.assertIn("findings_count=1", output_content)
     self.assertIn("target_sha=targetsha123", output_content)
+
+  def test_render_zero_findings_summary_pr_scan_hides_legacy_notes(self):
+    """Verify that _render_zero_findings_summary omits pre-existing/legacy notes on PR scans."""
+    summary_file = os.path.join(self.workspace_dir, "step_summary.md")
+    with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_file}):
+      _render_zero_findings_summary(
+          owner="ilbzzz",
+          repo_name="juice-shop-local",
+          target_sha="1e677199",
+          is_pr_scan=True,
+          filtered_reasons="10 pre-existing findings and 0 duplicate branches/PRs dismissed.",
+      )
+
+    self.assertTrue(os.path.exists(summary_file))
+    with open(summary_file, "r", encoding="utf-8") as f:
+      content = f.read()
+
+    self.assertIn("Pull Request Scan (Clean as You Code)", content)
+    self.assertNotIn("pre-existing findings", content)
+    self.assertNotIn("- **Note:**", content)
 
 
 if __name__ == "__main__":

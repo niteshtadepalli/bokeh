@@ -23,6 +23,7 @@ from codemender_agent.vcs.git import (
     enforce_https_url,
     generate_branch_name,
     get_git_auth_header,
+    normalize_repo_relative_path,
     parse_repo_owner_and_name,
     sanitize_git_url,
     setup_local_git_excludes,
@@ -96,6 +97,44 @@ class TestVcsGit(unittest.TestCase):
     self.assertEqual(branch, "codemender/fix-sql-injection-abcdef12")
 
 
+
+  def test_normalize_repo_relative_path(self):
+    """Verify normalize_repo_relative_path strips leading CI runner mount patterns and paths."""
+    test_cases = [
+        (
+            "/__w/juice-shop-local/juice-shop-local/juice-shop-local/routes/profileImageUrlUpload.ts",
+            "/__w/juice-shop-local/juice-shop-local/juice-shop-local",
+            "routes/profileImageUrlUpload.ts",
+        ),
+        (
+            "/__w/juice-shop-local/juice-shop-local/juice-shop-local/routes/profileImageUrlUpload.ts",
+            None,
+            "routes/profileImageUrlUpload.ts",
+        ),
+        (
+            "/workspace/juice-shop-local/routes/profileImageUrlUpload.ts",
+            "/workspace/juice-shop-local",
+            "routes/profileImageUrlUpload.ts",
+        ),
+        (
+            "/github/workspace/routes/profileImageUrlUpload.ts",
+            None,
+            "routes/profileImageUrlUpload.ts",
+        ),
+        (
+            "./routes/profileImageUrlUpload.ts",
+            None,
+            "routes/profileImageUrlUpload.ts",
+        ),
+        (
+            "routes/profileImageUrlUpload.ts",
+            None,
+            "routes/profileImageUrlUpload.ts",
+        ),
+    ]
+    for path, repo_dir, expected in test_cases:
+      with self.subTest(path=path, repo_dir=repo_dir):
+        self.assertEqual(normalize_repo_relative_path(path, repo_dir=repo_dir), expected)
 
   def test_setup_local_git_excludes(self):
     """Verify local git excludes are correctly appended without duplicates."""

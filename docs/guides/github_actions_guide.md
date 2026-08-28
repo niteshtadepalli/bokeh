@@ -6,7 +6,8 @@ This guide provides step-by-step instructions for onboarding repositories to
 CodeMender runs as a decentralized, 3-stage parallel pipeline inside
 containerized GitHub Actions runners, enabling automated vulnerability scanning,
 exploit verification, and patch synthesis with **zero external cloud storage
-buckets** required.
+buckets or dedicated compute infrastructure required** (requiring only Vertex AI
+API access for AI model reasoning).
 
 --------------------------------------------------------------------------------
 
@@ -15,7 +16,7 @@ buckets** required.
 CodeMender Orchestrator in GitHub Actions operates as a decentralized, 3-stage
 parallel scanning and automated remediation pipeline running completely within
 containerized GitHub Actions runners without requiring external cloud storage
-buckets:
+buckets or dedicated compute infrastructure:
 
 *   **Universal Container Runner (`codemender-runner`)**: Pre-baked container
     image (`ghcr.io/ilbzzz/codemender-runner:latest` or custom BYOI) containing
@@ -148,7 +149,7 @@ is triggered on a recurring schedule or against an active Pull Request:
 
 | Feature | Scheduled Nightly Scan | Internal Pull Request Scan | Fork Pull Request Scan |
 | :--- | :--- | :--- | :--- |
-| **Trigger Event** | `schedule` (cron) / `workflow_dispatch` | `pull_request` (`opened`, `synchronize`, `labeled`) | `pull_request` (`opened`, `synchronize`, `labeled`) |
+| **Trigger Event** | `schedule` (cron) / `workflow_dispatch` | `pull_request` (`types: [labeled]`) | `pull_request` (`types: [labeled]`) |
 | **Activation Condition** | Cron triggers on default branch | `security-scan` label on PR | `security-scan` label on PR |
 | **Target Base Ref** | Default branch (`main` / `master`) | PR Base branch (e.g. `main`) | PR Base branch |
 | **Scan Scope** | Entire repository (`cm find .`) | Differential: PR changed lines only | Differential: PR changed lines only |
@@ -198,9 +199,13 @@ Pull Request scans ensure that no new security vulnerabilities are merged into
 the codebase, while preventing legacy repository debt from blocking developer
 pull requests.
 
-1.  **Triggering & Labeling**:
-    *   Triggered on `pull_request` events (`opened`, `synchronize`, `labeled`)
-        when the PR has the **`security-scan`** label.
+1.  **Triggering & Labeling (`types: [labeled]`)**:
+    *   Triggered on `pull_request` events when a PR is **`labeled`** with the
+        **`security-scan`** label.
+    *   **Zero Noise & Skipped Runs**: By configuring `types: [labeled]` (rather
+        than `opened` or `synchronize`), GitHub Actions will NOT spawn 1-second
+        "Skipped" workflow runs when regular PRs are opened or pushed to. The
+        workflow activates solely when the security label is attached.
     *   **Automating in Production**: Teams automate label assignment using
         GitHub Actions (`actions/labeler`), label bots, or workflow conditions
         (see Section 7).
@@ -528,7 +533,7 @@ on:
   schedule:
     - cron: '0 2 * * 0'  # Weekly on Sunday at 2:00 AM UTC
   pull_request:
-    types: [opened, synchronize, labeled]
+    types: [labeled]  # Only triggers on labeling (avoids 1s skipped run noise on PR open/push)
     branches: [main, master]
   workflow_dispatch:
 
@@ -584,7 +589,7 @@ on:
   schedule:
     - cron: '0 2 * * 0'  # Weekly on Sunday at 2:00 AM UTC
   pull_request:
-    types: [opened, synchronize, labeled]
+    types: [labeled]      # Only triggers on labeling (avoids 1s skipped run noise on PR open/push)
     branches: [main, master]
   workflow_dispatch:
 
@@ -622,7 +627,7 @@ on:
   schedule:
     - cron: '0 2 * * 0'
   pull_request:
-    types: [opened, synchronize, labeled]
+    types: [labeled]      # Only triggers on labeling (avoids 1s skipped run noise on PR open/push)
     branches: [main, master]
   workflow_dispatch:
     inputs:

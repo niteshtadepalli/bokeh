@@ -141,7 +141,9 @@ class OrchestratorConfig:
     )
     total_workers = int(total_workers_env) if total_workers_env is not None and str(total_workers_env).isdigit() else None
 
-    target_sha = os.environ.get("CODEMENDER_TARGET_SHA")
+    target_sha = os.environ.get("CODEMENDER_TARGET_SHA") or os.environ.get(
+        "GITHUB_SHA"
+    )
     base_workspace_url = os.environ.get("CODEMENDER_BASE_WORKSPACE_URL")
     partition_urls = os.environ.get("CODEMENDER_PARTITION_URLS")
     upload_urls = os.environ.get("CODEMENDER_UPLOAD_URLS")
