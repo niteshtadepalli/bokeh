@@ -372,7 +372,8 @@ class TestWorkerRunner(unittest.TestCase):
 
     mock_run_cmd.side_effect = run_cmd_side_effect
 
-    # 1. Test Internal PR -> Child PR targeting pr_head_ref
+    # 1. Test Internal PR -> Child PR targeting pr_head_ref and linking to Parent PR
+    mock_create_pr.return_value = "https://github.com/owner/repo/pull/101"
     with unittest.mock.patch.dict(
         os.environ,
         {
@@ -380,23 +381,38 @@ class TestWorkerRunner(unittest.TestCase):
             "CODEMENDER_IS_PR_SCAN": "true",
             "CODEMENDER_PR_HEAD_REF": "feature/payments",
             "CODEMENDER_PR_BASE_REF": "main",
+            "CODEMENDER_PR_NUMBER": "42",
         },
     ):
       run_worker_pipeline()
 
-    # Verify Child PR targeted feature/payments as base_branch
+    # Verify Child PR targeted feature/payments as base_branch and referenced Parent PR
     mock_create_pr.assert_called_with(
         token="fake-token",
         owner="owner",
         repo="repo",
-        title=unittest.mock.ANY,
+        title="fix(security): resolve SQL_INJECTION vulnerability in db.py (Child PR for #42)",
         body=unittest.mock.ANY,
         head_branch=unittest.mock.ANY,
         base_branch="feature/payments",
     )
+    self.assertIn(
+        "**Parent PR**: #42 (Branch: `feature/payments`)",
+        mock_create_pr.call_args.kwargs.get("body"),
+    )
+
+    # Verify notification comment posted to Parent PR #42 with Child PR #101 link
+    mock_create_comment.assert_called_once()
+    self.assertEqual(mock_create_comment.call_args.kwargs.get("pr_number"), 42)
+    self.assertIn(
+        "https://github.com/owner/repo/pull/101",
+        mock_create_comment.call_args.kwargs.get("body"),
+    )
+    self.assertIn("#101", mock_create_comment.call_args.kwargs.get("body"))
 
     # 2. Test Fork PR -> Skip Child PR push and post PR comment
     mock_create_pr.reset_mock()
+    mock_create_comment.reset_mock()
     with unittest.mock.patch.dict(
         os.environ,
         {
@@ -411,6 +427,31 @@ class TestWorkerRunner(unittest.TestCase):
     mock_create_pr.assert_not_called()
     mock_create_comment.assert_called_once()
     self.assertEqual(mock_create_comment.call_args.kwargs.get("pr_number"), 42)
+
+    # 3. Test Nightly/Mainline Scan (is_pr_scan=False) -> Standard PR without parent link or parent comment
+    mock_create_pr.reset_mock()
+    mock_create_comment.reset_mock()
+    mock_create_pr.return_value = "https://github.com/owner/repo/pull/102"
+    with unittest.mock.patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "false",
+        },
+    ):
+      run_worker_pipeline()
+
+    mock_create_pr.assert_called_with(
+        token="fake-token",
+        owner="owner",
+        repo="repo",
+        title="fix(security): resolve SQL_INJECTION vulnerability in db.py",
+        body=unittest.mock.ANY,
+        head_branch=unittest.mock.ANY,
+        base_branch="main",
+    )
+    self.assertNotIn("Parent PR", mock_create_pr.call_args.kwargs.get("body"))
+    mock_create_comment.assert_not_called()
 
 
 if __name__ == "__main__":
