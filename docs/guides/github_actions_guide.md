@@ -424,9 +424,9 @@ on:
         default: 'src/backend'
         type: string
       build_command:
-        description: 'Custom build & test command for verification'
+        description: 'Custom build & test command for verification (e.g. npm test, pytest)'
         required: false
-        default: 'npm test'
+        default: ''
         type: string
       max_tasks:
         description: 'Maximum parallel worker tasks'
@@ -457,10 +457,10 @@ jobs:
       runner_type: ubuntu-latest
 
       # Target directory or semicolon-separated paths to scan (Default: '.')
-      scan_target: ${{ inputs.scan_target || 'src/backend' }}
+      scan_target: ${{ inputs.scan_target || '.' }}
 
-      # Custom build/test verification command executed before opening PRs (Default: '')
-      build_command: ${{ inputs.build_command || 'npm test' }}
+      # Custom build/test verification command executed before opening PRs (Default: auto-detected if empty)
+      build_command: ${{ inputs.build_command }}
 
       # Maximum parallel worker tasks in Stage 2 (Default: 10 for Nightly, 4 for PR)
       max_tasks: ${{ inputs.max_tasks && fromJson(inputs.max_tasks) || 6 }}

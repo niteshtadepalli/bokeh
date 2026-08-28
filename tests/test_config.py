@@ -198,6 +198,21 @@ class TestConfig(unittest.TestCase):
               data = yaml.safe_load(f)
             self.assertEqual(data["build"]["command"], "npm run custom:test")
 
+  def test_inject_codemender_config_composite_build_command(self):
+    """Verify composite build commands with ampersands are safely preserved."""
+    from codemender_agent.config import OrchestratorConfig
+    with tempfile.TemporaryDirectory() as temp_home:
+      with tempfile.TemporaryDirectory() as repo_dir:
+        test_env = {"CODEMENDER_BUILD_COMMAND": "npm install && npm test"}
+        with unittest.mock.patch.dict(os.environ, test_env, clear=True):
+          cfg = OrchestratorConfig.from_env()
+          with unittest.mock.patch("os.path.expanduser", return_value=temp_home):
+            inject_codemender_config(repo_dir, config=cfg)
+            out_config = os.path.join(temp_home, ".codemender", "config.yaml")
+            with open(out_config, "r") as f:
+              data = yaml.safe_load(f)
+            self.assertEqual(data["build"]["command"], "npm install && npm test")
+
 
 if __name__ == "__main__":
   unittest.main()

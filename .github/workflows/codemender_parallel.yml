@@ -109,7 +109,7 @@ jobs:
     timeout-minutes: 55
     container:
       image: ${{ inputs.runner_image }}
-      options: --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+      options: --privileged
     env:
       GH_APP_ID: ${{ secrets.github_app_id }}
       GH_APP_KEY: ${{ secrets.github_app_private_key }}
@@ -190,7 +190,7 @@ jobs:
     timeout-minutes: 55
     container:
       image: ${{ inputs.runner_image }}
-      options: --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+      options: --privileged
     env:
       GH_APP_ID: ${{ secrets.github_app_id }}
       GH_APP_KEY: ${{ secrets.github_app_private_key }}
@@ -267,7 +267,7 @@ jobs:
     timeout-minutes: 30
     container:
       image: ${{ inputs.runner_image }}
-      options: --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+      options: --privileged
     env:
       GH_APP_ID: ${{ secrets.github_app_id }}
       GH_APP_KEY: ${{ secrets.github_app_private_key }}
