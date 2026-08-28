@@ -558,20 +558,6 @@ jobs:
       #   - Rust:                 'cargo test'
       build_command: 'npm test'
 
-      # Target directory path to scan (default: '.' for entire repository root)
-      scan_target: '.'
-
-      # Maximum number of parallel worker tasks spawned in Stage 2 (default: 10)
-      max_tasks: 6
-
-      # Enforce blocking Security Quality Gate on Pull Requests (default: true)
-      # If true: Stage 3 exits with code 1 if active vulnerabilities exist on PR diff (blocking merge)
-      # If false: Informational only; reports and PRs are created without failing the status check
-      fail_on_findings: true
-
-      # Upload SARIF findings to GitHub Security Tab and PR Files Changed annotations (default: true)
-      upload_sarif: true
-
     secrets:
       # --- Google Cloud Platform Authentication (Keyless Workload Identity Federation) ---
       gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -778,7 +764,6 @@ jobs:
       scan_target: 'services/backend'
       build_command: 'pytest services/backend/tests'
       max_tasks: 4
-      fail_on_findings: true
     secrets:
       gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
@@ -796,7 +781,6 @@ jobs:
       scan_target: 'services/frontend'
       build_command: 'npm test --prefix services/frontend'
       max_tasks: 4
-      fail_on_findings: true
     secrets:
       gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}

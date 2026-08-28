@@ -101,6 +101,10 @@ permissions:
   actions: read
   packages: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   GH_APP_ID: ${{ secrets.github_app_id }}
   GH_APP_KEY: ${{ secrets.github_app_private_key }}

@@ -509,6 +509,14 @@ def _filter_findings(
       skipped_finding_ids.append(finding_id)
       continue
 
+    # Log active finding retained for Stage 2 remediation
+    logger.info(
+        "Retaining finding %s (%s in %s near line %d) for remediation.",
+        finding_id,
+        vuln_type,
+        file_path,
+        start_line,
+    )
     active_findings.append(finding)
 
   return active_findings, skipped_finding_ids, ignored_finding_ids
