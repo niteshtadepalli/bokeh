@@ -784,7 +784,6 @@ def run_worker_pipeline() -> None:
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
   repo_dir = os.path.join(workspace_dir, repo_name)
-  scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
 
   # 5. Clone repository and setup target SHA / working base ref
   target_sha = config.target_sha
@@ -799,7 +798,10 @@ def run_worker_pipeline() -> None:
       is_pr_scan=config.is_pr_scan,
   )
 
-  # 6. Restore base workspace and download partition slice
+  # 6. Initialize local sandbox cache environment
+  scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
+
+  # 7. Restore base workspace and download partition slice
   codemender_home = os.path.expanduser("~/.codemender")
   _, finding_ids = _restore_state(
       base_workspace_url,

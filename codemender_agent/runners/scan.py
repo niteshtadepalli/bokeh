@@ -170,6 +170,10 @@ def _sync_repository(
 
   # 1. Fresh clone if repository directory does not already exist
   if not os.path.exists(os.path.join(repo_dir, ".git")):
+    # Clean stale or non-git directory if present to prevent clone destination errors
+    if os.path.exists(repo_dir):
+      shutil.rmtree(repo_dir)
+
     # Configure git clone command with authorization header
     clone_cmd = [
         "git",
@@ -734,7 +738,6 @@ def run_scan_pipeline() -> None:
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
   repo_dir = os.path.join(workspace_dir, repo_name)
-  scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
 
   # 3. Synchronize repository and record the target commit SHA
   target_sha = _sync_repository(
@@ -747,7 +750,8 @@ def run_scan_pipeline() -> None:
       pr_base_ref=config.pr_base_ref,
   )
 
-  # 4. Initialize CodeMender CLI environment
+  # 4. Initialize CodeMender CLI environment and local cache paths
+  scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
   cm_binary = shutil.which("cm") or "cm"
   log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   _init_codemender(repo_dir, scrubbed_env, cm_binary, config=config)

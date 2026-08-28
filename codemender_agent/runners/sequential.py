@@ -66,9 +66,10 @@ def run_sequential_pipeline() -> None:
   # Step 1: Single-Sync Git Rule - clone repository if not present or pull latest
   logger.info("Syncing repository: %s", clean_repo_url)
   repo_dir = os.path.join(workspace_dir, repo_name)
-  scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
 
   if not os.path.exists(os.path.join(repo_dir, ".git")):
+    if os.path.exists(repo_dir):
+      shutil.rmtree(repo_dir)
     clone_cmd = [
         "git",
         "-c",
@@ -76,21 +77,6 @@ def run_sequential_pipeline() -> None:
         "clone",
         "--depth",
         "1",
-        clean_repo_url,
-        repo_dir,
-    ]
-    run_command(clone_cmd, cwd=workspace_dir)
-  else:
-    logger.info("Repository directory exists, fetching latest state...")
-    try:
-      curr_branch = run_command(
-          ["git", "branch", "--show-current"], cwd=repo_dir
-      ).stdout.strip()
-    except Exception:
-      curr_branch = "main"
-    if not curr_branch:
-      curr_branch = "main"
-
     fetch_cmd = [
         "git",
         "-c",
@@ -104,6 +90,8 @@ def run_sequential_pipeline() -> None:
     run_command(
         ["git", "reset", "--hard", f"origin/{curr_branch}"], cwd=repo_dir
     )
+
+  scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
 
   try:
     default_branch = run_command(
