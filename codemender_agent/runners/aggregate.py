@@ -312,15 +312,16 @@ def _discover_and_merge_local_worker_dbs(
   return worker_db_files
 
 
-def _aggregate_token_metrics(
+def _aggregate_worker_metadata(
     workspace_dir: str,
     bucket_name: str,
     scan_id: str,
     worker_db_blobs: list[str],
     storage_adapter: Optional[any] = None,
-) -> dict[str, dict[str, int]]:
-  """Discovers and parses scan_metadata.json and all worker metadata files to aggregate per-model token usage."""
+) -> tuple[dict[str, dict[str, int]], dict[str, str]]:
+  """Discovers and parses scan_metadata.json and all worker metadata files to aggregate per-model token usage and finding PR links."""
   token_usage_by_model: dict[str, dict[str, int]] = {}
+  finding_prs: dict[str, str] = {}
 
   def _ingest_token_usage(token_dict: any):
     if not isinstance(token_dict, dict):
@@ -390,6 +391,8 @@ def _aggregate_token_metrics(
         with open(meta_path, "r", encoding="utf-8") as f:
           w_meta = json.load(f)
         _ingest_token_usage(w_meta.get("token_usage"))
+        if "finding_prs" in w_meta and isinstance(w_meta["finding_prs"], dict):
+          finding_prs.update(w_meta["finding_prs"])
       except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning("Failed to parse worker metadata %s: %s", meta_path, e)
 
@@ -411,7 +414,25 @@ def _aggregate_token_metrics(
       total_all,
       json.dumps(token_usage_by_model),
   )
-  return token_usage_by_model
+  return token_usage_by_model, finding_prs
+
+
+def _aggregate_token_metrics(
+    workspace_dir: str,
+    bucket_name: str,
+    scan_id: str,
+    worker_db_blobs: list[str],
+    storage_adapter: Optional[any] = None,
+) -> dict[str, dict[str, int]]:
+  """Wrapper around _aggregate_worker_metadata returning only token totals for backwards compatibility."""
+  token_usage, _ = _aggregate_worker_metadata(
+      workspace_dir,
+      bucket_name,
+      scan_id,
+      worker_db_blobs,
+      storage_adapter=storage_adapter,
+  )
+  return token_usage
 
 
 def _inject_token_metrics_into_html(
@@ -537,10 +558,19 @@ def _render_step_summary(
     target_sha: Optional[str] = None,
     token_totals: Optional[dict[str, dict[str, int]]] = None,
     repo_dir: Optional[str] = None,
-) -> str:
+    finding_prs: Optional[dict[str, str]] = None,
+) -> tuple[str, int]:
   """Renders a comprehensive GitHub Actions Step Summary Markdown dashboard."""
   if not repo_dir and config.workspace_dir and repo_name:
     repo_dir = os.path.join(config.workspace_dir, repo_name)
+
+  severity_badges = {
+      "CRITICAL": "🔴 CRITICAL",
+      "HIGH": "🟠 HIGH",
+      "MEDIUM": "🟡 MEDIUM",
+      "LOW": "🔵 LOW",
+      "INFO": "⚪ INFO",
+  }
 
   findings_stats = {
       "total": 0,
@@ -561,7 +591,16 @@ def _render_step_summary(
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='findings'")
         if cursor.fetchone():
           cols = _get_table_columns(cursor, "findings", "main")
-          select_cols = ["finding_id", "title", "status", "file_path", "start_line", "vuln_type"]
+          select_cols = [
+              "finding_id",
+              "title",
+              "status",
+              "file_path",
+              "start_line",
+              "vuln_type",
+              "vuln_id",
+              "severity",
+          ]
           avail_cols = [c for c in select_cols if c in cols]
           cursor.execute(f"SELECT {', '.join(avail_cols)} FROM findings ORDER BY finding_id")
           # 2. Iterate through each finding and bucket into status counters
@@ -599,6 +638,8 @@ def _render_step_summary(
                 "file_path": clean_file_path,
                 "start_line": row_dict.get("start_line", 0),
                 "vuln_type": row_dict.get("vuln_type", ""),
+                "vuln_id": row_dict.get("vuln_id", ""),
+                "severity": (row_dict.get("severity") or "").upper(),
             })
     except sqlite3.Error as e:  # pylint: disable=broad-exception-caught
       logger.warning("Failed to query base_db for step summary: %s", e)
@@ -653,19 +694,58 @@ def _render_step_summary(
     lines.extend([
         "### 🛠️ Discovered Findings & Remediation Status",
         "",
-        "| Finding ID | Vulnerability Type | Location | Status | Title |",
-        "| :--- | :--- | :--- | :--- | :--- |",
+        "| Finding ID | Severity | Vulnerability Type | Location | Status | Title |",
+        "| :--- | :---: | :--- | :--- | :---: | :--- |",
     ])
     for f in findings_list:
+      fid = f["finding_id"]
+      sev = f.get("severity", "")
+      sev_badge = severity_badges.get(sev, f"⚪ {sev}" if sev else "⚪ UNKNOWN")
+
+      vuln_type = (f.get("vuln_type") or "").strip()
+      vuln_id = (f.get("vuln_id") or "").strip()
+      # Format vulnerability type with CWE ID if present and not already duplicated
+      if vuln_id:
+        if vuln_type:
+          if vuln_id.lower() in vuln_type.lower():
+            vuln_display = vuln_type
+          else:
+            vuln_display = f"{vuln_type} ({vuln_id})"
+        else:
+          vuln_display = vuln_id
+      else:
+        vuln_display = vuln_type or "N/A"
+
       # Location formatting: evaluate file_path:start_line directly (start_line=None/0 evaluates as file:None/0 for whole-file findings by design)
       loc = f"{f['file_path']}:{f['start_line']}" if f["file_path"] else "N/A"
       title_clean = f["title"].replace("|", "\\|") if f["title"] else "-"
+      status = f["status"]
+
+      # Format Status with Child/Fix Pull Request hyperlinking if available
+      pr_url = (finding_prs or {}).get(fid)
+      if status in ("FIXED", "REMEDIATED") and pr_url:
+        pr_match = re.search(r"/pull/(\d+)", pr_url)
+        if pr_match:
+          status_display = f"[{status} (#{pr_match.group(1)})]({pr_url})"
+        else:
+          status_display = f"[{status}]({pr_url})"
+      else:
+        status_display = f"`{status}`"
+
       lines.append(
-          f"| `{f['finding_id']}` | `{f['vuln_type'] or 'N/A'}` | `{loc}` | `{f['status']}` | {title_clean} |"
+          f"| `{fid}` | {sev_badge} | `{vuln_display}` | `{loc}` | {status_display} | {title_clean} |"
       )
     lines.append("")
 
-  # 5. Construct token usage summary table if metrics are available
+  # 5. Add callout box pointing to downloadable report artifacts
+  lines.extend([
+      "> [!TIP]",
+      "> 📄 **Interactive Security Report & Export Artifacts**",
+      "> Download the **`codemender-report`** archive from the [Artifacts section](#artifacts) below for full interactive HTML graphs, SARIF definitions, and raw JSON telemetry.",
+      "",
+  ])
+
+  # 6. Construct token usage summary table if metrics are available
   if token_totals:
     token_md = render_token_usage_markdown(token_totals)
     if token_md:
@@ -673,13 +753,13 @@ def _render_step_summary(
 
   summary_md = "\n".join(lines)
 
-  # 6. Guardrail: 1000 KiB maximum step summary size
+  # 7. Guardrail: 1000 KiB maximum step summary size
   max_bytes = 1000 * 1024
   encoded = summary_md.encode("utf-8")
   if len(encoded) > max_bytes:
     summary_md = encoded[:max_bytes - 200].decode("utf-8", errors="ignore") + "\n\n... *(Summary truncated due to GitHub Step Summary size limit)*\n"
 
-  # 7. Write to GITHUB_STEP_SUMMARY environment file if executing inside GitHub Actions
+  # 8. Write to GITHUB_STEP_SUMMARY environment file if executing inside GitHub Actions
   summary_file = config.github_step_summary or os.environ.get("GITHUB_STEP_SUMMARY")
   if summary_file:
     try:
@@ -1216,15 +1296,25 @@ def run_aggregate_pipeline() -> None:
     )
     _verify_worker_db_counts(worker_db_blobs, total_workers_str)
 
-  # 7. Aggregate Token Metrics (Preview Mode only)
+  # 7. Aggregate Token Metrics & Worker Metadata
   token_totals = None
-  if config.cli_version == "preview":
-    token_totals = _aggregate_token_metrics(
+  finding_prs: dict[str, str] = {}
+  try:
+    if config.cli_version == "preview":
+      token_totals = _aggregate_token_metrics(
+          workspace_dir,
+          bucket_name,
+          scan_id,
+          worker_db_blobs,
+      )
+    _, finding_prs = _aggregate_worker_metadata(
         workspace_dir,
         bucket_name,
         scan_id,
         worker_db_blobs,
     )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Failed to aggregate worker metadata: %s", e)
 
   # 8. Render Step Summary before DB cleanup (preserves differential statistics)
   _, active_findings_count = _render_step_summary(
@@ -1235,6 +1325,7 @@ def run_aggregate_pipeline() -> None:
       target_sha=target_sha,
       token_totals=token_totals,
       repo_dir=repo_dir,
+      finding_prs=finding_prs,
   )
 
   # 9. Collect SKIPPED_DUPLICATE IDs for Nightly SARIF suppression

@@ -623,6 +623,7 @@ def _process_finding(
             pr_number=config.pr_number,
             body=parent_comment,
         )
+      return child_pr_url
   except Exception as e:  # pylint: disable=broad-exception-caught
     logger.error("Error creating branch/PR for finding %s: %s", finding_id, e)
     if os.path.exists(state_db_path):
@@ -638,6 +639,7 @@ def _process_finding(
             "Failed to update status to PR_CREATION_FAILED in worker state.db: %s",
             db_err,
         )
+    return None
   finally:
     # Always reset workspace back to clean working base ref
     run_command(["git", "checkout", "-f", working_base_ref], cwd=repo_dir)
@@ -649,6 +651,7 @@ def _save_and_upload_worker_metadata(
     worker_index: int,
     worker_token_usage: dict[str, dict[str, int]],
     metadata_url: Optional[str],
+    finding_prs: Optional[dict[str, str]] = None,
 ) -> None:
   """Saves worker metadata JSON and uploads it to GCS or transit storage."""
   # 1. Validate that metadata destination URL is available
@@ -666,6 +669,7 @@ def _save_and_upload_worker_metadata(
       "worker_index": worker_index,
       "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
       "token_usage": worker_token_usage,
+      "finding_prs": finding_prs or {},
   }
   meta_path = os.path.join(
       workspace_dir, f"worker_{worker_index}_metadata.json"
@@ -854,6 +858,8 @@ def run_worker_pipeline() -> None:
 
   findings_dict = {f["FindingID"]: f for f in all_findings if "FindingID" in f}
 
+  worker_finding_prs: dict[str, str] = {}
+
   # 10. Process each assigned finding sequentially (Verify -> Fix -> Stage -> PR)
   for finding_id in finding_ids:
     finding = findings_dict.get(finding_id)
@@ -863,7 +869,8 @@ def run_worker_pipeline() -> None:
       )
       continue
 
-    _process_finding(
+    # Execute verify, fix, staging, and PR creation routine for finding
+    pr_url = _process_finding(
         finding_id,
         finding,
         repo_dir,
@@ -879,6 +886,9 @@ def run_worker_pipeline() -> None:
         worker_token_usage,
         config=config,
     )
+    # Track generated Pull Request URL for Step Summary linking
+    if pr_url and isinstance(pr_url, str) and pr_url.startswith("http"):
+      worker_finding_prs[finding_id] = pr_url
 
   # 11. Upload mutated worker state database shard and token telemetry
   logger.info("Uploading mutated database to transit storage...")
@@ -886,8 +896,13 @@ def run_worker_pipeline() -> None:
     logger.error("Failed to upload mutated database.")
     sys.exit(1)
 
+  # Upload worker metadata with accumulated token metrics and finding PR links
   _save_and_upload_worker_metadata(
-      workspace_dir, worker_index, worker_token_usage, metadata_url
+      workspace_dir,
+      worker_index,
+      worker_token_usage,
+      metadata_url,
+      finding_prs=worker_finding_prs,
   )
 
   # 12. Adjust file permissions on transit directory if running in local container

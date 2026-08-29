@@ -193,6 +193,13 @@ jobs:
           overwrite: true
           if-no-files-found: ignore
 
+      - name: Upload Clean SARIF Report
+        if: always() && inputs.upload_sarif && steps.run-scan.outputs.findings_count == '0' && hashFiles('report.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: report.sarif
+
   worker:
     name: Stage 2 - Worker ${{ matrix.worker_index }}
     needs: scan

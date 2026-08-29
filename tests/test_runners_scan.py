@@ -226,6 +226,14 @@ class TestScanRunner(unittest.TestCase):
 
     self.assertEqual(cm.exception.code, 0)
 
+    # Verify clean SARIF file was written to workspace
+    sarif_file = os.path.join(self.workspace_dir, "report.sarif")
+    self.assertTrue(os.path.exists(sarif_file))
+    with open(sarif_file, "r", encoding="utf-8") as f:
+      sarif_data = json.load(f)
+      self.assertEqual(sarif_data["version"], "2.1.0")
+      self.assertEqual(sarif_data["runs"][0]["results"], [])
+
     manifest_uploaded = False
     for call in mock_upload_gcs.call_args_list:
       local_path, _, dest_blob = call[0]

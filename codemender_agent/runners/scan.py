@@ -101,6 +101,44 @@ def _emit_github_output(
       logger.warning("Failed to write to GITHUB_OUTPUT: %s", e)
 
 
+def _write_clean_sarif_file(
+    repo_dir: Optional[str], workspace_dir: str
+) -> str:
+  """Generates a valid empty SARIF report when zero findings are discovered."""
+  clean_sarif = {
+      "$schema": (
+          "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+      ),
+      "version": "2.1.0",
+      "runs": [
+          {
+              "tool": {
+                  "driver": {
+                      "name": "CodeMender",
+                      "semanticVersion": "1.0.0",
+                      "rules": [],
+                  }
+              },
+              "results": [],
+          }
+      ],
+  }
+  content = json.dumps(clean_sarif, indent=2)
+  # Write clean SARIF to both repo_dir and workspace_dir for workflow actions
+  for dest_dir in [repo_dir, workspace_dir]:
+    if dest_dir and os.path.exists(dest_dir):
+      sarif_path = os.path.join(dest_dir, "report.sarif")
+      try:
+        with open(sarif_path, "w", encoding="utf-8") as f:
+          f.write(content)
+        logger.info("Wrote clean SARIF report to %s", sarif_path)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "Failed to write clean SARIF report to %s: %s", sarif_path, e
+        )
+  return os.path.join(workspace_dir, "report.sarif")
+
+
 def _render_zero_findings_summary(
     owner: str,
     repo_name: str,
@@ -782,6 +820,8 @@ def run_scan_pipeline() -> None:
   # 7. Handle case where repository scan returns zero findings
   if not findings:
     logger.info("Zero findings confirmed after scanning. Exiting Stage 1.")
+    # Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
+    _write_clean_sarif_file(repo_dir, workspace_dir)
     # Render clean Step Summary before exiting
     _render_zero_findings_summary(
         owner,
@@ -867,6 +907,8 @@ def run_scan_pipeline() -> None:
   # 10. Handle case where all findings were filtered out
   if active_findings_count == 0:
     logger.info("Zero active findings after filtering. Exiting Stage 1.")
+    # Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
+    _write_clean_sarif_file(repo_dir, workspace_dir)
     filtered_reason = (
         None
         if config.is_pr_scan

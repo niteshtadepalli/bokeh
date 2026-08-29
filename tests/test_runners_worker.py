@@ -81,7 +81,7 @@ class TestWorkerRunner(unittest.TestCase):
     mock_is_duplicate_pr.return_value = False
     mock_is_finding_verified.return_value = True
     mock_get_finding_status.return_value = "FIXED"
-    mock_create_pr.return_value = True
+    mock_create_pr.return_value = "https://github.com/org/repo/pull/42"
 
     def download_side_effect(url, dest_path):
       if "partition" in url:
@@ -157,6 +157,17 @@ class TestWorkerRunner(unittest.TestCase):
         "http://signed-url/metadata_0.json",
         content_type="application/json",
     )
+
+    # Verify worker metadata JSON contents
+    meta_path = os.path.join(self.workspace_dir, "worker_0_metadata.json")
+    with open(meta_path, "r", encoding="utf-8") as f:
+      meta_data = json.load(f)
+      self.assertEqual(meta_data["worker_index"], 0)
+      self.assertIn("finding_prs", meta_data)
+      self.assertEqual(
+          meta_data["finding_prs"].get("fid-1"),
+          "https://github.com/org/repo/pull/42",
+      )
 
   @unittest.mock.patch("codemender_agent.runners.worker.run_command")
   @unittest.mock.patch("codemender_agent.runners.worker.download_from_url")

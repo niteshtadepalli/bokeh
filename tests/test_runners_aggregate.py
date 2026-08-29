@@ -96,10 +96,22 @@ class TestAggregateRunner(unittest.TestCase):
     for f in findings_data:
       cursor.execute(
           """
-          INSERT INTO findings (finding_id, title, status, updated_at)
-          VALUES (?, ?, ?, ?)
+          INSERT INTO findings (
+              finding_id, title, status, updated_at, file_path, start_line, vuln_type, vuln_id, severity
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       """,
-          (f["finding_id"], f["title"], f["status"], f["updated_at"]),
+          (
+              f["finding_id"],
+              f["title"],
+              f["status"],
+              f["updated_at"],
+              f.get("file_path", ""),
+              f.get("start_line", 0),
+              f.get("vuln_type", ""),
+              f.get("vuln_id", ""),
+              f.get("severity", ""),
+          ),
       )
 
     if sessions_data:
@@ -595,9 +607,39 @@ class TestAggregateRunner(unittest.TestCase):
     self.create_test_db(
         db_path,
         [
-            {"finding_id": "fid-1", "title": "SQL Injection in Login", "status": "FIXED", "updated_at": "2026-08-01"},
-            {"finding_id": "fid-2", "title": "XSS in Profile", "status": "PRE_EXISTING_IGNORED", "updated_at": "2026-08-01"},
-            {"finding_id": "fid-3", "title": "CSRF in Settings", "status": "SKIPPED_DUPLICATE", "updated_at": "2026-08-01"},
+            {
+                "finding_id": "fid-1",
+                "title": "SQL Injection in Login",
+                "status": "FIXED",
+                "updated_at": "2026-08-01",
+                "severity": "CRITICAL",
+                "vuln_type": "SQL Injection",
+                "vuln_id": "CWE-89",
+                "file_path": "routes/login.ts",
+                "start_line": 42,
+            },
+            {
+                "finding_id": "fid-2",
+                "title": "XSS in Profile",
+                "status": "PRE_EXISTING_IGNORED",
+                "updated_at": "2026-08-01",
+                "severity": "HIGH",
+                "vuln_type": "Cross-Site Scripting",
+                "vuln_id": "CWE-79",
+                "file_path": "routes/profile.ts",
+                "start_line": 15,
+            },
+            {
+                "finding_id": "fid-3",
+                "title": "CSRF in Settings",
+                "status": "SKIPPED_DUPLICATE",
+                "updated_at": "2026-08-01",
+                "severity": "MEDIUM",
+                "vuln_type": "CSRF",
+                "vuln_id": "CWE-352",
+                "file_path": "routes/settings.ts",
+                "start_line": 100,
+            },
         ],
     )
 
@@ -611,6 +653,7 @@ class TestAggregateRunner(unittest.TestCase):
           repo_name="my-repo",
           target_sha="abc123456789",
           token_totals={"gemini-2.5-flash": {"in_tokens": 100, "out_tokens": 50, "total_tokens": 150}},
+          finding_prs={"fid-1": "https://github.com/my-org/my-repo/pull/42"},
       )
 
     self.assertEqual(count, 3)
@@ -618,9 +661,14 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertIn("my-org/my-repo", summary_md)
     self.assertIn("Nightly Repository Scan", summary_md)
     self.assertIn("fid-1", summary_md)
-    self.assertIn("FIXED", summary_md)
+    self.assertIn("🔴 CRITICAL", summary_md)
+    self.assertIn("🟠 HIGH", summary_md)
+    self.assertIn("🟡 MEDIUM", summary_md)
+    self.assertIn("SQL Injection (CWE-89)", summary_md)
+    self.assertIn("[FIXED (#42)](https://github.com/my-org/my-repo/pull/42)", summary_md)
     self.assertIn("PRE_EXISTING_IGNORED", summary_md)
     self.assertIn("SKIPPED_DUPLICATE", summary_md)
+    self.assertIn("Interactive Security Report & Export Artifacts", summary_md)
     self.assertIn("150", summary_md)
     self.assertIn("| `gemini-2.5-flash` | 100 | 50 | 150 |", summary_md)
     self.assertTrue(os.path.exists(summary_file))
