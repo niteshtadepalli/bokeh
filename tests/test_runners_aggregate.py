@@ -649,7 +649,7 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertIn("Summary truncated", summary_md)
 
   def test_sanitize_sarif_file(self):
-    """Test SARIF file path sanitization and duplicate suppression injection."""
+    """Test SARIF file path sanitization, message deduplication, and duplicate suppression injection."""
     from codemender_agent.runners.aggregate import _sanitize_sarif_file
 
     repo_dir = os.path.join(self.workspace_dir, "my-repo")
@@ -660,11 +660,35 @@ class TestAggregateRunner(unittest.TestCase):
         "version": "2.1.0",
         "runs": [
             {
-                "tool": {"driver": {"name": "CodeMender"}},
+                "tool": {
+                    "driver": {
+                        "name": "CodeMender",
+                        "rules": [
+                            {
+                                "id": "fid-1",
+                                "name": "SQL Injection",
+                                "shortDescription": {"text": "SQL Injection"},
+                                "fullDescription": {"text": "SQL Injection"},
+                            },
+                            {
+                                "id": "fid-2",
+                                "name": "XSS",
+                                "shortDescription": {"text": "XSS"},
+                                "fullDescription": {"text": "Cross-site scripting vulnerability"},
+                            },
+                        ],
+                    }
+                },
                 "results": [
                     {
                         "ruleId": "fid-1",
-                        "message": {"text": "SQL Injection"},
+                        "ruleIndex": 0,
+                        "message": {
+                            "text": (
+                                "SQL Injection in User Login: ## Root Cause Analysis (RCA)\n"
+                                "User input from `username` is directly concatenated into SQL query."
+                            )
+                        },
                         "locations": [
                             {
                                 "physicalLocation": {
@@ -678,7 +702,8 @@ class TestAggregateRunner(unittest.TestCase):
                     },
                     {
                         "ruleId": "fid-2",
-                        "message": {"text": "XSS"},
+                        "ruleIndex": 1,
+                        "message": {"text": "XSS in Profile Page"},
                         "locations": [
                             {
                                 "physicalLocation": {
@@ -706,13 +731,28 @@ class TestAggregateRunner(unittest.TestCase):
       sanitized = json.load(f)
 
     results = sanitized["runs"][0]["results"]
-    # Path should be relative
+    rules = sanitized["runs"][0]["tool"]["driver"]["rules"]
+
+    # 1. Path should be relative
     self.assertEqual(results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "src/db/user.py")
-    # Suppressions should be present for fid-1
+
+    # 2. Result message should be deduplicated (concise title only)
+    self.assertEqual(results[0]["message"]["text"], "SQL Injection in User Login")
+    self.assertEqual(results[1]["message"]["text"], "XSS in Profile Page")
+
+    # 3. Rule details should have formatted markdown help
+    self.assertEqual(rules[0]["shortDescription"]["text"], "SQL Injection in User Login")
+    self.assertIn("## Root Cause Analysis (RCA)", rules[0]["help"]["markdown"])
+    self.assertEqual(rules[0]["fullDescription"]["text"], "## Root Cause Analysis (RCA)")
+
+    # 4. Suppressions should be present for fid-1
     self.assertIn("suppressions", results[0])
     self.assertEqual(results[0]["suppressions"][0]["status"], "underReview")
-    # No suppressions for fid-2
+
+    # 5. No suppressions for fid-2
     self.assertNotIn("suppressions", results[1])
+    # Rule without concatenated analysis retains fullDescription and populates help
+    self.assertEqual(rules[1]["help"]["markdown"], "Cross-site scripting vulnerability")
 
   @patch("codemender_agent.runners.aggregate.run_command")
   @patch("codemender_agent.runners.aggregate.merge_db")

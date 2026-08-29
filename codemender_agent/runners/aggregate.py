@@ -704,7 +704,7 @@ def _sanitize_sarif_file(
     skipped_finding_ids: Optional[Set[str]] = None,
     is_pr_scan: bool = False,
 ) -> None:
-  """Sanitizes SARIF file paths to be repository-relative and injects suppressions for duplicates."""
+  """Sanitizes SARIF file paths, deduplicates finding messages, and formats Markdown rule help."""
   if not os.path.exists(sarif_path):
     return
 
@@ -719,8 +719,12 @@ def _sanitize_sarif_file(
 
     clean_repo_dir = os.path.abspath(repo_dir)
 
-    # Iterate through all runs and results to normalize file URIs and suppressions
+    # Iterate through all runs and results to normalize file URIs, deduplicate messages, and inject suppressions
     for run in (data.get("runs") or []):
+      driver = run.get("tool", {}).get("driver", {})
+      rules = driver.get("rules") or []
+      rules_by_id = {r.get("id"): r for r in rules if isinstance(r, dict) and r.get("id")}
+
       for result in (run.get("results") or []):
         # 1. Sanitize file URIs to make them workspace-relative (required by GitHub Code Scanning)
         for loc in (result.get("locations") or []):
@@ -751,7 +755,47 @@ def _sanitize_sarif_file(
                   clean_uri = os.path.basename(uri)
               art["uri"] = clean_uri
 
-        # 2. Inject suppression metadata on Nightly scans if finding is SKIPPED_DUPLICATE
+        # 2. Locate associated SARIF rule definition by ruleId or ruleIndex
+        rule_id = result.get("ruleId")
+        rule_idx = result.get("ruleIndex")
+        rule_obj = rules_by_id.get(rule_id) if rule_id else None
+        if not rule_obj and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
+          rule_obj = rules[rule_idx]
+
+        # 3. Clean and deduplicate result.message.text and populate rich rule.help.markdown
+        msg_obj = result.get("message")
+        if isinstance(msg_obj, dict):
+          raw_text = msg_obj.get("text", "")
+          if raw_text and ": " in raw_text:
+            # Split concatenated "Title: Analysis" payload produced by CLI SARIF exporter
+            title_part, analysis_part = raw_text.split(": ", 1)
+            clean_title = title_part.strip()
+            clean_analysis = analysis_part.strip()
+
+            if clean_title:
+              # Set clean, concise title on result message bubble above code line
+              msg_obj["text"] = clean_title
+
+            if rule_obj and clean_analysis:
+              # Promote rich Markdown analysis into rule.help for GitHub Code Scanning UI
+              rule_obj["shortDescription"] = {"text": clean_title or rule_obj.get("name", "Vulnerability")}
+              rule_obj["help"] = {
+                  "text": clean_analysis,
+                  "markdown": clean_analysis,
+              }
+              # Extract first line/sentence for fullDescription summary
+              first_line = clean_analysis.split("\n")[0].strip()
+              rule_obj["fullDescription"] = {"text": first_line if first_line else clean_title}
+          elif rule_obj and not rule_obj.get("help"):
+            # Ensure help.markdown is populated from existing fullDescription if help is missing
+            full_desc = rule_obj.get("fullDescription", {}).get("text", "")
+            if full_desc:
+              rule_obj["help"] = {
+                  "text": full_desc,
+                  "markdown": full_desc,
+              }
+
+        # 4. Inject suppression metadata on Nightly scans if finding is SKIPPED_DUPLICATE
         if not is_pr_scan and skipped_finding_ids:
           res_props = result.get("properties") or {}
           finding_id = result.get("ruleId") or res_props.get("finding_id")
@@ -765,7 +809,7 @@ def _sanitize_sarif_file(
                 }
             ]
 
-    # 3. Save sanitized SARIF report back to disk atomically
+    # 5. Save sanitized SARIF report back to disk atomically
     with open(sarif_path, "w", encoding="utf-8") as f:
       json.dump(data, f, indent=2)
     logger.info("Successfully sanitized SARIF report: %s", sarif_path)
