@@ -77,6 +77,21 @@ def run_sequential_pipeline() -> None:
         "clone",
         "--depth",
         "1",
+        clean_repo_url,
+        repo_dir,
+    ]
+    run_command(clone_cmd, cwd=workspace_dir)
+  else:
+    logger.info("Repository directory exists, fetching latest state...")
+    try:
+      curr_branch = run_command(
+          ["git", "branch", "--show-current"], cwd=repo_dir
+      ).stdout.strip()
+    except Exception:
+      curr_branch = "main"
+    if not curr_branch:
+      curr_branch = "main"
+
     fetch_cmd = [
         "git",
         "-c",
