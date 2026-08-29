@@ -106,6 +106,38 @@ def accumulate_model_token_usage(
   usage_dict[model_name]["total_tokens"] += token_metrics.get("total_tokens", 0)
 
 
+def render_token_usage_markdown(
+    token_totals: Optional[dict[str, dict[str, int]]],
+) -> str:
+  """Renders a formatted Markdown section with grand totals and per-model breakdown table."""
+  if not token_totals:
+    return ""
+
+  total_in = sum(m.get("in_tokens", 0) for m in token_totals.values())
+  total_out = sum(m.get("out_tokens", 0) for m in token_totals.values())
+  total_all = sum(m.get("total_tokens", 0) for m in token_totals.values())
+
+  lines = [
+      "### ⚡ LLM Token Usage Summary",
+      "",
+      f"- **Input Tokens:** {total_in:,}",
+      f"- **Output Tokens:** {total_out:,}",
+      f"- **Grand Total Tokens:** {total_all:,}",
+      "",
+      "| Model | Input Tokens | Output Tokens | Total Tokens |",
+      "| :--- | :---: | :---: | :---: |",
+  ]
+
+  for model_name, metrics in sorted(token_totals.items()):
+    m_in = metrics.get("in_tokens", 0)
+    m_out = metrics.get("out_tokens", 0)
+    m_tot = metrics.get("total_tokens", 0)
+    lines.append(f"| `{model_name}` | {m_in:,} | {m_out:,} | {m_tot:,} |")
+
+  lines.append("")
+  return "\n".join(lines)
+
+
 def build_cm_command(
     cm_binary: str,
     action: str,

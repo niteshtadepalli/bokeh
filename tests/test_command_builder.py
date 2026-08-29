@@ -19,6 +19,7 @@ from unittest.mock import patch
 from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import parse_token_metric
+from codemender_agent.utils import render_token_usage_markdown
 from codemender_agent.utils import resolve_command_model
 
 
@@ -39,6 +40,25 @@ class TestCommandBuilder(unittest.TestCase):
     # None or non-dict handling
     accumulate_model_token_usage(usage, "gemini-pro", None)
     self.assertEqual(usage["gemini-pro"]["total_tokens"], 240)
+
+  def test_render_token_usage_markdown(self):
+    # Empty / None handling
+    self.assertEqual(render_token_usage_markdown(None), "")
+    self.assertEqual(render_token_usage_markdown({}), "")
+
+    # Multi-model markdown table formatting
+    totals = {
+        "gemini-2.5-flash": {"in_tokens": 12000, "out_tokens": 500, "total_tokens": 12500},
+        "gemini-2.5-pro": {"in_tokens": 45000, "out_tokens": 3200, "total_tokens": 48200},
+    }
+    md = render_token_usage_markdown(totals)
+    self.assertIn("### ⚡ LLM Token Usage Summary", md)
+    self.assertIn("- **Input Tokens:** 57,000", md)
+    self.assertIn("- **Output Tokens:** 3,700", md)
+    self.assertIn("- **Grand Total Tokens:** 60,700", md)
+    self.assertIn("| Model | Input Tokens | Output Tokens | Total Tokens |", md)
+    self.assertIn("| `gemini-2.5-flash` | 12,000 | 500 | 12,500 |", md)
+    self.assertIn("| `gemini-2.5-pro` | 45,000 | 3,200 | 48,200 |", md)
 
   def test_parse_token_metric(self):
     self.assertEqual(parse_token_metric("41k"), 41000)

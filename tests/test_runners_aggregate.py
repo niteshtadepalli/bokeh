@@ -622,6 +622,7 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertIn("PRE_EXISTING_IGNORED", summary_md)
     self.assertIn("SKIPPED_DUPLICATE", summary_md)
     self.assertIn("150", summary_md)
+    self.assertIn("| `gemini-2.5-flash` | 100 | 50 | 150 |", summary_md)
     self.assertTrue(os.path.exists(summary_file))
 
   def test_render_step_summary_truncation(self):

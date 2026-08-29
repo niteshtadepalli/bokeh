@@ -510,6 +510,26 @@ class TestScanRunner(unittest.TestCase):
     self.assertNotIn("pre-existing findings", content)
     self.assertNotIn("- **Note:**", content)
 
+  def test_render_zero_findings_summary_with_token_totals(self):
+    """Verify that _render_zero_findings_summary renders per-model token table."""
+    summary_file = os.path.join(self.workspace_dir, "step_summary_tokens.md")
+    with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_file}):
+      _render_zero_findings_summary(
+          owner="ilbzzz",
+          repo_name="juice-shop-local",
+          target_sha="1e677199",
+          is_pr_scan=False,
+          token_totals={"gemini-2.5-flash": {"in_tokens": 1200, "out_tokens": 80, "total_tokens": 1280}},
+      )
+
+    self.assertTrue(os.path.exists(summary_file))
+    with open(summary_file, "r", encoding="utf-8") as f:
+      content = f.read()
+
+    self.assertIn("### ⚡ LLM Token Usage Summary", content)
+    self.assertIn("- **Grand Total Tokens:** 1,280", content)
+    self.assertIn("| `gemini-2.5-flash` | 1,200 | 80 | 1,280 |", content)
+
 
 if __name__ == "__main__":
   unittest.main()

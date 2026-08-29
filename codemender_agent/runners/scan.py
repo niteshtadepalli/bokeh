@@ -36,9 +36,9 @@ from codemender_agent.config import inject_codemender_config
 # Storage signed URL and upload utilities
 from codemender_agent.storage import generate_signed_url
 from codemender_agent.storage import upload_file_to_gcs
-# Subprocess and token telemetry helpers
 from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
+from codemender_agent.utils import render_token_usage_markdown
 from codemender_agent.utils import resolve_command_model
 from codemender_agent.utils import run_command
 # Git branch derivation and diff hunk utilities
@@ -108,6 +108,7 @@ def _render_zero_findings_summary(
     is_pr_scan: bool,
     config: Optional[OrchestratorConfig] = None,
     filtered_reasons: Optional[str] = None,
+    token_totals: Optional[dict[str, dict[str, int]]] = None,
 ) -> None:
   """Renders a reassuring Step Summary when zero findings are detected or all are ignored."""
   cfg = config or OrchestratorConfig.from_env()
@@ -127,6 +128,9 @@ def _render_zero_findings_summary(
       else ""
   )
 
+  token_md = render_token_usage_markdown(token_totals)
+  token_section = f"\n{token_md}" if token_md else ""
+
   summary_md = f"""# 🛡️ CodeMender Security Remediation Summary
 
 - **Repository:** `{owner}/{repo_name}`
@@ -140,7 +144,7 @@ def _render_zero_findings_summary(
 | 0 | 0 | 0 | 0 | 0 | 0 |
 
 🎉 **No actionable security vulnerabilities detected.**
-"""
+{token_section}"""
   try:
     with open(summary_file, "a", encoding="utf-8") as f:
       f.write(summary_md + "\n")
@@ -780,7 +784,12 @@ def run_scan_pipeline() -> None:
     logger.info("Zero findings confirmed after scanning. Exiting Stage 1.")
     # Render clean Step Summary before exiting
     _render_zero_findings_summary(
-        owner, repo_name, target_sha, config.is_pr_scan, config=config
+        owner,
+        repo_name,
+        target_sha,
+        config.is_pr_scan,
+        config=config,
+        token_totals=scan_token_usage,
     )
     # Build minimal manifest with findings_count = 0
     manifest = {"findings_count": 0, "target_sha": target_sha}
@@ -874,6 +883,7 @@ def run_scan_pipeline() -> None:
         config.is_pr_scan,
         config=config,
         filtered_reasons=filtered_reason,
+        token_totals=scan_token_usage,
     )
     # Build minimal manifest with findings_count = 0
     manifest = {"findings_count": 0, "target_sha": target_sha}

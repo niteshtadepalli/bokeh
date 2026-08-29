@@ -38,6 +38,7 @@ from codemender_agent.storage import upload_and_sign_report
 from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import extract_json_from_output
+from codemender_agent.utils import render_token_usage_markdown
 from codemender_agent.utils import run_command
 from codemender_agent.vcs.git import get_git_auth_header
 from codemender_agent.vcs.git import normalize_repo_relative_path
@@ -666,17 +667,9 @@ def _render_step_summary(
 
   # 5. Construct token usage summary table if metrics are available
   if token_totals:
-    total_in = sum(m.get("in_tokens", 0) for m in token_totals.values())
-    total_out = sum(m.get("out_tokens", 0) for m in token_totals.values())
-    total_all = sum(m.get("total_tokens", 0) for m in token_totals.values())
-    lines.extend([
-        "### ⚡ LLM Token Usage Summary",
-        "",
-        f"- **Input Tokens:** {total_in:,}",
-        f"- **Output Tokens:** {total_out:,}",
-        f"- **Grand Total Tokens:** {total_all:,}",
-        "",
-    ])
+    token_md = render_token_usage_markdown(token_totals)
+    if token_md:
+      lines.append(token_md)
 
   summary_md = "\n".join(lines)
 

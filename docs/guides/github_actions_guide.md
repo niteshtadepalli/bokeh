@@ -345,6 +345,8 @@ $\rightarrow$ GitHub Apps**:
         branches)
     *   `Pull requests: Read and write` (to open Child PRs and post review
         comments)
+    *   `Commit statuses: Read and write` (to post dedicated 'CodeMender /
+        Security Gate' status checks on PRs)
     *   `Code scanning alerts: Read and write` (maps to `security-events: write`
         in workflow YAML to upload SARIF reports to GitHub Security Tab)
     *   `Issues: Read and write` (for review comments on Fork PRs)
