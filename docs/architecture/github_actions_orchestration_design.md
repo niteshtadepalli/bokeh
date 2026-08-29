@@ -762,11 +762,22 @@ repository to implement native GitHub Actions support.
 ### 9. `codemender_agent/vcs/git.py` & `vcs/github.py`
 
 *   **Why change:** Implement global deterministic branch naming, diff hunk
-    extraction, Fork PR review comments, and targeted O(1) deduplication.
+    extraction, Fork PR review comments, targeted O(1) deduplication, and the
+    **Hybrid Deduplication & Dead Branch Reaper** mechanism.
 *   **Detailed changes:**
     1.  In `vcs/github.py`:
-        *   Update `check_remote_branch_exists()` to query exact ref via `git
-            ls-remote`.
+        *   Implement `delete_remote_branch(repo_url, token, branch_name, cwd)`:
+            *   **Strict Security Guardrail**: Enforces
+                `branch_name.startswith("codemender/")` to strictly prevent
+                accidental deletion of critical branches (e.g. `main`,
+                `master`).
+            *   **REST API Primary**: Calls `DELETE
+                /repos/{owner}/{repo}/git/refs/heads/{branch_name}` with 204
+                success and 404/422 idempotent handling.
+            *   **Git CLI Fallback**: Executes `git push origin --delete
+                {branch_name}` if REST API encounters network or server errors.
+        *   Update `check_remote_branch_exists()` to query exact ref via GitHub
+            REST API with `git ls-remote` fallback.
         *   Update `is_duplicate_pr()` to support targeted query by head branch
             (`GET
             /repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open`).
@@ -779,23 +790,42 @@ repository to implement native GitHub Actions support.
         *   Implement `get_pr_changed_lines(repo_dir, base_ref)`: Parses Unified
             Diff hunks (`git diff -U0 origin/<base_ref>...HEAD`) to extract
             modified line numbers per file.
+    3.  **Hybrid Deduplication & Dead Branch Reaper Architecture**:
+        *   **Primary Gate (Remote Branch Check)**: Fast, deterministic, and
+            idempotent. If a valid `codemender/fix-...` branch exists, verify if
+            it is active.
+        *   **Secondary Gate (Open PR Check)**: Acts as a fuzzy buffer to absorb
+            line number shifts and AST fluctuations.
+        *   **JIT Dead Branch Pruning (Stage 1 `scan.py`)**: If a remote branch
+            exists but has **no active open PR** (due to closed PRs, merged
+            leftovers, or test runs), it is identified as a *dead branch*. The
+            scan stage autonomously prunes the dead branch via
+            `delete_remote_branch()` and retains the finding as `ACTIVE` for
+            remediation.
+        *   **Transactional Worker Rollback (Stage 2 `worker.py`)**: If
+            `create_pull_request()` fails after pushing a fix branch to origin,
+            the worker immediately executes an atomic rollback by deleting the
+            remote branch, preventing orphan branch accumulation.
 
 --------------------------------------------------------------------------------
 
 ### 10. `tests/` Test Suite Updates
 
 *   **Why change:** Validate GHA mode, transit storage, Child PR base refs, Fork
-    PR comments, surgical staging fallbacks, and PR scoping without requiring
-    live cloud infrastructure.
+    PR comments, surgical staging fallbacks, dead branch pruning, and PR scoping
+    without requiring live cloud infrastructure.
 *   **Detailed changes:**
     1.  `tests/test_storage.py`: Unit tests for
         `GitHubActionsTransitStorageAdapter`.
-    2.  `tests/test_vcs_github.py`: Unit tests for `create_pr_comment` and
-        targeted head-branch duplicate PR checks.
+    2.  `tests/test_vcs_github.py`: Unit tests for `create_pr_comment`,
+        `delete_remote_branch` (safety guard, 204 success, 404 idempotent, CLI
+        fallback), and targeted head-branch duplicate PR checks.
     3.  `tests/test_runners_scan.py`: Tests for diff hunk filtering, universal
-        deduplication on `main`, and `$GITHUB_OUTPUT` fallback formatting.
+        deduplication on `main`, JIT dead branch pruning, and `$GITHUB_OUTPUT`
+        fallback formatting.
     4.  `tests/test_runners_worker.py`: Tests for `working_base_ref`, surgical
-        staging 3-tier fallback, and Child PR `pr_head_ref` targeting.
+        staging 3-tier fallback, transactional branch rollback on PR failure,
+        and Child PR `pr_head_ref` targeting.
     5.  `tests/test_runners_aggregate.py`: Tests for scoped SARIF suppressions,
         PR report filtering, and step summary truncation.
     6.  `tests/e2e_test_local.py`: Full 3-stage simulation executing in

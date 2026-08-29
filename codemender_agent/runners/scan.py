@@ -51,6 +51,7 @@ from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
 # GitHub REST API check and deduplication helpers
 from codemender_agent.vcs.github import check_remote_branch_exists
+from codemender_agent.vcs.github import delete_remote_branch
 from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import is_duplicate_pr
 
@@ -530,15 +531,31 @@ def _filter_findings(
     if not force_overwrite and check_remote_branch_exists(
         clean_repo_url, token, branch_name, cwd=repo_dir
     ):
-      logger.info(
-          "Skipping finding %s as remote branch %s exists.",
-          finding_id,
-          branch_name,
+      has_active_pr = is_duplicate_pr(
+          clean_repo_url,
+          token,
+          file_path,
+          vuln_type,
+          start_line,
+          head_branch=branch_name,
       )
-      skipped_finding_ids.append(finding_id)
-      continue
+      if has_active_pr:
+        logger.info(
+            "Skipping finding %s as active PR exists for branch %s.",
+            finding_id,
+            branch_name,
+        )
+        skipped_finding_ids.append(finding_id)
+        continue
+      else:
+        logger.info(
+            "Dead branch detected: %s exists on remote but has no active open PR."
+            " Pruning dead branch to allow fresh remediation.",
+            branch_name,
+        )
+        delete_remote_branch(clean_repo_url, token, branch_name, cwd=repo_dir)
 
-    if not force_overwrite and is_duplicate_pr(
+    elif not force_overwrite and is_duplicate_pr(
         clean_repo_url,
         token,
         file_path,

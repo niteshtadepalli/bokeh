@@ -85,6 +85,108 @@ def check_remote_branch_exists(
   return bool(res.stdout and branch_name in res.stdout)
 
 
+@retry_on_exception(max_tries=3, initial_delay=2, backoff_factor=2)
+def _delete_branch_via_api(
+    owner: str, repo: str, branch_name: str, token: str
+) -> bool:
+  """Deletes a remote branch via GitHub REST API with raise_for_status validation."""
+  if token == "fake-token":
+    logger.info(
+        "Mock GitHub token detected ('fake-token'), simulating branch deletion: %s",
+        branch_name,
+    )
+    return True
+
+  headers = {
+      "Authorization": f"Bearer {token}",
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+  }
+  # GitHub API endpoint to delete ref: DELETE /repos/{owner}/{repo}/git/refs/heads/{branch_name}
+  api_url = f"https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{branch_name}"
+  resp = requests.delete(api_url, headers=headers, timeout=15)
+
+  # Status 204: Successfully deleted
+  if resp.status_code == 204:
+    logger.info("Successfully deleted remote branch via API: %s", branch_name)
+    return True
+  # Status 404 / 422: Branch already does not exist (idempotent success)
+  elif resp.status_code in (404, 422):
+    logger.info(
+        "Remote branch %s already deleted or does not exist (HTTP %d).",
+        branch_name,
+        resp.status_code,
+    )
+    return True
+
+  if resp.status_code == 403 and any(
+      msg in resp.text.lower() for msg in ["rate limit", "abuse detection"]
+  ):
+    resp.raise_for_status()
+
+  resp.raise_for_status()
+  return True
+
+
+def delete_remote_branch(
+    repo_url: str,
+    token: str,
+    branch_name: str,
+    cwd: Optional[str] = None,
+) -> bool:
+  """Deletes a remote branch via GitHub REST API with Git CLI fallback.
+
+  Enforces a strict security prefix check (branch_name must start with 'codemender/')
+  to prevent deleting critical or protected branches (e.g., main, master).
+  """
+  if not branch_name or not branch_name.startswith("codemender/"):
+    logger.error(
+        "Refusing to delete non-CodeMender branch '%s' for safety.", branch_name
+    )
+    return False
+
+  sanitized_url = sanitize_git_url(repo_url)
+
+  # 1. Attempt branch deletion via GitHub REST API
+  try:
+    owner, repo = parse_repo_owner_and_name(sanitized_url)
+    if _delete_branch_via_api(owner, repo, branch_name, token):
+      return True
+  except Exception as e:
+    logger.warning(
+        "GitHub API branch deletion failed (%s), falling back to git push --delete.",
+        e,
+    )
+
+  # 2. Fallback to git push origin --delete <branch_name> CLI command
+  try:
+    cmd = [
+        "git",
+        "-c",
+        get_git_auth_header(token),
+        "push",
+        "origin",
+        "--delete",
+        branch_name,
+    ]
+    res = run_command(cmd, cwd=cwd, check=False)
+    if res.returncode == 0:
+      logger.info(
+          "Successfully deleted remote branch via Git CLI: %s", branch_name
+      )
+      return True
+    else:
+      logger.warning(
+          "Git CLI branch deletion returned non-zero code %d: %s",
+          res.returncode,
+          res.stderr,
+      )
+  except Exception as e:
+    logger.warning("Git CLI branch deletion failed: %s", e)
+
+  return False
+
+
 @retry_on_exception(max_tries=3)
 def _fetch_default_branch_via_api(token: str, owner: str, repo: str) -> str:
   """Queries repository metadata from GitHub with raise_for_status checks."""

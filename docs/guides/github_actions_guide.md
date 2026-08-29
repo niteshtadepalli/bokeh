@@ -168,12 +168,20 @@ inventories, and remediate technical debt.
 
 1.  **Triggering**: Configured via `schedule.cron` in
     `.github/workflows/codemender.yml` (or on-demand via `workflow_dispatch`).
-2.  **Full Repository Scanning & Deduplication**: Discovers all vulnerabilities
-    across the entire codebase (`cm find .`), deduplicating against existing
-    remote branches and open PRs (`SKIPPED_DUPLICATE`).
+2.  **Full Repository Scanning & Self-Healing Deduplication**: Discovers all
+    vulnerabilities across the entire codebase (`cm find .`), applying the
+    **Hybrid Deduplication & Dead Branch Reaper**:
+    *   **Live Branch Check**: If an active open PR exists for the finding's
+        branch, it is marked `SKIPPED_DUPLICATE`.
+    *   **Dead Branch Reaper**: If a remote branch exists but has **no open PR**
+        (due to closed/rejected PRs, merged leftovers, or interrupted test
+        runs), Stage 1 autonomously prunes the dead branch via GitHub REST API /
+        Git CLI and retains the finding as `ACTIVE` for fresh remediation.
 3.  **Worker Remediation & Mainline PRs**: Verifies findings (`cm verify`),
     synthesizes patches (`cm fix`), and opens **Pull Requests targeting the
-    default branch (`main`)**.
+    default branch (`main`)**. If PR creation fails after pushing to origin,
+    workers execute an **atomic rollback** by deleting the remote branch to
+    prevent orphan accumulation.
 4.  **Final Outputs & Security Tab Inventory**: Uploads complete `report.sarif`
     to the GitHub Security Tab (tagging duplicate findings with `underReview`
     suppression metadata), renders `$GITHUB_STEP_SUMMARY`, and saves
@@ -192,12 +200,15 @@ pull requests.
         is attached.
     *   **Zero Noise**: Using `types: [labeled]` avoids spawning 1-second
         "Skipped" runs when regular PRs are opened or pushed to.
-2.  **Differential PR Scanning**:
+2.  **Differential PR Scanning & Deduplication**:
     *   Calculates merge-base diff hunks (`git diff -U0 origin/<base>...HEAD`)
         to isolate modified lines.
     *   **Pre-Existing Tech Debt Suppression**: Findings outside modified lines
         are marked `PRE_EXISTING_IGNORED` and excluded from worker tasks and PR
         reports.
+    *   **Autonomous Deduplication**: Employs the JIT Dead Branch Reaper to
+        ensure unmerged/closed branch leftovers never suppress genuine
+        regressions.
 3.  **Worker Remediation Routing**:
     *   **Internal PRs**: Opens a **Child Pull Request targeting the developer's
         feature branch (`pr_head_ref`)**, allowing 1-click merging into the PR.

@@ -34,6 +34,10 @@ inside your own secure container runners across a scalable, 3-stage pipeline:
     -   On Pull Request scans, performs **differential filtering** against
         merge-base diffs (`git diff -U0 origin/<base>...HEAD`) to isolate
         findings introduced or modified in the PR.
+    -   Applies the **Hybrid Deduplication & Dead Branch Reaper**: skips live
+        findings with active PRs and autonomously prunes dead remote branches
+        via GitHub REST API / Git CLI to ensure unmerged leftovers never
+        suppress genuine findings.
     -   Partitions actionable findings into balanced shards and bundles the
         repository workspace into transit storage.
 2.  **Stage 2: Parallel Workers (`runners/worker.py`)**:
@@ -45,8 +49,9 @@ inside your own secure container runners across a scalable, 3-stage pipeline:
         generates and applies an automated patch (`cm fix`), and pushes a
         dedicated branch to GitHub.
     -   Opens a Child Pull Request targeting the feature/default branch (or
-        posts a detailed review comment on Fork PRs) and exports its local
-        SQLite state database shard and token telemetry.
+        posts a detailed review comment on Fork PRs) with **transactional
+        rollback** (pruning the remote branch if PR creation fails) and exports
+        its local SQLite state database shard and token telemetry.
 3.  **Stage 3: Aggregator & Reporter (`runners/aggregate.py`)**:
     -   Collects all worker database shards and token usage files.
     -   Merges database shards via `SQLite ATTACH` and schema unification.

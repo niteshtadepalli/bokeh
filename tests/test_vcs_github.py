@@ -176,6 +176,83 @@ class TestVcsGithub(unittest.TestCase):
     )
     self.assertFalse(success)
 
+  def test_delete_remote_branch_safety_guard_rejects_main(self):
+    """Verify delete_remote_branch strictly rejects non-codemender branches."""
+    from codemender_agent.vcs.github import delete_remote_branch
+
+    # Refuse to delete protected or non-codemender branches
+    self.assertFalse(
+        delete_remote_branch("https://github.com/org/repo.git", "token", "main")
+    )
+    self.assertFalse(
+        delete_remote_branch("https://github.com/org/repo.git", "token", "master")
+    )
+    self.assertFalse(
+        delete_remote_branch("https://github.com/org/repo.git", "token", "feature/my-branch")
+    )
+
+  @patch("requests.delete")
+  def test_delete_remote_branch_api_success(self, mock_delete):
+    """Verify deleting branch via GitHub REST API with 204 status."""
+    from codemender_agent.vcs.github import delete_remote_branch
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 204
+    mock_delete.return_value = mock_resp
+
+    success = delete_remote_branch(
+        repo_url="https://github.com/org/repo.git",
+        token="valid-token",
+        branch_name="codemender/fix-sqli-abc12345",
+    )
+    self.assertTrue(success)
+    mock_delete.assert_called_once()
+    self.assertIn(
+        "/repos/org/repo/git/refs/heads/codemender/fix-sqli-abc12345",
+        mock_delete.call_args[0][0],
+    )
+
+  @patch("requests.delete")
+  def test_delete_remote_branch_api_404_idempotent(self, mock_delete):
+    """Verify deleting already-deleted branch returns True idempotently on 404/422."""
+    from codemender_agent.vcs.github import delete_remote_branch
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_delete.return_value = mock_resp
+
+    success = delete_remote_branch(
+        repo_url="https://github.com/org/repo.git",
+        token="valid-token",
+        branch_name="codemender/fix-sqli-abc12345",
+    )
+    self.assertTrue(success)
+
+  @patch("codemender_agent.vcs.github.run_command")
+  @patch("requests.delete")
+  def test_delete_remote_branch_api_fail_falls_back_to_cli(
+      self, mock_delete, mock_run_command
+  ):
+    """Verify falling back to Git CLI push --delete if REST API raises error."""
+    import requests
+    from codemender_agent.vcs.github import delete_remote_branch
+
+    mock_delete.side_effect = requests.exceptions.RequestException("API error")
+    mock_cli_res = MagicMock()
+    mock_cli_res.returncode = 0
+    mock_run_command.return_value = mock_cli_res
+
+    success = delete_remote_branch(
+        repo_url="https://github.com/org/repo.git",
+        token="valid-token",
+        branch_name="codemender/fix-sqli-abc12345",
+    )
+    self.assertTrue(success)
+    mock_run_command.assert_called_once()
+    cmd = mock_run_command.call_args[0][0]
+    self.assertIn("--delete", cmd)
+    self.assertIn("codemender/fix-sqli-abc12345", cmd)
+
 
 if __name__ == "__main__":
   unittest.main()

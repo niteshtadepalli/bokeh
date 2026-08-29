@@ -538,6 +538,80 @@ class TestScanRunner(unittest.TestCase):
     self.assertIn("- **Grand Total Tokens:** 1,280", content)
     self.assertIn("| `gemini-2.5-flash` | 1,200 | 80 | 1,280 |", content)
 
+  @patch("codemender_agent.runners.scan.delete_remote_branch")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  def test_filter_findings_dead_branch_pruned_and_retained(
+      self, mock_check_branch, mock_is_dup_pr, mock_delete_branch
+  ):
+    """Verify that a remote branch without an open PR is pruned as a dead branch and retained as active."""
+    from codemender_agent.runners.scan import _filter_findings
+
+    mock_check_branch.return_value = True
+    mock_is_dup_pr.return_value = False
+    mock_delete_branch.return_value = True
+
+    findings = [
+        {
+            "FindingID": "f-dead-1",
+            "Status": "DETECTED",
+            "VulnType": "SQL_INJECTION",
+            "FilePath": "routes/search.ts",
+            "StartLine": 25,
+        }
+    ]
+
+    active, skipped, ignored = _filter_findings(
+        findings=findings,
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        repo_dir=self.workspace_dir,
+        force_overwrite=False,
+        is_pr_scan=False,
+    )
+
+    self.assertEqual(len(active), 1)
+    self.assertEqual(active[0]["FindingID"], "f-dead-1")
+    self.assertEqual(skipped, [])
+    self.assertEqual(ignored, [])
+    mock_delete_branch.assert_called_once()
+
+  @patch("codemender_agent.runners.scan.delete_remote_branch")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  def test_filter_findings_live_branch_skipped(
+      self, mock_check_branch, mock_is_dup_pr, mock_delete_branch
+  ):
+    """Verify that a remote branch WITH an open PR is recognized as live and skipped."""
+    from codemender_agent.runners.scan import _filter_findings
+
+    mock_check_branch.return_value = True
+    mock_is_dup_pr.return_value = True
+
+    findings = [
+        {
+            "FindingID": "f-live-1",
+            "Status": "DETECTED",
+            "VulnType": "SQL_INJECTION",
+            "FilePath": "routes/search.ts",
+            "StartLine": 25,
+        }
+    ]
+
+    active, skipped, ignored = _filter_findings(
+        findings=findings,
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        repo_dir=self.workspace_dir,
+        force_overwrite=False,
+        is_pr_scan=False,
+    )
+
+    self.assertEqual(active, [])
+    self.assertEqual(skipped, ["f-live-1"])
+    self.assertEqual(ignored, [])
+    mock_delete_branch.assert_not_called()
+
 
 if __name__ == "__main__":
   unittest.main()
