@@ -105,6 +105,7 @@ permissions:
   security-events: write
   actions: read
   packages: read
+  statuses: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

@@ -115,6 +115,67 @@ class TestVcsGithub(unittest.TestCase):
     call_args = mock_get.call_args
     self.assertIn("head=org:codemender/fix-sql_injection-abc12345", call_args[0][0])
 
+  @patch("requests.post")
+  def test_post_commit_status_success(self, mock_post):
+    """Verify posting a commit status check on a PR commit SHA."""
+    from codemender_agent.vcs.github import post_commit_status
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 201
+    mock_resp.json.return_value = {"state": "failure"}
+    mock_post.return_value = mock_resp
+
+    success = post_commit_status(
+        token="valid-token",
+        owner="org",
+        repo="repo",
+        sha="abcdef123456",
+        state="failure",
+        description="Security Gate FAILED: 1 vulnerability detected",
+        context="CodeMender / Security Gate",
+        target_url="https://github.com/org/repo/pull/42",
+    )
+    self.assertTrue(success)
+    mock_post.assert_called_once()
+    url = mock_post.call_args[0][0]
+    payload = mock_post.call_args[1]["json"]
+    self.assertIn("/repos/org/repo/statuses/abcdef123456", url)
+    self.assertEqual(payload["state"], "failure")
+    self.assertEqual(payload["context"], "CodeMender / Security Gate")
+    self.assertEqual(payload["target_url"], "https://github.com/org/repo/pull/42")
+
+  def test_post_commit_status_fake_token(self):
+    """Verify post_commit_status handles fake-token gracefully in unit tests."""
+    from codemender_agent.vcs.github import post_commit_status
+
+    success = post_commit_status(
+        token="fake-token",
+        owner="org",
+        repo="repo",
+        sha="abcdef123456",
+        state="success",
+        description="Security Gate PASSED",
+    )
+    self.assertTrue(success)
+
+  @patch("requests.post")
+  def test_post_commit_status_api_error_returns_false(self, mock_post):
+    """Verify post_commit_status returns False on network error without throwing."""
+    import requests
+    from codemender_agent.vcs.github import post_commit_status
+
+    mock_post.side_effect = requests.exceptions.RequestException("Connection error")
+
+    success = post_commit_status(
+        token="valid-token",
+        owner="org",
+        repo="repo",
+        sha="abcdef123456",
+        state="failure",
+        description="Security Gate FAILED",
+    )
+    self.assertFalse(success)
+
 
 if __name__ == "__main__":
   unittest.main()

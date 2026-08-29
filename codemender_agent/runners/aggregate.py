@@ -45,6 +45,7 @@ from codemender_agent.vcs.git import parse_repo_owner_and_name
 from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
 from codemender_agent.vcs.github import get_default_branch
+from codemender_agent.vcs.github import post_commit_status
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -1297,14 +1298,39 @@ def run_aggregate_pipeline() -> None:
       config=config,
   )
 
-  # 12. Enforce Security Gate for Pull Request Scans
-  if config.is_pr_scan and config.fail_on_findings and active_findings_count > 0:
-    logger.error(
-        "❌ CodeMender Security Gate FAILED: %d actionable vulnerability(ies)"
-        " detected on PR diff. Exiting with non-zero status to block PR merge.",
-        active_findings_count,
-    )
-    sys.exit(1)
+  # 12. Enforce Security Gate for Pull Request Scans via GitHub Commit Status Check
+  if config.is_pr_scan:
+    target_commit_sha = config.target_sha or target_sha
+    if target_commit_sha and token:
+      gate_context = "CodeMender / Security Gate"
+      if active_findings_count > 0 and config.fail_on_findings:
+        gate_state = "failure"
+        gate_desc = (
+            f"Security Gate FAILED: {active_findings_count} actionable"
+            " vulnerability(ies) detected on PR diff."
+        )
+        logger.warning(
+            "❌ CodeMender Security Gate FAILED: %d actionable vulnerability(ies) detected on PR diff. Emitting '%s' commit status check.",
+            active_findings_count,
+            gate_context,
+        )
+      else:
+        gate_state = "success"
+        gate_desc = "Security Gate PASSED: Clean as You Code (0 active vulnerabilities)."
+        logger.info(
+            "✅ CodeMender Security Gate PASSED: Clean as You Code. Emitting '%s' commit status check.",
+            gate_context,
+        )
+
+      post_commit_status(
+          token=token,
+          owner=owner,
+          repo=repo_name,
+          sha=target_commit_sha,
+          state=gate_state,
+          description=gate_desc,
+          context=gate_context,
+      )
 
   # Log final aggregator completion notice
   logger.info("Stage 3 (Aggregate) completed successfully.")

@@ -754,6 +754,7 @@ class TestAggregateRunner(unittest.TestCase):
     # Rule without concatenated analysis retains fullDescription and populates help
     self.assertEqual(rules[1]["help"]["markdown"], "Cross-site scripting vulnerability")
 
+  @patch("codemender_agent.runners.aggregate.post_commit_status")
   @patch("codemender_agent.runners.aggregate.run_command")
   @patch("codemender_agent.runners.aggregate.merge_db")
   @patch("shutil.which")
@@ -762,6 +763,7 @@ class TestAggregateRunner(unittest.TestCase):
       mock_which,
       mock_merge_db,
       mock_run_cmd,
+      mock_post_status,
   ):
     """Test full aggregate pipeline execution in github_actions storage mode."""
     mock_which.return_value = "/bin/cm"
@@ -807,11 +809,10 @@ class TestAggregateRunner(unittest.TestCase):
             "CODEMENDER_STORAGE_MODE": "github_actions",
             "CODEMENDER_IS_PR_SCAN": "true",
             "CODEMENDER_TOTAL_WORKERS": "1",
+            "GITHUB_TOKEN": "valid-token",
         },
     ):
-      with self.assertRaises(SystemExit) as cm:
-        run_aggregate_pipeline()
-      self.assertEqual(cm.exception.code, 1)
+      run_aggregate_pipeline()
 
     # Verify merge_db called for shard
     mock_merge_db.assert_called()
@@ -823,6 +824,14 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertTrue(html_called)
     self.assertTrue(sarif_called)
 
+    # Verify commit status was posted as failure to block target PR
+    mock_post_status.assert_called_once()
+    status_kwargs = mock_post_status.call_args.kwargs
+    self.assertEqual(status_kwargs["state"], "failure")
+    self.assertEqual(status_kwargs["context"], "CodeMender / Security Gate")
+    self.assertIn("Security Gate FAILED", status_kwargs["description"])
+
+  @patch("codemender_agent.runners.aggregate.post_commit_status")
   @patch("codemender_agent.runners.aggregate.run_command")
   @patch("codemender_agent.runners.aggregate.merge_db")
   @patch("shutil.which")
@@ -831,8 +840,9 @@ class TestAggregateRunner(unittest.TestCase):
       mock_which,
       mock_merge_db,
       mock_run_cmd,
+      mock_post_status,
   ):
-    """Test aggregate pipeline does not exit 1 on PR scan when CODEMENDER_FAIL_ON_FINDINGS=false."""
+    """Test aggregate pipeline posts success commit status on PR scan when CODEMENDER_FAIL_ON_FINDINGS=false."""
     mock_which.return_value = "/bin/cm"
     mock_default = MagicMock()
     mock_default.stdout = ""
@@ -871,11 +881,16 @@ class TestAggregateRunner(unittest.TestCase):
             "CODEMENDER_IS_PR_SCAN": "true",
             "CODEMENDER_FAIL_ON_FINDINGS": "false",
             "CODEMENDER_TOTAL_WORKERS": "1",
+            "GITHUB_TOKEN": "valid-token",
         },
     ):
       run_aggregate_pipeline()
 
     self.assertTrue(mock_merge_db.called)
+    # Verify commit status was posted as success
+    mock_post_status.assert_called_once()
+    status_kwargs = mock_post_status.call_args.kwargs
+    self.assertEqual(status_kwargs["state"], "success")
 
   @patch("codemender_agent.runners.aggregate.run_command")
   @patch("codemender_agent.runners.aggregate.merge_db")

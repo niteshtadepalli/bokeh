@@ -320,3 +320,77 @@ def create_pull_request(
   pr_url = resp.json().get("html_url")
   logger.info("Successfully created Pull Request: %s", pr_url)
   return pr_url
+
+
+@retry_on_exception(max_tries=3, initial_delay=2, backoff_factor=2)
+def _post_commit_status_api(
+    token: str,
+    owner: str,
+    repo: str,
+    sha: str,
+    state: str,
+    description: str,
+    context: str = "CodeMender / Security Gate",
+    target_url: Optional[str] = None,
+) -> bool:
+  """Posts a commit status check to GitHub REST API."""
+  # 1. Handle mock token in test suites
+  if token == "fake-token":
+    logger.info("Mock GitHub token detected ('fake-token'), simulating commit status creation.")
+    return True
+
+  # 2. Prepare status payload with state, description, context, and optional target URL
+  url = f"https://api.github.com/repos/{owner}/{repo}/statuses/{sha}"
+  headers = {
+      "Authorization": f"Bearer {token}",
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+  }
+  # GitHub API limits status description to 140 characters
+  clean_description = (description[:137] + "...") if len(description) > 140 else description
+  payload = {
+      "state": state,  # "error", "failure", "pending", "success"
+      "description": clean_description,
+      "context": context,
+  }
+  if target_url:
+    payload["target_url"] = target_url
+
+  # 3. Submit Commit Status request
+  resp = requests.post(url, headers=headers, json=payload, timeout=15)
+  if resp.status_code == 403 and any(
+      msg in resp.text.lower() for msg in ["rate limit", "abuse detection"]
+  ):
+    # Retry on secondary rate limit / abuse detection triggers
+    resp.raise_for_status()
+  resp.raise_for_status()
+  logger.info("Successfully posted commit status '%s' (%s) for SHA %s", context, state, sha[:8])
+  return True
+
+
+def post_commit_status(
+    token: str,
+    owner: str,
+    repo: str,
+    sha: str,
+    state: str,
+    description: str,
+    context: str = "CodeMender / Security Gate",
+    target_url: Optional[str] = None,
+) -> bool:
+  """Safely posts a commit status check on a commit SHA, logging warnings on failure without throwing."""
+  try:
+    return _post_commit_status_api(
+        token=token,
+        owner=owner,
+        repo=repo,
+        sha=sha,
+        state=state,
+        description=description,
+        context=context,
+        target_url=target_url,
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Failed to post commit status check '%s' to GitHub: %s", context, e)
+    return False
+
