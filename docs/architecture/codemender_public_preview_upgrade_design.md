@@ -186,10 +186,7 @@ during engineering discussions:
 
 ## 4. Detailed Implementation Plan
 
-This section enumerates every single file in
-`/google/src/cloud/xinweizhang/fde-playground/google3/experimental/users/xinweizhang/git/codemender-agent`
-that will be created or modified to implement the multi-version upgrade, along
-with precise rationale and behavioral specifications.
+This section enumerates every single file in the repository that will be created or modified to implement the multi-version upgrade, along with precise rationale and behavioral specifications.
 
 ### 1. `codemender_agent/utils.py`
 

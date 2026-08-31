@@ -33,21 +33,33 @@ inside your own secure container runners across a scalable, 3-stage pipeline:
     -   Executes vulnerability discovery via `cm find .`.
     -   On Pull Request scans, performs **differential filtering** against
         merge-base diffs (`git diff -U0 origin/<base>...HEAD`) to isolate
-        findings introduced or modified in the PR.
+        findings introduced or modified in the PR, suppressing untouched legacy
+        issues.
     -   Applies the **Hybrid Deduplication & Dead Branch Reaper**: skips live
         findings with active PRs and autonomously prunes dead remote branches
         via GitHub REST API / Git CLI to ensure unmerged leftovers never
         suppress genuine findings.
+    -   **Zero-Finding Fast Path**: If zero actionable findings are detected (or
+        all findings are dismissed), generates a schema-compliant clean SARIF
+        file (`report.sarif`), uploads it to GitHub Code Scanning to resolve
+        open alerts, and cleanly completes without launching unnecessary worker
+        matrix tasks.
     -   Partitions actionable findings into balanced shards and bundles the
         repository workspace into transit storage.
 2.  **Stage 2: Parallel Workers (`runners/worker.py`)**:
     -   Concurrently spins up ephemeral worker tasks (matrix jobs in GitHub
         Actions or parallel tasks in Cloud Run).
     -   Each worker downloads its assigned workspace and partition via the
-        configured storage adapter.
-    -   For each finding, the worker verifies exploitability (`cm verify`),
-        generates and applies an automated patch (`cm fix`), and pushes a
-        dedicated branch to GitHub.
+        configured storage adapter (`github_actions` zero-storage artifacts or
+        `gcs`).
+    -   **Local Build Cache Isolation & Hygiene**: Redirects package caches
+        (`npm`, `pip`, `node-gyp`, `TMPDIR`) into `<repo_dir>/.codemender_cache`
+        (registered in `.git/info/exclude`) and automatically prunes
+        non-reproduction build caches from `.exploit/` and artifacts before
+        synthesis to prevent artifact bloat.
+    -   For each finding, the worker verifies exploitability (`cm verify`, with
+        optional `--skip-exploit-verification`), synthesizes and validates an
+        automated patch (`cm fix`), and pushes a dedicated branch to GitHub.
     -   Opens a Child Pull Request targeting the feature/default branch (or
         posts a detailed review comment on Fork PRs) with **transactional
         rollback** (pruning the remote branch if PR creation fails) and exports
@@ -56,10 +68,15 @@ inside your own secure container runners across a scalable, 3-stage pipeline:
     -   Collects all worker database shards and token usage files.
     -   Merges database shards via `SQLite ATTACH` and schema unification.
     -   Generates consolidated interactive HTML (`report.html`), structured JSON
-        (`report.json`), and GitHub-compliant SARIF (`report.sarif`) reports.
-    -   Emits a rich GitHub Step Summary with status breakdowns and LLM token
-        metrics, uploads SARIF alerts to GitHub Code Scanning, and enforces the
-        blocking **Security Quality Gate** on PR scans.
+        (`report.json`), and GitHub-compliant SARIF (`report.sarif`) reports
+        with sanitized path traversals and clean JSON serialization.
+    -   Emits a rich GitHub Step Summary with severity badges (`🔴 CRITICAL`, `🟠
+        HIGH`, `🟡 MEDIUM`, `🔵 LOW`), vulnerability classifications (with CWE
+        IDs), hyperlinked PR badges (`[FIXED (#X)](url)`), and a dedicated `⚡
+        LLM Token Usage Summary` breakdown by model.
+    -   Uploads consolidated SARIF alerts to GitHub Code Scanning and enforces
+        the blocking **Security Quality Gate** on PR scans via a dedicated
+        GitHub Commit Status check (`CodeMender / Security Gate`).
 
 --------------------------------------------------------------------------------
 
@@ -74,40 +91,46 @@ graph TD
         S1Scan --> S1Mode{PR Scan or Nightly?}
         S1Mode -- "PR Scan" --> S1Diff[3a. Compute Merge-Base Diff<br/>git diff -U0 origin/base...HEAD<br/>Filter to PR-Modified Lines]
         S1Mode -- "Nightly / Full" --> S1All[3b. Retain All Discovered Findings]
-        S1Diff --> S1Part[4. Partition Actionable Findings into Shards]
-        S1All --> S1Part
+        S1Diff --> S1Check{Actionable Findings Found?}
+        S1All --> S1Check
+        S1Check -- "0 Findings" --> S1Clean[4a. Generate & Upload Clean SARIF<br/>Resolve Security Tab Alerts]
+        S1Check -- "> 0 Findings" --> S1Part[4b. Partition Findings into Shards]
         S1Part --> S1Upload[5. Bundle Workspace & Upload Artifacts to Transit Storage]
     end
 
+    S1Clean --> FinishPass([Pipeline Complete: Clean])
     S1Upload --> S2Matrix
 
     subgraph "Stage 2: Parallel Workers (Verify & Fix Matrix)"
         S2Matrix[6. Spin Up N Parallel Worker Tasks] --> WDL[7. Download Workspace & Partition Shard]
-        WDL --> WLoop{8. For Each Finding in Partition}
-        WLoop --> WVerify[9. Verify Exploitability<br/>'cm verify']
-        WVerify --> WFix[10. Generate & Validate Patch<br/>'cm fix']
+        WDL --> WCache[8. Isolate Build Caches<br/>'.codemender_cache']
+        WCache --> WLoop{9. For Each Finding in Partition}
+        WLoop --> WVerify[10. Verify Exploitability<br/>'cm verify' / skip-verify]
+        WVerify --> WCleanCache[11. Sanitize Exploit Caches]
+        WCleanCache --> WFix[12. Generate & Validate Patch<br/>'cm fix']
         WFix --> WType{Target PR Type?}
-        WType -- "Internal PR / Nightly" --> WPR[11a. Push Branch & Open Child PR]
-        WType -- "Fork PR" --> WComment[11b. Post Review Comment with Patch]
+        WType -- "Internal PR / Nightly" --> WPR[13a. Push Branch & Open Child PR<br/>Transactional Rollback on Error]
+        WType -- "Fork PR" --> WComment[13b. Post Review Comment with Patch]
         WPR --> WLoop
         WComment --> WLoop
-        WLoop -- Done --> WUpload[12. Upload SQLite DB Shard & Token Telemetry]
+        WLoop -- Done --> WUpload[14. Upload SQLite DB Shard & Token Telemetry]
     end
 
     WUpload --> S3
 
     subgraph "Stage 3: Aggregator (Merge & Report)"
-        S3[13. Download All Worker DB Shards & Tokens] --> S3Merge[14. Merge Shards via SQLite ATTACH]
-        S3Merge --> S3Report[15. Generate HTML, JSON, and SARIF Reports]
-        S3Report --> S3Summary[16. Render Rich GitHub Step Summary & Token Metrics]
-        S3Summary --> S3SARIF[17. Upload SARIF to GitHub Code Scanning]
-        S3SARIF --> S3Gate{is_pr_scan AND fail_on_findings?}
-        S3Gate -- Yes & Active Findings Exist --> S3Fail[18a. Exit Code 1<br/>Block PR Quality Gate]
-        S3Gate -- No or Findings Fixed --> S3Pass[18b. Exit Code 0<br/>Pass Quality Gate]
+        S3[15. Download All Worker DB Shards & Tokens] --> S3Merge[16. Merge Shards via SQLite ATTACH]
+        S3Merge --> S3Report[17. Generate HTML, JSON, and SARIF Reports]
+        S3Report --> S3Summary[18. Render Step Summary & LLM Token Table]
+        S3Summary --> S3SARIF[19. Upload SARIF to GitHub Code Scanning]
+        S3SARIF --> S3Status[20. Post Commit Status Check<br/>'CodeMender / Security Gate']
+        S3Status --> S3Gate{is_pr_scan AND fail_on_findings?}
+        S3Gate -- "Yes & Unfixed PR Findings" --> S3Fail[21a. Exit Code 1 / Gate Failed]
+        S3Gate -- "No or Findings Remediated" --> S3Pass[21b. Exit Code 0 / Gate Passed]
     end
 
-    S3Fail --> FinishFail([Pipeline Failed: Remediation Required])
-    S3Pass --> FinishPass([Pipeline Complete])
+    S3Fail --> FinishFail([Pipeline Completed: Vulnerabilities Detected])
+    S3Pass --> FinishPass
 ```
 
 --------------------------------------------------------------------------------
@@ -128,10 +151,23 @@ multiple environments via `codemender_agent/storage.py`:
     between Stage 1, Stage 2 matrix jobs, and Stage 3 using standard GitHub
     Actions artifact actions (`@actions/upload-artifact` and
     `@actions/download-artifact`).
-*   **Authentication**: Seamless authentication with GitHub via GitHub App
-    installation tokens or repository `GITHUB_TOKEN`, and GCP authentication via
-    Workload Identity Federation (WIF) or Service Account keys for
-    Gemini/CodeMender backend access.
+*   **Automated GCP WIF & GitHub Configuration**: The repository provides an
+    automated Terraform module at [`terraform/gha_wif/`](terraform/gha_wif/)
+    that provisions GCP Workload Identity Federation (WIF), IAM Service Accounts
+    with `roles/aiplatform.user`, repository `codemender-scan` PR trigger
+    labels, and non-sensitive GitHub Actions secrets
+    (`GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GH_APP_ID`).
+*   **Decoupled Secret Injection**: Sensitive credentials (such as the GitHub
+    App private key `GH_APP_PRIVATE_KEY`) are injected out-of-band via GitHub
+    CLI (`gh secret set`) without storing private keys in Terraform state or
+    `.tfvars`.
+*   **Intelligent Concurrency Management**: Top-level workflow concurrency
+    auto-cancels stale in-flight PR runs on rapid developer pushes
+    (`cancel-in-progress: true` for PRs) while ensuring Scheduled Nightly audits
+    and manual dispatches always run to completion.
+*   **Container Isolation & Sandboxing**: Container jobs execute with `options:
+    --privileged` to satisfy Linux mount namespace requirements for CodeMender's
+    internal sandbox (`sbox`).
 *   **Runner Image**: Pre-built runner container images published to GitHub
     Packages / GHCR (`ghcr.io/<owner>/codemender-runner:latest`) via
     `.github/workflows/build_runner_image.yml`.
@@ -141,16 +177,38 @@ multiple environments via `codemender_agent/storage.py`:
 The GitHub Actions workflow uniquely provides **two tailored scanning modes**
 optimized for CI/CD developer feedback and ongoing repository health:
 
-| Feature | Scheduled Nightly Scan | Pull Request Scan ("Clean as You Code") |
-| :--- | :--- | :--- |
-| **Trigger** | Schedule (`schedule.cron`) or manual (`workflow_dispatch`) | Pull Request labeled (`codemender-scan`), opened, or synchronized |
-| **Scope** | Full repository audit against default branch (`main`) | **Differential scan**: Analyzes only lines changed in the PR merge-base diff |
-| **Base Ref** | Default branch head commit | Pull Request target base ref (`origin/<base_ref>`) |
-| **Remediation** | Opens PRs targeting default branch (`main`) | Opens Child PRs targeting the developer's PR feature branch (`pr_head_ref`) |
-| **Fork PRs** | N/A (runs on upstream repository) | Posts an inline PR review comment with patch diff and git apply commands |
-| **Alerts & SARIF** | Uploads full SARIF alert inventory with `underReview` suppressions | Scoped SARIF upload creating inline annotations on PR **Files changed** and **Checks** tabs |
-| **Quality Gate** | Non-blocking (informational audit & remediation pipeline) | **Blocking Quality Gate** (`fail_on_findings=true`): Fails check if active vulnerabilities remain |
-| **Step Summary** | Full repository finding breakdown with LLM token metrics | Scoped PR table; suppresses legacy untouched tech debt (`PRE_EXISTING_IGNORED`) |
+| Feature            | Scheduled Nightly Scan     | Pull Request Scan ("Clean  |
+:                    :                            : as You Code")              :
+| :----------------- | :------------------------- | :------------------------- |
+| **Trigger**        | Schedule (`schedule.cron`) | Pull Request labeled       |
+:                    : or manual                  : (`codemender-scan`),       :
+:                    : (`workflow_dispatch`)      : opened, or synchronized    :
+| **Scope**          | Full repository audit      | **Differential scan**:     |
+:                    : against default branch     : Analyzes only lines        :
+:                    : (`main`)                   : changed in the PR          :
+:                    :                            : merge-base diff            :
+| **Base Ref**       | Default branch head commit | Pull Request target base   |
+:                    :                            : ref (`origin/<base_ref>`)  :
+| **Remediation**    | Opens PRs targeting        | Opens Child PRs targeting  |
+:                    : default branch (`main`)    : the developer's PR feature :
+:                    :                            : branch (`pr_head_ref`)     :
+| **Fork PRs**       | N/A (runs on upstream      | Posts an inline PR review  |
+:                    : repository)                : comment with patch diff    :
+:                    :                            : and git apply commands     :
+| **Alerts & SARIF** | Uploads full SARIF alert   | Scoped SARIF upload        |
+:                    : inventory with             : creating inline            :
+:                    : `underReview` suppressions : annotations on PR **Files  :
+:                    :                            : changed** and **Checks**   :
+:                    :                            : tabs                       :
+| **Quality Gate**   | Non-blocking               | **Blocking Quality Gate**  |
+:                    : (informational audit &     : via dedicated Commit       :
+:                    : remediation pipeline)      : Status (`CodeMender /      :
+:                    :                            : Security Gate`) &          :
+:                    :                            : `fail_on_findings=true`    :
+| **Step Summary**   | Full repository finding    | Scoped PR table with       |
+:                    : breakdown with LLM token   : Severity badges, CWE IDs,  :
+:                    : metrics                    : hyperlinked PRs, and `⚡    :
+:                    :                            : LLM Token Usage Summary`   :
 
 *   **Mode A: Scheduled Nightly Audits**: Designed to run off-peak (e.g. weekly
     or nightly) to perform a full codebase sweep, deduplicate against existing
@@ -160,8 +218,8 @@ optimized for CI/CD developer feedback and ongoing repository health:
     shift-left security. By calculating `git diff -U0 origin/<base>...HEAD`,
     CodeMender isolates vulnerabilities introduced by the PR, ignores
     pre-existing legacy issues to avoid developer fatigue, opens child PRs
-    directly against the feature branch, and acts as a blocking status check
-    before merge.
+    directly against the feature branch, and enforces a dedicated Commit Status
+    check before merge.
 
 ### 2. Google Cloud Platform (GCP) Deployment
 
@@ -197,6 +255,13 @@ optimized for CI/CD developer feedback and ongoing repository health:
     deterministically derived using finding attributes (`filePath`, `vulnType`,
     `startLine`). The orchestrator queries GitHub to check for existing open PRs
     within a 15-line sliding window, skipping duplicate `cm fix` operations.
+-   **JIT Dead Branch Reaper**: If a remote branch exists but its corresponding
+    PR was closed without merging, the orchestrator autonomously prunes the dead
+    branch and reprocures the fix so unmerged leftovers never suppress genuine
+    findings.
+-   **Transactional Rollback for Child PRs**: If PR creation fails or throws an
+    error after pushing a remediation branch, the worker automatically deletes
+    the newly pushed remote branch to prevent orphan accumulation.
 -   **Fork Pull Request Safe Handling**: For PRs submitted from fork
     repositories where push permissions are unavailable, the worker
     automatically avoids push failures and instead publishes an actionable PR
@@ -206,16 +271,28 @@ optimized for CI/CD developer feedback and ongoing repository health:
     and flags pre-existing findings as `PRE_EXISTING_IGNORED`, suppressing
     legacy finding noise and focusing developer attention strictly on newly
     introduced vulnerabilities.
--   **Security Quality Gate**: Pull Request scans enforce a blocking quality
-    check (`fail_on_findings=true`). If fixable or verified vulnerabilities
-    remain on the PR diff, Stage 3 exits with code 1 after publishing full SARIF
-    and reports, preventing vulnerable code from merging to `main`.
+-   **Local Build Cache Isolation & Hygiene**: Configures `XDG_CACHE_HOME`,
+    `npm_config_cache`, `PIP_CACHE_DIR`, and `TMPDIR` to
+    `<repo_dir>/.codemender_cache` (registered in `.git/info/exclude` and
+    excluded from `workspace_base.tar.gz`) and cleans non-reproduction build
+    caches before `cm fix` to eliminate runner disk bloat.
+-   **Dedicated Security Quality Gate Status Check**: Pull Request scans enforce
+    a dedicated GitHub Commit Status check (`CodeMender / Security Gate`). When
+    actionable vulnerabilities remain on the PR diff, the check is marked as
+    failed, blocking branch protection while allowing pipeline reports and
+    artifacts to finish.
+-   **Zero-Finding Fast Path & Clean SARIF Reporting**: When zero actionable
+    findings are detected (or all are dismissed), Stage 1 generates and uploads
+    a schema-compliant clean SARIF file (`results: []`) to resolve open alerts
+    in the GitHub Security tab and skips worker matrix execution.
 -   **Sanitized SARIF Reporting**: Trailing CLI process logs and out-of-tree
     traversal paths (`../`) are safely sanitized, ensuring 100% valid JSON
     serialization for GitHub Code Scanning integration.
--   **Aggregated Token Metrics & HTML Reports**: Aggregators dynamically
-    accumulate LLM token usage across all parallel workers and embed an
-    interactive token usage banner into the generated HTML report.
+-   **Aggregated LLM Token Telemetry & Step Summary**: Aggregators dynamically
+    accumulate LLM token usage across all parallel workers, embedding an
+    interactive token banner into `report.html` and rendering a structured `###
+    ⚡ LLM Token Usage Summary` breakdown table in GitHub Actions
+    `$GITHUB_STEP_SUMMARY`.
 
 --------------------------------------------------------------------------------
 
@@ -227,8 +304,8 @@ dedicated guides in the `docs/` folder:
 *   🐙
     **[GitHub Actions Integration Guide](docs/guides/github_actions_guide.md)**:
     End-to-end setup guide covering GitHub App onboarding, Actions secrets,
-    Workload Identity Federation (WIF), reusable caller workflows, and
-    troubleshooting.
+    Workload Identity Federation (WIF) setup (Terraform vs. CLI), reusable
+    caller workflows, and troubleshooting.
 *   ⚙️ **[Configuration Reference](docs/guides/configuration_reference.md)**:
     Comprehensive reference of all environment variables, workflow inputs, and
     AI model configurations (linking to
@@ -241,7 +318,9 @@ dedicated guides in the `docs/` folder:
     Run.
 *   🚀
     **[Automated Terraform Deployment Guide](docs/guides/terraform_deployment_guide.md)**:
-    Step-by-step instructions to provision GCP infrastructure using Terraform.
+    Step-by-step instructions to provision GCP infrastructure (Cloud Run &
+    Workflows) and GitHub Actions WIF modules (`terraform/gha_wif/`) using
+    Terraform.
 *   ⚡
     **[GitHub Actions Orchestration Architecture](docs/architecture/github_actions_orchestration_design.md)**:
     Detailed architectural design for native GitHub Actions matrix
@@ -299,7 +378,7 @@ documentation:
 │       ├── worker.py                   # Stage 2: Ephemeral parallel worker (verify, fix, PR creation)
 │       ├── aggregate.py                # Stage 3: Database merger, HTML/SARIF/Step Summary, Quality Gate
 │       └── sequential.py               # Sequential single-task scanning & fixing loop (local/debug)
-├── tests/                              # Comprehensive test suite (70/70 unit tests)
+├── tests/                              # Comprehensive test suite (92 unit tests)
 │   ├── __init__.py
 │   ├── cm                              # Mock executable mimicking cm CLI interactions
 │   ├── dummy_cm.py                     # Mock Python server simulating CodeMender backend
@@ -317,19 +396,28 @@ documentation:
 │   └── test_vcs_github.py              # GitHub REST API integration unit tests
 ├── workflows/
 │   └── gcp_parallel_workflow.yaml      # GCP Cloud Workflows parallel orchestration YAML
-├── terraform/                          # Automated GCP infrastructure provisioning
-│   └── gcp/                            # Google Cloud Platform Terraform modules
-│       ├── apis.tf                     # GCP API enablement
-│       ├── compute.tf                  # Cloud Run Jobs & Cloud Workflows definitions
-│       ├── iam.tf                      # Custom IAM roles and Service Accounts
-│       ├── outputs.tf                  # Deployment outputs and resource URLs
-│       ├── provider.tf                 # Terraform provider configuration
-│       ├── scheduler.tf                # Cloud Scheduler cron triggers
-│       ├── secret.tf                   # Secret Manager configuration for tokens
-│       ├── storage.tf                  # GCS Buckets and Artifact Registry
-│       ├── variables.tf                # Configurable Terraform variables
-│       ├── vpc.tf                      # Serverless VPC Access & Cloud NAT
-│       └── tests/                      # Terraform integration tests (`terraform test`)
+├── terraform/                          # Automated infrastructure provisioning
+│   ├── gcp/                            # GCP Cloud Run & Workflows Terraform module
+│   │   ├── apis.tf                     # GCP API enablement
+│   │   ├── compute.tf                  # Cloud Run Jobs & Cloud Workflows definitions
+│   │   ├── iam.tf                      # Custom IAM roles and Service Accounts
+│   │   ├── outputs.tf                  # Deployment outputs and resource URLs
+│   │   ├── provider.tf                 # Terraform provider configuration
+│   │   ├── scheduler.tf                # Cloud Scheduler cron triggers
+│   │   ├── secret.tf                   # Secret Manager configuration for tokens
+│   │   ├── storage.tf                  # GCS Buckets and Artifact Registry
+│   │   ├── variables.tf                # Configurable Terraform variables
+│   │   ├── vpc.tf                      # Serverless VPC Access & Cloud NAT
+│   │   └── tests/                      # Terraform integration tests (`terraform test`)
+│   └── gha_wif/                        # GitHub Actions Workload Identity Federation & GitHub setup module
+│       ├── apis.tf                     # GCP API enablement (IAM, IAM Credentials, Vertex AI)
+│       ├── github.tf                   # GitHub repository secrets & label configuration
+│       ├── iam.tf                      # Service account & Workload Identity Pool/Provider
+│       ├── outputs.tf                  # Provider IDs and SA email outputs
+│       ├── provider.tf                 # Google & GitHub provider configuration
+│       ├── terraform.tfvars.example    # Documented configuration template
+│       ├── variables.tf                # Configurable input variables
+│       └── tests/                      # Terraform integration tests (`wif_test.tftest.hcl`)
 └── docs/                               # Architectural specifications, guides, and runbooks
     ├── future_work.md                  # Future roadmap and technical debt tracker
     ├── architecture/                   # Architectural designs & specifications
@@ -348,12 +436,11 @@ documentation:
 
 --------------------------------------------------------------------------------
 
-### Running Unit Tests
+### Running Tests
 
-Modular unit tests are written using the standard Python `unittest` module and
-do not require external credentials or live cloud resources:
+Unit tests and Terraform module tests are modular and automated:
 
-*   **Run all unit tests**:
+*   **Run all Python unit tests**:
 
     ```bash
     python3 -m unittest discover tests -v
@@ -370,6 +457,16 @@ do not require external credentials or live cloud resources:
 
     ```bash
     python3 tests/e2e_test_local.py
+    ```
+
+*   **Run Terraform module tests**:
+
+    ```bash
+    # Test GitHub Actions WIF module
+    cd terraform/gha_wif && terraform init -backend=false && terraform test
+
+    # Test GCP deployment module
+    cd terraform/gcp && terraform init -backend=false && terraform test
     ```
 
 --------------------------------------------------------------------------------
