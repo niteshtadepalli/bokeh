@@ -240,35 +240,99 @@ setup for your organization or user account:
 
 ### Step 1.1: GitHub App Creation & Permissions
 
-Creating a dedicated GitHub App ensures that tokens are minted with
-least-privilege permissions and that automated commits/PRs are attributed
-cleanly to the bot.
+Creating a dedicated GitHub App provides a secure bot identity for CodeMender.
+Using a GitHub App offers major advantages over Personal Access Tokens (PATs):
 
-#### 1. Create the App in GitHub Settings
+*   **Ephemeral Scoped Credentials**: Tokens are minted on-demand with a
+    60-minute lifespan and strictly scoped repository permissions via
+    `actions/create-github-app-token`.
+*   **Clean Bot Attribution**: Automated branches, Pull Requests, and review
+    comments are attributed to your bot identity rather than personal user
+    accounts.
+*   **High API Rate Limits**: GitHub Apps receive a dedicated 5,000 to 15,000
+    requests/hour API rate limit separate from user rate limits.
+*   **Branch Protection Compatibility**: GitHub Apps can be explicitly allowed
+    to bypass branch protection rules to push automated remediation branches
+    without granting broad administrative rights to user accounts.
 
-*   **Personal Account**: Navigate to **Settings $\rightarrow$ Developer
-    settings $\rightarrow$ GitHub Apps $\rightarrow$ New GitHub App**.
-*   **Organization**: Navigate to **Organization Settings $\rightarrow$
-    Developer settings $\rightarrow$ GitHub Apps $\rightarrow$ New GitHub App**.
+> [!NOTE]
+> **Official GitHub Documentation References**:
+> *   [Registering a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+> *   [Authenticating with GitHub Apps](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/about-authentication-with-a-github-app)
+> *   [Managing Private Keys for GitHub Apps](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
+> *   [Installing Your Own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app)
 
-#### 2. Configure App Permissions
+--------------------------------------------------------------------------------
 
-Under **Repository Permissions**, set the following minimum permissions:
+#### 1. Navigate to GitHub App Registration
 
-*   `Contents: Read and write` (to checkout code and push remediation branches)
-*   `Pull requests: Read and write` (to open Child PRs and post review comments)
-*   `Commit statuses: Read and write` (to post dedicated 'CodeMender / Security
-    Gate' status checks on PRs)
-*   `Code scanning alerts: Read and write` (maps to `security-events: write` in
-    workflow YAML to upload SARIF reports to GitHub Security Tab)
-*   `Issues: Read and write` (for review comments on Fork PRs)
+*   **Personal User Account**: Go to
+    **[GitHub Settings $\rightarrow$ Developer settings $\rightarrow$ GitHub Apps $\rightarrow$ New GitHub App](https://github.com/settings/apps/new)**.
+*   **Organization Account**: Go to **Organization Settings $\rightarrow$
+    Developer settings $\rightarrow$ GitHub Apps $\rightarrow$ New GitHub App**
+    (`https://github.com/organizations/<your-org>/settings/apps/new`).
 
-#### 3. Save App Credentials
+#### 2. Fill in General Registration Details
 
-*   **App ID**: Note the numeric App ID on the App settings page (e.g.
-    `123456`).
-*   **Private Key**: Scroll down to **Private keys**, click **Generate a private
-    key**, and download the `.pem` file.
+1.  **GitHub App name**: Enter a unique descriptive name (e.g. `codemender-bot`
+    or `codemender-bot-<org>`).
+2.  **Homepage URL**: Enter your repository URL (e.g.
+    `https://github.com/cloud-ai-fde/codemender-agent`).
+3.  **Webhook**:
+    *   **Uncheck "Active"** (CodeMender is triggered directly by GitHub Actions
+        runner jobs, so no incoming webhook listener or public webhook URL is
+        required).
+
+#### 3. Configure Repository Permissions
+
+Under **Repository permissions**, configure the following minimum access scopes:
+
+| Permission | Access Level | Purpose in CodeMender |
+| :--- | :---: | :--- |
+| **Contents** | `Read and write` | Checkout repository code, clone base refs, and push automated `codemender/fix-...` branches. |
+| **Pull requests** | `Read and write` | Open automated Child PRs on internal feature branches and post review comments on Fork PRs. |
+| **Commit statuses** | `Read and write` | Post dedicated `CodeMender / Security Gate` pass/fail status checks on Pull Requests. |
+| **Code scanning alerts** | `Read and write` | Upload `report.sarif` findings to the GitHub Security Tab (`security-events: write`). |
+| **Issues** | `Read and write` | Post threaded remediation comments and patch diffs on Fork Pull Requests. |
+
+> [!TIP]
+> All other **Organization permissions**, **User permissions**, and **Subscribe to events** can remain set to **No access** / unselected.
+
+#### 4. Select Installation Scope & Create App
+
+1.  Under **Where can this GitHub App be installed?**, select:
+    *   **Only on this account** (if the App will be used only within your
+        organization or personal account).
+    *   **Any account** (if you plan to distribute the App across multiple
+        separate external organizations).
+2.  Click **Create GitHub App**.
+
+#### 5. Save App ID & Generate Private Key
+
+Once created, you will be redirected to the App's **General Settings** page:
+
+1.  **Note the App ID**: Copy the numeric **App ID** displayed at the top under
+    **About** (e.g. `123456`). This will be used as `GH_APP_ID`.
+2.  **Generate Private Key**:
+    *   Scroll down to the **Private keys** section at the bottom of the page.
+    *   Click **Generate a private key**.
+    *   Your browser will automatically download an RSA private key file in
+        `.pem` format (e.g. `codemender-bot.2026-08-31.private-key.pem`).
+    *   Keep this file secure! It will be used as `GH_APP_PRIVATE_KEY` in
+        [Step 1.3](#step-13-secret-injection).
+
+#### 6. Install the App on Repositories
+
+Before the App can mint tokens for a repository, it must be installed:
+
+1.  In the left sidebar of your App settings, click **Install App**.
+2.  Click **Install** next to your organization or user account.
+3.  Under **Repository access**, choose:
+    *   **All repositories** *(Recommended)*: Allows onboarding any new
+        repository without returning to App settings.
+    *   **Only select repositories**: Explicitly pick the target repositories
+        you want CodeMender to scan.
+4.  Click **Install** / **Save**.
 
 --------------------------------------------------------------------------------
 
@@ -654,16 +718,92 @@ GitHub Actions runners need permission to pull the runner container image.
 Add a workflow file at `.github/workflows/codemender.yml` on the default branch
 (`main` or `master`).
 
-*   **Standard Setup**: Copy the ready-to-use production caller workflow from
-    [Section 5 (Example 1)](#example-1-production-standard-workflow-scheduled--pull-request-ci).
-*   **Personal Accounts with Private Repositories**: GitHub disallows
-    cross-repository reusable workflow calls between private repositories under
-    personal accounts. Copy `codemender_parallel.yml` directly into
-    `.github/workflows/` of the target repository and call it locally:
+--------------------------------------------------------------------------------
+
+#### ⚠️ CRITICAL SETUP DISTINCTION: Organization vs. Personal Private Repositories
+
+Depending on whether your target repository belongs to an **Organization** or a
+**Personal User Account**, choose the matching setup below:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                CHOOSE YOUR REPOSITORY SETUP SCENARIO                             │
+├─────────────────────────────────────────────────┬────────────────────────────────────────────────┤
+│ Scenario A: Organization / Public Repository    │ Scenario B: Private Repo in Personal Account   │
+│ (Standard Turnkey Reusable Workflow)            │ (MOST COMMON FOR TESTERS & INDIVIDUAL USERS)   │
+├─────────────────────────────────────────────────┼────────────────────────────────────────────────┤
+│ • Repositories in the same GitHub Organization   │ • Testing in personal private repositories     │
+│ • Or any Public repository                      │ • Cross-repo reusable calls BLOCKED by GitHub  │
+│                                                 │                                                │
+│ Action:                                         │ Action (2 Steps Required):                     │
+│ Use standard remote reusable workflow path:     │ 1. COPY 'codemender_parallel.yml' into target │
+│   uses: org/codemender-agent/.../parallel.yml   │    repo's '.github/workflows/' directory.     │
+│                                                 │ 2. Call local workflow in 'codemender.yml':    │
+│                                                 │    uses: ./.github/workflows/parallel.yml      │
+└─────────────────────────────────────────────────┴────────────────────────────────────────────────┘
+```
+
+> [!CAUTION]
+> **Why Copying `codemender_parallel.yml` is Mandatory for Personal
+> Private Repositories**: GitHub Actions enforces a strict platform-level
+> security boundary: **cross-repository reusable workflow calls (`uses:
+> <user>/<repo>/...`) between private repositories are strictly prohibited under
+> personal user accounts**.
+>
+> If you attempt to call `uses: your-user/codemender-agent/...` from another
+> private personal repository, GitHub will immediately fail with:
+>
+> ```text
+> Error: .github/workflows/codemender.yml: action not found / repository not found or access denied
+> ```
+>
+> 💡 **Important Note on Docker Image Visibility**: Even if your runner container
+> image (`ghcr.io/...`) is **Public**, GitHub Actions still requires the **YAML
+> workflow file itself** (`codemender_parallel.yml`) to be present inside the
+> target private repository.
+
+--------------------------------------------------------------------------------
+
+#### Setup Instructions by Scenario:
+
+*   **Scenario A: Organization Account / Public Repositories**: In
+    `.github/workflows/codemender.yml`, reference the centralized reusable
+    workflow:
 
     ```yaml
-        uses: ./.github/workflows/codemender_parallel.yml
+        uses: your-org/codemender-agent/.github/workflows/codemender_parallel.yml@main
+        with:
+          runner_image: 'ghcr.io/your-org/codemender-runner:latest'
     ```
+
+*   **Scenario B: Private Repositories under Personal Accounts (Testers &
+    Personal Repos)**:
+
+    1.  **Copy the Reusable Orchestrator Workflow**: Copy
+        `codemender_parallel.yml` from this repository directly into the target
+        repository:
+
+        ```text
+        your-target-repo/
+        ├── .github/
+        │   └── workflows/
+        │       ├── codemender_parallel.yml  <-- (COPIED HERE)
+        │       └── codemender.yml           <-- (CALLER WORKFLOW)
+        ```
+    2.  **Configure Local Call in `.github/workflows/codemender.yml`**:
+
+        ```yaml
+            uses: ./.github/workflows/codemender_parallel.yml
+            with:
+              # Point to your personal or public runner image on GHCR:
+              runner_image: 'ghcr.io/ilbzzz/codemender-runner:latest'
+              build_command: 'npm test'
+            secrets:
+              gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+              gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+              github_app_id: ${{ secrets.GH_APP_ID }}
+              github_app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+        ```
 
 --------------------------------------------------------------------------------
 
@@ -750,10 +890,17 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
 
-    # Call the reusable CodeMender orchestration workflow
-    uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
+    # -------------------------------------------------------------------------
+    # Reusable Orchestrator Workflow Call:
+    # Option A (Org Account / Public Repo): uses: your-org/codemender-agent/.github/workflows/codemender_parallel.yml@main
+    # Option B (Personal Private Repo / Testers): Copy 'codemender_parallel.yml' to .github/workflows/ and call locally:
+    # -------------------------------------------------------------------------
+    uses: ./.github/workflows/codemender_parallel.yml
+    # uses: your-org/codemender-agent/.github/workflows/codemender_parallel.yml@main
 
     with:
+      # Universal or Personal Runner Container Image (GHCR):
+      runner_image: 'ghcr.io/ilbzzz/codemender-runner:latest'
       # --- Build & Test Verification (CRITICAL) ---
       # Command executed by 'cm fix' to ensure generated patches build and pass unit tests.
       # Leave empty ('') to auto-detect based on package.json, pom.xml, requirements.txt, etc.
