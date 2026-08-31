@@ -1069,7 +1069,7 @@ run overview, showing:
 ### Building & Publishing the Standard Runner Base Image
 
 The CodeMender runner base image (`ghcr.io/<org>/codemender-runner:latest`)
-contains the pre-baked standard LTS language runtimes (Python 3.11, Node.js 20
+contains the pre-baked standard LTS language runtimes (Python 3.11, Node.js 22
 LTS, Go 1.22+, OpenJDK 17), build essentials (`gcc`, `g++`, `make`, `git`,
 `curl`, `fuser`, `unzip`), the `cm` Go binary in `/usr/local/bin/cm`, and the
 isolated orchestrator Python virtual environment in `/opt/codemender/venv`.

@@ -451,7 +451,7 @@ repository to implement native GitHub Actions support.
         `unzip`, `fuser`, `ca-certificates`, `build-essential` (`gcc`, `g++`,
         `make`).
     *   Install LTS language runtimes: Python 3.11 (`python3-pip`,
-        `python3-venv`), Node.js 20 LTS (`npm`, `yarn`, `pnpm`), Go (latest
+        `python3-venv`), Node.js 22 LTS (`npm`, `yarn`, `pnpm`), Go (latest
         stable), OpenJDK 17/21 (`maven`, `gradle`).
     *   Install CodeMender Go CLI (`cm`) into `/usr/local/bin/cm`:
 

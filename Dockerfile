@@ -44,8 +44,8 @@ RUN add-apt-repository ppa:deadsnakes/ppa -y && \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
-# Install Node.js 20 LTS, npm, yarn, pnpm
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+# Install Node.js 22 LTS, npm, yarn, pnpm
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     npm install -g yarn pnpm && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/*

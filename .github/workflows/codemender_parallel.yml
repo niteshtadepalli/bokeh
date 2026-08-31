@@ -122,7 +122,10 @@ jobs:
     runs-on: ${{ inputs.runner_type }}
     timeout-minutes: 55
     container:
-      image: ${{ inputs.runner_image }}
+      # Dynamic container image: codemender_parallel.yml is a reusable orchestration workflow (workflow_call),
+      # where runner_image is intentionally designed as a dynamic input (image: ${{ inputs.runner_image }}) so
+      # callers can pass custom runner images (BYOI) or specific tags.
+      image: ${{ inputs.runner_image }} # zizmor: ignore[unpinned-images] Reusable workflow input allows callers to supply custom runner images (BYOI) or specific tags
       options: --privileged
     env:
       GH_APP_ID: ${{ secrets.github_app_id }}
@@ -140,22 +143,27 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          persist-credentials: false
 
       - name: Mint GitHub App Token
         id: app-token
         if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
         with:
           app-id: ${{ secrets.github_app_id }}
           private-key: ${{ secrets.github_app_private_key }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-security-events: write
+          permission-statuses: write
 
       - name: Authenticate to Google Cloud
         if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
           service_account: ${{ secrets.gcp_service_account }}
@@ -185,7 +193,7 @@ jobs:
 
       - name: Upload Base State Artifact
         if: ${{ steps.run-scan.outputs.findings_count != '0' && steps.run-scan.outputs.findings_count != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: codemender-base-state
           path: .codemender_transit/base/
@@ -195,7 +203,7 @@ jobs:
 
       - name: Upload Clean SARIF Report
         if: always() && inputs.upload_sarif && steps.run-scan.outputs.findings_count == '0' && hashFiles('report.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@a65a038433a26f4363cf9f029e3b9ceac831ad5d # v3.28.10
         continue-on-error: true
         with:
           sarif_file: report.sarif
@@ -211,7 +219,10 @@ jobs:
     runs-on: ${{ inputs.runner_type }}
     timeout-minutes: 55
     container:
-      image: ${{ inputs.runner_image }}
+      # Dynamic container image: codemender_parallel.yml is a reusable orchestration workflow (workflow_call),
+      # where runner_image is intentionally designed as a dynamic input (image: ${{ inputs.runner_image }}) so
+      # callers can pass custom runner images (BYOI) or specific tags.
+      image: ${{ inputs.runner_image }} # zizmor: ignore[unpinned-images] Reusable workflow input allows callers to supply custom runner images (BYOI) or specific tags
       options: --privileged
     env:
       GH_APP_ID: ${{ secrets.github_app_id }}
@@ -224,29 +235,34 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Mint GitHub App Token
         id: app-token
         if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
         with:
           app-id: ${{ secrets.github_app_id }}
           private-key: ${{ secrets.github_app_private_key }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-security-events: write
+          permission-statuses: write
 
       - name: Authenticate to Google Cloud
         if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
           service_account: ${{ secrets.gcp_service_account }}
           credentials_json: ${{ secrets.gcp_sa_key }}
 
       - name: Download Base State Artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
         with:
           name: codemender-base-state
           path: .codemender_transit/base/
@@ -274,7 +290,7 @@ jobs:
         run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
 
       - name: Upload Worker Shard Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: worker-shard-${{ matrix.worker_index }}
           path: .codemender_transit/shards/worker_${{ matrix.worker_index }}/
@@ -289,7 +305,10 @@ jobs:
     runs-on: ${{ inputs.runner_type }}
     timeout-minutes: 30
     container:
-      image: ${{ inputs.runner_image }}
+      # Dynamic container image: codemender_parallel.yml is a reusable orchestration workflow (workflow_call),
+      # where runner_image is intentionally designed as a dynamic input (image: ${{ inputs.runner_image }}) so
+      # callers can pass custom runner images (BYOI) or specific tags.
+      image: ${{ inputs.runner_image }} # zizmor: ignore[unpinned-images] Reusable workflow input allows callers to supply custom runner images (BYOI) or specific tags
       options: --privileged
     env:
       GH_APP_ID: ${{ secrets.github_app_id }}
@@ -302,35 +321,40 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Mint GitHub App Token
         id: app-token
         if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
         with:
           app-id: ${{ secrets.github_app_id }}
           private-key: ${{ secrets.github_app_private_key }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-security-events: write
+          permission-statuses: write
 
       - name: Authenticate to Google Cloud
         if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
           service_account: ${{ secrets.gcp_service_account }}
           credentials_json: ${{ secrets.gcp_sa_key }}
 
       - name: Download Base State Artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
         with:
           name: codemender-base-state
           path: .codemender_transit/base/
 
       - name: Download Worker Shards
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
         with:
           pattern: worker-shard-*
           path: .codemender_transit/shards/
@@ -356,14 +380,14 @@ jobs:
 
       - name: Upload SARIF Report
         if: always() && inputs.upload_sarif && hashFiles('report.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@a65a038433a26f4363cf9f029e3b9ceac831ad5d # v3.28.10
         continue-on-error: true
         with:
           sarif_file: report.sarif
 
       - name: Upload Final Reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: codemender-report-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'nightly' }}-run-${{ github.run_id }}
           path: |
