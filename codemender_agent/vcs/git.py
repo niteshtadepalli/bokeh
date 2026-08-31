@@ -15,13 +15,63 @@
 """Git URL and repository manipulation utilities for CodeMender Agent."""
 
 import base64
+import hashlib
 import logging
-
 import os
 import re
+import shutil
 from typing import Optional, Tuple
 
+from codemender_agent.utils import retry_on_exception
+
 logger = logging.getLogger("codemender-orchestrator")
+
+
+def normalize_repo_relative_path(path: str, repo_dir: Optional[str] = None) -> str:
+  """Normalizes a file path to be strictly repository-relative with forward slashes and no leading './'."""
+  if not path:
+    return ""
+  p = path.strip().replace("\\", "/")
+  if repo_dir:
+    clean_repo_dir = os.path.abspath(repo_dir).replace("\\", "/")
+    if p == clean_repo_dir:
+      return ""
+    if p.startswith(clean_repo_dir + "/"):
+      p = p[len(clean_repo_dir) + 1 :]
+    elif os.path.isabs(p):
+      try:
+        rel = os.path.relpath(p, clean_repo_dir).replace("\\", "/")
+        if not rel.startswith("../") and rel != "..":
+          p = rel
+      except ValueError:
+        pass
+
+  # Strip leading CI runner mount patterns if present (e.g. /__w/<owner>/<repo>/... or /github/workspace/...)
+  p = re.sub(r"^/?__w/[^/]+/[^/]+(?:/[^/]+)?/", "", p)
+  p = re.sub(r"^/?github/workspace/", "", p)
+
+  # Strip any leading slashes, dots, or relative traversal markers
+  p = re.sub(r"^(\.\./)+", "", p)
+  p = re.sub(r"^\.?/+", "", p)
+  return p
+
+
+def compute_finding_fingerprint(
+    file_path: str, vuln_type: str, start_line: int
+) -> str:
+  """Computes a deterministic 8-character SHA256 fingerprint for a finding."""
+  norm_path = normalize_repo_relative_path(file_path)
+  norm_type = (vuln_type or "vulnerability").strip().lower()
+  raw_hash_str = f"{norm_path}|{norm_type}|{start_line}"
+  return hashlib.sha256(raw_hash_str.encode("utf-8")).hexdigest()[:8]
+
+
+def get_finding_branch_name(
+    file_path: str, vuln_type: str, start_line: int
+) -> str:
+  """Generates a canonical branch name for a finding using its deterministic fingerprint."""
+  fp = compute_finding_fingerprint(file_path, vuln_type, start_line)
+  return generate_branch_name(vuln_type, fp)
 
 
 def enforce_https_url(url: str) -> str:
@@ -81,7 +131,7 @@ def generate_branch_name(vuln_type: str, fingerprint: str) -> str:
 def clean_workspace(repo_dir: str, exclude_dirs: Optional[Tuple[str, ...]] = None) -> None:
   """Resets working directory and cleans untracked files while preserving CLI metadata directories."""
   if exclude_dirs is None:
-    exclude_dirs = (".cm_project", ".exploit")
+    exclude_dirs = (".cm_project", ".exploit", ".codemender_cache")
 
   cmd = ["git", "clean", "-fd"]
   for ex in exclude_dirs:
@@ -103,7 +153,7 @@ def setup_local_git_excludes(repo_dir: str) -> None:
         existing_content = f.read()
 
     new_entries = []
-    for entry in [".cm_project", ".exploit"]:
+    for entry in [".cm_project", ".exploit", ".codemender_cache"]:
       if entry not in existing_content:
         new_entries.append(entry)
 
@@ -115,3 +165,130 @@ def setup_local_git_excludes(repo_dir: str) -> None:
       logger.info("Successfully added local git excludes: %s", new_entries)
   except Exception as e:
     logger.warning("Failed to configure local git excludes: %s", e)
+
+
+def sanitize_exploit_and_artifacts(
+    repo_dir: str, codemender_home: Optional[str] = None
+) -> None:
+  """Prunes heavy non-reproduction build caches from .exploit/ and ~/.codemender/artifacts/."""
+  junk_dirs = {
+      ".cache",
+      "node_modules",
+      ".npm",
+      ".node-gyp",
+      ".tmp",
+      "tmp",
+      "venv",
+      ".venv",
+      "__pycache__",
+      ".pytest_cache",
+  }
+
+  # 1. Clean repo_dir/.exploit/
+  exploit_dir = os.path.join(repo_dir, ".exploit")
+  if os.path.isdir(exploit_dir):
+    try:
+      for entry in os.listdir(exploit_dir):
+        entry_path = os.path.join(exploit_dir, entry)
+        if os.path.isdir(entry_path) and entry in junk_dirs:
+          shutil.rmtree(entry_path, ignore_errors=True)
+          logger.info("Sanitized junk build cache directory: %s", entry_path)
+    except Exception as e:
+      logger.warning("Failed to sanitize .exploit directory: %s", e)
+
+  # 2. Clean ~/.codemender/artifacts/
+  cm_home = codemender_home or os.path.expanduser("~/.codemender")
+  artifacts_dir = os.path.join(cm_home, "artifacts")
+  if os.path.isdir(artifacts_dir):
+    try:
+      for root, dirs, _ in os.walk(artifacts_dir, topdown=True):
+        for d in list(dirs):
+          if d in junk_dirs:
+            target_path = os.path.join(root, d)
+            shutil.rmtree(target_path, ignore_errors=True)
+            dirs.remove(d)
+            logger.info("Sanitized artifact build cache directory: %s", target_path)
+    except Exception as e:
+      logger.warning("Failed to sanitize artifacts directory: %s", e)
+
+
+
+def get_pr_changed_lines(repo_dir: str, base_ref: str) -> Optional[dict[str, set[int]]]:
+  """Parses Unified Diff hunks to extract modified line numbers per file.
+
+  Runs 'git diff -U0 origin/<base_ref>...HEAD' (falling back to '<base_ref>...HEAD' or 'origin/<base_ref>')
+  and parses the diff hunk headers (@@ -old_start,old_count +new_start,new_count @@).
+
+  Returns:
+    Dict mapping repository-relative file paths to sets of 1-based modified line numbers,
+    or None if git diff execution failed across all candidate targets.
+  """
+  from codemender_agent.utils import run_command
+
+  clean_base = base_ref.strip()
+  if clean_base.startswith("refs/heads/"):
+    clean_base = clean_base[11:]
+
+  diff_targets = [
+      f"origin/{clean_base}...HEAD",
+      f"{clean_base}...HEAD",
+      f"origin/{clean_base}",
+      clean_base,
+  ]
+  diff_output: Optional[str] = None
+  for target in diff_targets:
+    try:
+      res = run_command(
+          ["git", "diff", "-U0", target], cwd=repo_dir, check=False
+      )
+      if res.returncode == 0:
+        diff_output = res.stdout
+        break
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+  if diff_output is None:
+    return None
+
+  changed_lines: dict[str, set[int]] = {}
+  if not diff_output:
+    return changed_lines
+
+  current_file: Optional[str] = None
+  for line in diff_output.splitlines():
+    if line.startswith("+++ b/"):
+      current_file = normalize_repo_relative_path(line[6:].strip())
+      if current_file and current_file not in changed_lines:
+        changed_lines[current_file] = set()
+    elif line.startswith("+++ /dev/null"):
+      current_file = None
+    elif line.startswith("@@ ") and current_file:
+      # Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
+      # or @@ -old_start +new_start @@
+      match = re.search(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+      if match:
+        new_start = int(match.group(1))
+        new_count = int(match.group(2)) if match.group(2) is not None else 1
+        if new_count == 0:
+          changed_lines[current_file].add(new_start)
+        else:
+          for l in range(new_start, new_start + new_count):
+            changed_lines[current_file].add(l)
+
+  return changed_lines
+
+
+@retry_on_exception(max_tries=3, initial_delay=2, backoff_factor=2)
+def push_branch_to_remote(
+    repo_dir: str,
+    token: str,
+    branch_name: str,
+    force: bool = False,
+) -> None:
+  """Pushes a local branch to origin with exponential backoff retries."""
+  push_cmd = ["git", "-c", get_git_auth_header(token), "push"]
+  if force:
+    push_cmd.append("-f")
+  push_cmd.extend(["origin", branch_name])
+  from codemender_agent.utils import run_command
+  run_command(push_cmd, cwd=repo_dir, check=True)

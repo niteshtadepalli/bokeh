@@ -20,7 +20,10 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from codemender_agent.runners.scan import run_scan_pipeline
+from codemender_agent.runners.scan import (
+    _render_zero_findings_summary,
+    run_scan_pipeline,
+)
 
 
 class TestScanRunner(unittest.TestCase):
@@ -223,6 +226,14 @@ class TestScanRunner(unittest.TestCase):
 
     self.assertEqual(cm.exception.code, 0)
 
+    # Verify clean SARIF file was written to workspace
+    sarif_file = os.path.join(self.workspace_dir, "report.sarif")
+    self.assertTrue(os.path.exists(sarif_file))
+    with open(sarif_file, "r", encoding="utf-8") as f:
+      sarif_data = json.load(f)
+      self.assertEqual(sarif_data["version"], "2.1.0")
+      self.assertEqual(sarif_data["runs"][0]["results"], [])
+
     manifest_uploaded = False
     for call in mock_upload_gcs.call_args_list:
       local_path, _, dest_blob = call[0]
@@ -259,7 +270,7 @@ class TestScanRunner(unittest.TestCase):
     mock_check_remote_branch_exists.return_value = False
     
     # fid-1 will be skipped (db.py), fid-2 will be active (app.py)
-    mock_is_duplicate_pr.side_effect = lambda r, t, f, v, s: f == "db.py"
+    mock_is_duplicate_pr.side_effect = lambda r, t, f, v, s, **kw: f == "db.py"
 
     mock_git_rev = MagicMock()
     mock_git_rev.stdout = "abc123commitsha"
@@ -395,6 +406,211 @@ class TestScanRunner(unittest.TestCase):
     self.assertIn(expected_target2, find_targets_passed)
     for target in find_targets_passed:
       self.assertTrue(os.path.isabs(target), f"Target {target} is not absolute")
+
+  @patch("codemender_agent.runners.scan.get_pr_changed_lines")
+  @patch("codemender_agent.runners.scan.run_command")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.get_default_branch")
+  @patch("shutil.which")
+  def test_scan_pipeline_pr_differential_filtering(
+      self,
+      mock_which,
+      mock_get_default_branch,
+      mock_is_duplicate_pr,
+      mock_check_remote_branch,
+      mock_run_cmd,
+      mock_get_pr_changed_lines,
+  ):
+    """Verify differential PR filtering marks untouched findings PRE_EXISTING_IGNORED and emits GHA outputs."""
+    mock_which.return_value = "/bin/cm"
+    mock_get_default_branch.return_value = "main"
+    mock_is_duplicate_pr.return_value = False
+    mock_check_remote_branch.return_value = False
+    
+    # Diff hunks: only modified lines 10-15 in app.py
+    mock_get_pr_changed_lines.return_value = {"app.py": {10, 11, 12, 13, 14, 15}}
+
+    mock_git_rev = MagicMock()
+    mock_git_rev.stdout = "targetsha123"
+
+    mock_cm_report = MagicMock()
+    mock_cm_report.stdout = json.dumps([
+        {"FindingID": "fid-modified", "Status": "DETECTED", "VulnType": "SQL_INJECTION", "FilePath": "app.py", "StartLine": 12, "EndLine": 12},
+        {"FindingID": "fid-untouched", "Status": "DETECTED", "VulnType": "XSS", "FilePath": "legacy.py", "StartLine": 50, "EndLine": 55},
+    ])
+
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if "rev-parse" in cmd_str:
+        return mock_git_rev
+      elif "report" in cmd_str:
+        return mock_cm_report
+      else:
+        return mock_default
+
+    mock_run_cmd.side_effect = run_cmd_side_effect
+
+    # Setup fake local state.db
+    import sqlite3
+    db_dir = os.path.join(self.workspace_dir, ".codemender")
+    os.makedirs(db_dir, exist_ok=True)
+    db_path = os.path.join(db_dir, "state.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE findings (finding_id TEXT, status TEXT, muted INTEGER, mute_reason TEXT, dismiss_reason TEXT)")
+    conn.execute("INSERT INTO findings VALUES ('fid-modified', 'OPEN', 0, '', '')")
+    conn.execute("INSERT INTO findings VALUES ('fid-untouched', 'OPEN', 0, '', '')")
+    conn.commit()
+    conn.close()
+
+    output_file = os.path.join(self.workspace_dir, "github_output.txt")
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "CODEMENDER_PR_BASE_REF": "main",
+            "GITHUB_OUTPUT": output_file,
+        },
+    ):
+      run_scan_pipeline()
+
+    # Check local state.db mutations
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT finding_id, status FROM findings ORDER BY finding_id")
+    rows = cursor.fetchall()
+    conn.close()
+
+    self.assertEqual(rows[0], ("fid-modified", "OPEN"))
+    self.assertEqual(rows[1], ("fid-untouched", "PRE_EXISTING_IGNORED"))
+
+    # Check GITHUB_OUTPUT file
+    self.assertTrue(os.path.exists(output_file))
+    with open(output_file, "r") as f:
+      output_content = f.read()
+
+    self.assertIn("matrix=[0]", output_content)
+    self.assertIn("findings_count=1", output_content)
+    self.assertIn("target_sha=targetsha123", output_content)
+
+  def test_render_zero_findings_summary_pr_scan_hides_legacy_notes(self):
+    """Verify that _render_zero_findings_summary omits pre-existing/legacy notes on PR scans."""
+    summary_file = os.path.join(self.workspace_dir, "step_summary.md")
+    with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_file}):
+      _render_zero_findings_summary(
+          owner="ilbzzz",
+          repo_name="juice-shop-local",
+          target_sha="1e677199",
+          is_pr_scan=True,
+          filtered_reasons="10 pre-existing findings and 0 duplicate branches/PRs dismissed.",
+      )
+
+    self.assertTrue(os.path.exists(summary_file))
+    with open(summary_file, "r", encoding="utf-8") as f:
+      content = f.read()
+
+    self.assertIn("Pull Request Scan (Clean as You Code)", content)
+    self.assertNotIn("pre-existing findings", content)
+    self.assertNotIn("- **Note:**", content)
+
+  def test_render_zero_findings_summary_with_token_totals(self):
+    """Verify that _render_zero_findings_summary renders per-model token table."""
+    summary_file = os.path.join(self.workspace_dir, "step_summary_tokens.md")
+    with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_file}):
+      _render_zero_findings_summary(
+          owner="ilbzzz",
+          repo_name="juice-shop-local",
+          target_sha="1e677199",
+          is_pr_scan=False,
+          token_totals={"gemini-2.5-flash": {"in_tokens": 1200, "out_tokens": 80, "total_tokens": 1280}},
+      )
+
+    self.assertTrue(os.path.exists(summary_file))
+    with open(summary_file, "r", encoding="utf-8") as f:
+      content = f.read()
+
+    self.assertIn("### ⚡ LLM Token Usage Summary", content)
+    self.assertIn("- **Grand Total Tokens:** 1,280", content)
+    self.assertIn("| `gemini-2.5-flash` | 1,200 | 80 | 1,280 |", content)
+
+  @patch("codemender_agent.runners.scan.delete_remote_branch")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  def test_filter_findings_dead_branch_pruned_and_retained(
+      self, mock_check_branch, mock_is_dup_pr, mock_delete_branch
+  ):
+    """Verify that a remote branch without an open PR is pruned as a dead branch and retained as active."""
+    from codemender_agent.runners.scan import _filter_findings
+
+    mock_check_branch.return_value = True
+    mock_is_dup_pr.return_value = False
+    mock_delete_branch.return_value = True
+
+    findings = [
+        {
+            "FindingID": "f-dead-1",
+            "Status": "DETECTED",
+            "VulnType": "SQL_INJECTION",
+            "FilePath": "routes/search.ts",
+            "StartLine": 25,
+        }
+    ]
+
+    active, skipped, ignored = _filter_findings(
+        findings=findings,
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        repo_dir=self.workspace_dir,
+        force_overwrite=False,
+        is_pr_scan=False,
+    )
+
+    self.assertEqual(len(active), 1)
+    self.assertEqual(active[0]["FindingID"], "f-dead-1")
+    self.assertEqual(skipped, [])
+    self.assertEqual(ignored, [])
+    mock_delete_branch.assert_called_once()
+
+  @patch("codemender_agent.runners.scan.delete_remote_branch")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  def test_filter_findings_live_branch_skipped(
+      self, mock_check_branch, mock_is_dup_pr, mock_delete_branch
+  ):
+    """Verify that a remote branch WITH an open PR is recognized as live and skipped."""
+    from codemender_agent.runners.scan import _filter_findings
+
+    mock_check_branch.return_value = True
+    mock_is_dup_pr.return_value = True
+
+    findings = [
+        {
+            "FindingID": "f-live-1",
+            "Status": "DETECTED",
+            "VulnType": "SQL_INJECTION",
+            "FilePath": "routes/search.ts",
+            "StartLine": 25,
+        }
+    ]
+
+    active, skipped, ignored = _filter_findings(
+        findings=findings,
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        repo_dir=self.workspace_dir,
+        force_overwrite=False,
+        is_pr_scan=False,
+    )
+
+    self.assertEqual(active, [])
+    self.assertEqual(skipped, ["f-live-1"])
+    self.assertEqual(ignored, [])
+    mock_delete_branch.assert_not_called()
 
 
 if __name__ == "__main__":

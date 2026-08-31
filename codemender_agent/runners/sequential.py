@@ -23,6 +23,7 @@ import sys
 import time
 
 from codemender_agent.codemender.cli import extract_session_id
+from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.db import get_finding_status
 from codemender_agent.codemender.db import is_finding_verified
@@ -41,10 +42,12 @@ from codemender_agent.vcs.git import clean_workspace
 from codemender_agent.vcs.git import generate_branch_name
 from codemender_agent.vcs.git import get_git_auth_header
 from codemender_agent.vcs.git import parse_repo_owner_and_name
+from codemender_agent.vcs.git import sanitize_exploit_and_artifacts
 from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
 from codemender_agent.vcs.github import check_remote_branch_exists
 from codemender_agent.vcs.github import create_pull_request
+from codemender_agent.vcs.github import delete_remote_branch
 from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import is_duplicate_pr
 
@@ -58,7 +61,6 @@ def run_sequential_pipeline() -> None:
   repo_url, token = get_github_credentials()
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
-  scrubbed_env = get_scrubbed_env()
 
   workspace_dir = os.environ.get("WORKSPACE_DIR", os.getcwd())
 
@@ -67,6 +69,8 @@ def run_sequential_pipeline() -> None:
   repo_dir = os.path.join(workspace_dir, repo_name)
 
   if not os.path.exists(os.path.join(repo_dir, ".git")):
+    if os.path.exists(repo_dir):
+      shutil.rmtree(repo_dir)
     clone_cmd = [
         "git",
         "-c",
@@ -103,6 +107,8 @@ def run_sequential_pipeline() -> None:
         ["git", "reset", "--hard", f"origin/{curr_branch}"], cwd=repo_dir
     )
 
+  scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
+
   try:
     default_branch = run_command(
         ["git", "branch", "--show-current"], cwd=repo_dir
@@ -126,6 +132,7 @@ def run_sequential_pipeline() -> None:
   # Step 2: Initialize CodeMender CLI
   logger.info("Initializing CodeMender CLI...")
   cm_binary = shutil.which("cm") or "cm"
+  log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
 
   try:
     init_cmd = build_cm_command(cm_binary, "init", cli_version=cli_version)
@@ -258,21 +265,71 @@ def run_sequential_pipeline() -> None:
         os.environ.get("CODEMENDER_FORCE_OVERWRITE", "false").lower() == "true"
     )
     if not force_overwrite:
-      is_branch_dup = check_remote_branch_exists(clean_repo_url, token, branch_name, cwd=repo_dir)
-      is_pr_dup = is_duplicate_pr(clean_repo_url, token, file_path, vuln_type, start_line)
-      if is_branch_dup or is_pr_dup:
-        logger.info("Remote branch or PR already exists for %s. Skipping finding %s.", branch_name, finding_id)
+      is_branch_dup = check_remote_branch_exists(
+          clean_repo_url, token, branch_name, cwd=repo_dir
+      )
+      is_pr_dup = is_duplicate_pr(
+          clean_repo_url,
+          token,
+          file_path,
+          vuln_type,
+          start_line,
+          head_branch=branch_name,
+      )
+      if is_branch_dup:
+        if is_pr_dup:
+          logger.info(
+              "Active PR exists for branch %s. Skipping finding %s.",
+              branch_name,
+              finding_id,
+          )
+          if os.path.exists(state_db_path):
+            try:
+              conn = sqlite3.connect(state_db_path)
+              conn.execute(
+                  "UPDATE findings SET status = 'SKIPPED_DUPLICATE', muted = 1,"
+                  " mute_reason = 'Duplicate PR or branch already exists' WHERE"
+                  " finding_id = ?",
+                  (finding_id,),
+              )
+              conn.commit()
+              conn.close()
+            except Exception as e:  # pylint: disable=broad-exception-caught
+              logger.warning(
+                  "Failed to update SKIPPED_DUPLICATE in sequential state.db: %s", e
+              )
+          continue
+        else:
+          logger.info(
+              "Dead branch detected: %s exists on remote with no active open PR."
+              " Pruning dead branch to allow fresh remediation.",
+              branch_name,
+          )
+          delete_remote_branch(clean_repo_url, token, branch_name, cwd=repo_dir)
+      elif is_pr_dup:
+        logger.info(
+            "An open PR covering %s in %s near line %d already exists. Skipping"
+            " finding %s.",
+            vuln_type,
+            file_path,
+            start_line,
+            finding_id,
+        )
         if os.path.exists(state_db_path):
           try:
             conn = sqlite3.connect(state_db_path)
             conn.execute(
-                "UPDATE findings SET status = 'SKIPPED_DUPLICATE', muted = 1, mute_reason = 'Duplicate PR or branch already exists' WHERE finding_id = ?",
-                (finding_id,)
+                "UPDATE findings SET status = 'SKIPPED_DUPLICATE', muted = 1,"
+                " mute_reason = 'Duplicate PR or branch already exists' WHERE"
+                " finding_id = ?",
+                (finding_id,),
             )
             conn.commit()
             conn.close()
           except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.warning("Failed to update SKIPPED_DUPLICATE in sequential state.db: %s", e)
+            logger.warning(
+                "Failed to update SKIPPED_DUPLICATE in sequential state.db: %s", e
+            )
         continue
 
     max_verify_attempts = 3
@@ -335,7 +392,15 @@ def run_sequential_pipeline() -> None:
           finding_id,
           max_verify_attempts,
       )
+      sanitize_exploit_and_artifacts(
+          repo_dir, codemender_home=os.path.dirname(state_db_path)
+      )
       continue
+
+    # Sanitize any accidental package/build caches from .exploit before fix starts
+    sanitize_exploit_and_artifacts(
+        repo_dir, codemender_home=os.path.dirname(state_db_path)
+    )
 
     logger.info(
         "Applying fix for finding %s on %s branch...",
@@ -368,10 +433,7 @@ def run_sequential_pipeline() -> None:
           finding_status,
       )
       run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
-      run_command(
-          ["git", "clean", "-fd", "-e", ".cm_project", "-e", ".exploit"],
-          cwd=repo_dir,
-      )
+      clean_workspace(repo_dir)
       continue
 
     status_res = run_command(["git", "status", "--porcelain"], cwd=repo_dir)
@@ -418,15 +480,26 @@ def run_sequential_pipeline() -> None:
           "*Automatically generated by CodeMender Orchestrator.*"
       )
 
-      create_pull_request(
-          token=token,
-          owner=owner,
-          repo=repo_name,
-          title=pr_title,
-          body=pr_body,
-          head_branch=branch_name,
-          base_branch=default_branch,
-      )
+      try:
+        pr_url = create_pull_request(
+            token=token,
+            owner=owner,
+            repo=repo_name,
+            title=pr_title,
+            body=pr_body,
+            head_branch=branch_name,
+            base_branch=default_branch,
+        )
+        if not pr_url or pr_url == "FAILED":
+          raise RuntimeError(f"Failed to create Pull Request for {branch_name}")
+      except Exception as pr_err:
+        logger.error(
+            "PR creation failed for branch %s (%s). Rolling back remote branch...",
+            branch_name,
+            pr_err,
+        )
+        delete_remote_branch(clean_repo_url, token, branch_name, cwd=repo_dir)
+        raise
 
     except Exception as e:
       logger.error("Error creating branch/PR for finding %s: %s", finding_id, e)

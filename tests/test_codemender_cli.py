@@ -15,8 +15,13 @@
 """Unit tests for codemender_agent.codemender.cli module."""
 
 import unittest
+from unittest.mock import MagicMock, patch
 
-from codemender_agent.codemender.cli import extract_session_id, parse_findings_json
+from codemender_agent.codemender.cli import (
+    extract_session_id,
+    log_cm_version,
+    parse_findings_json,
+)
 
 
 class TestCodeMenderCli(unittest.TestCase):
@@ -47,6 +52,43 @@ class TestCodeMenderCli(unittest.TestCase):
     self.assertEqual(findings[0]["FindingID"], "f123")
     self.assertEqual(findings[0]["VulnType"], "SQL Injection")
 
+  @patch("codemender_agent.codemender.cli.run_command")
+  def test_log_cm_version_success(self, mock_run_cmd):
+    """Verify log_cm_version logs and returns version string on success."""
+    mock_run_cmd.return_value = MagicMock(
+        returncode=0,
+        stdout="cm version v0.1.0-20260515-vMvg-916238397\n",
+        stderr="",
+    )
+    version = log_cm_version("cm")
+    self.assertEqual(version, "cm version v0.1.0-20260515-vMvg-916238397")
+    mock_run_cmd.assert_called_once_with(
+        ["cm", "--version"],
+        cwd=None,
+        env=None,
+        check=False,
+        capture_stderr=True,
+    )
+
+  @patch("codemender_agent.codemender.cli.run_command")
+  def test_log_cm_version_failure(self, mock_run_cmd):
+    """Verify log_cm_version handles command error gracefully."""
+    mock_run_cmd.return_value = MagicMock(
+        returncode=1,
+        stdout="",
+        stderr="command not found",
+    )
+    version = log_cm_version("cm")
+    self.assertIsNone(version)
+
+  @patch("codemender_agent.codemender.cli.run_command")
+  def test_log_cm_version_exception(self, mock_run_cmd):
+    """Verify log_cm_version handles execution exceptions gracefully."""
+    mock_run_cmd.side_effect = RuntimeError("Execution failed")
+    version = log_cm_version("cm")
+    self.assertIsNone(version)
+
 
 if __name__ == "__main__":
   unittest.main()
+

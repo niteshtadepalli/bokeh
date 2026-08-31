@@ -18,10 +18,50 @@ import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
-from codemender_agent.utils import free_port, retry_on_exception, run_command
+from codemender_agent.utils import (
+    extract_json_from_output,
+    free_port,
+    retry_on_exception,
+    run_command,
+)
 
 
 class TestUtils(unittest.TestCase):
+
+  def test_extract_json_from_output_dict(self):
+    """Test extracting JSON dict with trailing logs."""
+    raw = """
+{
+  "version": "2.1.0",
+  "runs": [{"tool": {"driver": {"name": "CodeMender"}}}]
+}
+2026-08-28T16:35:50Z [INFO] 📄 Session log: /github/home/.codemender/logs/20260828T163550Z_pending.log
+"""
+    data = extract_json_from_output(raw)
+    self.assertIsInstance(data, dict)
+    self.assertEqual(data["version"], "2.1.0")
+
+  def test_extract_json_from_output_list(self):
+    """Test extracting JSON list with leading text and trailing logs."""
+    raw = """
+Some banner info
+[
+  {"FindingID": "fid-1", "Title": "SQLi"},
+  {"FindingID": "fid-2", "Title": "XSS"}
+]
+2026-08-28T16:35:49Z [INFO] 📄 Session log: /github/home/log.log
+"""
+    data = extract_json_from_output(raw)
+    self.assertIsInstance(data, list)
+    self.assertEqual(len(data), 2)
+    self.assertEqual(data[0]["FindingID"], "fid-1")
+
+  def test_extract_json_from_output_invalid(self):
+    """Test extracting JSON from invalid strings returns None."""
+    self.assertIsNone(extract_json_from_output(""))
+    self.assertIsNone(extract_json_from_output(None))
+    self.assertIsNone(extract_json_from_output("No JSON content here"))
+    self.assertIsNone(extract_json_from_output("{incomplete json"))
 
   def test_retry_on_exception_success(self):
     """Test decorated function returns immediately on success."""

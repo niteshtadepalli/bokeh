@@ -17,12 +17,14 @@
 import json
 import os
 import sqlite3
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
 from codemender_agent.runners.aggregate import (
     _inject_token_metrics_into_html,
+    _render_step_summary,
     merge_db,
     run_aggregate_pipeline,
 )
@@ -94,10 +96,22 @@ class TestAggregateRunner(unittest.TestCase):
     for f in findings_data:
       cursor.execute(
           """
-          INSERT INTO findings (finding_id, title, status, updated_at)
-          VALUES (?, ?, ?, ?)
+          INSERT INTO findings (
+              finding_id, title, status, updated_at, file_path, start_line, vuln_type, vuln_id, severity
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       """,
-          (f["finding_id"], f["title"], f["status"], f["updated_at"]),
+          (
+              f["finding_id"],
+              f["title"],
+              f["status"],
+              f["updated_at"],
+              f.get("file_path", ""),
+              f.get("start_line", 0),
+              f.get("vuln_type", ""),
+              f.get("vuln_id", ""),
+              f.get("severity", ""),
+          ),
       )
 
     if sessions_data:
@@ -583,6 +597,440 @@ class TestAggregateRunner(unittest.TestCase):
             }
         },
     )
+
+  def test_render_step_summary_formatting(self):
+    """Test step summary Markdown formatting with stats and findings table."""
+    from codemender_agent.config import OrchestratorConfig
+    from codemender_agent.runners.aggregate import _render_step_summary
+
+    db_path = os.path.join(self.workspace_dir, "summary_test.db")
+    self.create_test_db(
+        db_path,
+        [
+            {
+                "finding_id": "fid-1",
+                "title": "SQL Injection in Login",
+                "status": "FIXED",
+                "updated_at": "2026-08-01",
+                "severity": "CRITICAL",
+                "vuln_type": "SQL Injection",
+                "vuln_id": "CWE-89",
+                "file_path": "routes/login.ts",
+                "start_line": 42,
+            },
+            {
+                "finding_id": "fid-2",
+                "title": "XSS in Profile",
+                "status": "PRE_EXISTING_IGNORED",
+                "updated_at": "2026-08-01",
+                "severity": "HIGH",
+                "vuln_type": "Cross-Site Scripting",
+                "vuln_id": "CWE-79",
+                "file_path": "routes/profile.ts",
+                "start_line": 15,
+            },
+            {
+                "finding_id": "fid-3",
+                "title": "CSRF in Settings",
+                "status": "SKIPPED_DUPLICATE",
+                "updated_at": "2026-08-01",
+                "severity": "MEDIUM",
+                "vuln_type": "CSRF",
+                "vuln_id": "CWE-352",
+                "file_path": "routes/settings.ts",
+                "start_line": 100,
+            },
+        ],
+    )
+
+    summary_file = os.path.join(self.workspace_dir, "step_summary.md")
+    with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_file}):
+      config = OrchestratorConfig(is_pr_scan=False)
+      summary_md, count = _render_step_summary(
+          db_path,
+          config,
+          owner="my-org",
+          repo_name="my-repo",
+          target_sha="abc123456789",
+          token_totals={"gemini-2.5-flash": {"in_tokens": 100, "out_tokens": 50, "total_tokens": 150}},
+          finding_prs={"fid-1": "https://github.com/my-org/my-repo/pull/42"},
+      )
+
+    self.assertEqual(count, 3)
+    self.assertIn("# 🛡️ CodeMender Security Remediation Summary", summary_md)
+    self.assertIn("my-org/my-repo", summary_md)
+    self.assertIn("Nightly Repository Scan", summary_md)
+    self.assertIn("fid-1", summary_md)
+    self.assertIn("🔴 CRITICAL", summary_md)
+    self.assertIn("🟠 HIGH", summary_md)
+    self.assertIn("🟡 MEDIUM", summary_md)
+    self.assertIn("SQL Injection (CWE-89)", summary_md)
+    self.assertIn("[FIXED (#42)](https://github.com/my-org/my-repo/pull/42)", summary_md)
+    self.assertIn("PRE_EXISTING_IGNORED", summary_md)
+    self.assertIn("SKIPPED_DUPLICATE", summary_md)
+    self.assertIn("Interactive Security Report & Export Artifacts", summary_md)
+    self.assertIn("150", summary_md)
+    self.assertIn("| `gemini-2.5-flash` | 100 | 50 | 150 |", summary_md)
+    self.assertTrue(os.path.exists(summary_file))
+
+  def test_render_step_summary_truncation(self):
+    """Test step summary truncation when exceeding 1000 KiB buffer size."""
+    from codemender_agent.config import OrchestratorConfig
+    from codemender_agent.runners.aggregate import _render_step_summary
+
+    db_path = os.path.join(self.workspace_dir, "summary_large.db")
+    # Create DB with very large number of findings
+    large_findings = [
+        {"finding_id": f"fid-{i}", "title": f"Vulnerability {i} " + ("x" * 200), "status": "DETECTED", "updated_at": "2026-08-01"}
+        for i in range(5000)
+    ]
+    self.create_test_db(db_path, large_findings)
+
+    config = OrchestratorConfig(is_pr_scan=False)
+    summary_md, count = _render_step_summary(
+        db_path,
+        config,
+        owner="my-org",
+        repo_name="my-repo",
+    )
+
+    self.assertLessEqual(len(summary_md.encode("utf-8")), 1000 * 1024 + 100)
+    self.assertIn("Summary truncated", summary_md)
+
+  def test_sanitize_sarif_file(self):
+    """Test SARIF file path sanitization, message deduplication, and duplicate suppression injection."""
+    from codemender_agent.runners.aggregate import _sanitize_sarif_file
+
+    repo_dir = os.path.join(self.workspace_dir, "my-repo")
+    os.makedirs(repo_dir, exist_ok=True)
+    sarif_path = os.path.join(self.workspace_dir, "test.sarif")
+
+    raw_sarif = {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "CodeMender",
+                        "rules": [
+                            {
+                                "id": "fid-1",
+                                "name": "SQL Injection",
+                                "shortDescription": {"text": "SQL Injection"},
+                                "fullDescription": {"text": "SQL Injection"},
+                            },
+                            {
+                                "id": "fid-2",
+                                "name": "XSS",
+                                "shortDescription": {"text": "XSS"},
+                                "fullDescription": {"text": "Cross-site scripting vulnerability"},
+                            },
+                        ],
+                    }
+                },
+                "results": [
+                    {
+                        "ruleId": "fid-1",
+                        "ruleIndex": 0,
+                        "message": {
+                            "text": (
+                                "SQL Injection in User Login: ## Root Cause Analysis (RCA)\n"
+                                "User input from `username` is directly concatenated into SQL query."
+                            )
+                        },
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {
+                                        "uri": f"{repo_dir}/src/db/user.py"
+                                    }
+                                }
+                            }
+                        ],
+                        "properties": {"finding_id": "fid-1", "status": "SKIPPED_DUPLICATE"},
+                    },
+                    {
+                        "ruleId": "fid-2",
+                        "ruleIndex": 1,
+                        "message": {"text": "XSS in Profile Page"},
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {
+                                        "uri": "src/web/app.py"
+                                    }
+                                }
+                            }
+                        ],
+                        "properties": {"finding_id": "fid-2", "status": "FIXED"},
+                    },
+                ],
+            }
+        ],
+    }
+
+    # Write raw sarif with trailing log line (simulating cm report shutdown logs)
+    with open(sarif_path, "w", encoding="utf-8") as f:
+      f.write(json.dumps(raw_sarif) + "\n2026-08-28T16:35:50Z [INFO] 📄 Session log: /github/home/log.log\n")
+
+    # Sanitize for Nightly scan (is_pr_scan=False)
+    _sanitize_sarif_file(sarif_path, repo_dir, skipped_finding_ids={"fid-1"}, is_pr_scan=False)
+
+    with open(sarif_path, "r", encoding="utf-8") as f:
+      sanitized = json.load(f)
+
+    results = sanitized["runs"][0]["results"]
+    rules = sanitized["runs"][0]["tool"]["driver"]["rules"]
+
+    # 1. Path should be relative
+    self.assertEqual(results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "src/db/user.py")
+
+    # 2. Result message should be deduplicated (concise title only)
+    self.assertEqual(results[0]["message"]["text"], "SQL Injection in User Login")
+    self.assertEqual(results[1]["message"]["text"], "XSS in Profile Page")
+
+    # 3. Rule details should have formatted markdown help
+    self.assertEqual(rules[0]["shortDescription"]["text"], "SQL Injection in User Login")
+    self.assertIn("## Root Cause Analysis (RCA)", rules[0]["help"]["markdown"])
+    self.assertEqual(rules[0]["fullDescription"]["text"], "## Root Cause Analysis (RCA)")
+
+    # 4. Suppressions should be present for fid-1
+    self.assertIn("suppressions", results[0])
+    self.assertEqual(results[0]["suppressions"][0]["status"], "underReview")
+
+    # 5. No suppressions for fid-2
+    self.assertNotIn("suppressions", results[1])
+    # Rule without concatenated analysis retains fullDescription and populates help
+    self.assertEqual(rules[1]["help"]["markdown"], "Cross-site scripting vulnerability")
+
+  @patch("codemender_agent.runners.aggregate.post_commit_status")
+  @patch("codemender_agent.runners.aggregate.run_command")
+  @patch("codemender_agent.runners.aggregate.merge_db")
+  @patch("shutil.which")
+  def test_aggregate_pipeline_github_actions_mode(
+      self,
+      mock_which,
+      mock_merge_db,
+      mock_run_cmd,
+      mock_post_status,
+  ):
+    """Test full aggregate pipeline execution in github_actions storage mode."""
+    mock_which.return_value = "/bin/cm"
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+    mock_run_cmd.return_value = mock_default
+
+    # Create local transit structure
+    transit_base = os.path.join(self.workspace_dir, ".codemender_transit", "base")
+    os.makedirs(transit_base, exist_ok=True)
+    with open(os.path.join(transit_base, "manifest.json"), "w") as f:
+      json.dump({"findings_count": 1, "target_sha": "def456sha"}, f)
+
+    # Create base DB in ~/.codemender
+    db_dir = os.path.join(self.workspace_dir, ".codemender")
+    os.makedirs(db_dir, exist_ok=True)
+    base_db = os.path.join(db_dir, "state.db")
+    self.create_test_db(
+        base_db,
+        [
+            {"finding_id": "fid-1", "title": "SQL Injection", "status": "DETECTED", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-2", "title": "Pre-existing XSS", "status": "PRE_EXISTING_IGNORED", "updated_at": "2026-08-01"},
+        ],
+    )
+
+    tarball_file = os.path.join(transit_base, "workspace_base.tar.gz")
+    with tarfile.open(tarball_file, "w:gz") as tar:
+      tar.add(db_dir, arcname=".codemender")
+
+    # Create worker shard in .codemender_transit/shards/worker_0/
+    shard_dir = os.path.join(self.workspace_dir, ".codemender_transit", "shards", "worker_0")
+    os.makedirs(shard_dir, exist_ok=True)
+    worker_db = os.path.join(shard_dir, "worker_0_state.db")
+    self.create_test_db(
+        worker_db,
+        [{"finding_id": "fid-1", "title": "SQL Injection", "status": "FIXED", "updated_at": "2026-08-02"}],
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "CODEMENDER_TOTAL_WORKERS": "1",
+            "GITHUB_TOKEN": "valid-token",
+        },
+    ):
+      run_aggregate_pipeline()
+
+    # Verify merge_db called for shard
+    mock_merge_db.assert_called()
+
+    # Verify report commands executed
+    cmd_names = [call[0][0] for call in mock_run_cmd.call_args_list]
+    html_called = any("report" in c and "html" in c for c in cmd_names)
+    sarif_called = any("report" in c and "sarif" in c for c in cmd_names)
+    self.assertTrue(html_called)
+    self.assertTrue(sarif_called)
+
+    # Verify commit status was posted as failure to block target PR
+    mock_post_status.assert_called_once()
+    status_kwargs = mock_post_status.call_args.kwargs
+    self.assertEqual(status_kwargs["state"], "failure")
+    self.assertEqual(status_kwargs["context"], "CodeMender / Security Gate")
+    self.assertIn("Security Gate FAILED", status_kwargs["description"])
+
+  @patch("codemender_agent.runners.aggregate.post_commit_status")
+  @patch("codemender_agent.runners.aggregate.run_command")
+  @patch("codemender_agent.runners.aggregate.merge_db")
+  @patch("shutil.which")
+  def test_aggregate_pipeline_pr_scan_soft_gate_when_fail_on_findings_false(
+      self,
+      mock_which,
+      mock_merge_db,
+      mock_run_cmd,
+      mock_post_status,
+  ):
+    """Test aggregate pipeline posts success commit status on PR scan when CODEMENDER_FAIL_ON_FINDINGS=false."""
+    mock_which.return_value = "/bin/cm"
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+    mock_run_cmd.return_value = mock_default
+
+    transit_base = os.path.join(self.workspace_dir, ".codemender_transit", "base")
+    os.makedirs(transit_base, exist_ok=True)
+    with open(os.path.join(transit_base, "manifest.json"), "w") as f:
+      json.dump({"findings_count": 1, "target_sha": "def456sha"}, f)
+
+    db_dir = os.path.join(self.workspace_dir, ".codemender")
+    os.makedirs(db_dir, exist_ok=True)
+    base_db = os.path.join(db_dir, "state.db")
+    self.create_test_db(
+        base_db,
+        [{"finding_id": "fid-1", "title": "SQL Injection", "status": "FIXED", "updated_at": "2026-08-01"}],
+    )
+
+    tarball_file = os.path.join(transit_base, "workspace_base.tar.gz")
+    with tarfile.open(tarball_file, "w:gz") as tar:
+      tar.add(db_dir, arcname=".codemender")
+
+    shard_dir = os.path.join(self.workspace_dir, ".codemender_transit", "shards", "worker_0")
+    os.makedirs(shard_dir, exist_ok=True)
+    worker_db = os.path.join(shard_dir, "worker_0_state.db")
+    self.create_test_db(
+        worker_db,
+        [{"finding_id": "fid-1", "title": "SQL Injection", "status": "FIXED", "updated_at": "2026-08-02"}],
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "CODEMENDER_FAIL_ON_FINDINGS": "false",
+            "CODEMENDER_TOTAL_WORKERS": "1",
+            "GITHUB_TOKEN": "valid-token",
+        },
+    ):
+      run_aggregate_pipeline()
+
+    self.assertTrue(mock_merge_db.called)
+    # Verify commit status was posted as success
+    mock_post_status.assert_called_once()
+    status_kwargs = mock_post_status.call_args.kwargs
+    self.assertEqual(status_kwargs["state"], "success")
+
+  @patch("codemender_agent.runners.aggregate.run_command")
+  @patch("codemender_agent.runners.aggregate.merge_db")
+  @patch("shutil.which")
+  def test_aggregate_pipeline_nightly_mode_does_not_fail(
+      self,
+      mock_which,
+      mock_merge_db,
+      mock_run_cmd,
+  ):
+    """Test aggregate pipeline does not fail on Nightly scans even with findings."""
+    mock_which.return_value = "/bin/cm"
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+    mock_run_cmd.return_value = mock_default
+
+    transit_base = os.path.join(self.workspace_dir, ".codemender_transit", "base")
+    os.makedirs(transit_base, exist_ok=True)
+    with open(os.path.join(transit_base, "manifest.json"), "w") as f:
+      json.dump({"findings_count": 1, "target_sha": "def456sha"}, f)
+
+    db_dir = os.path.join(self.workspace_dir, ".codemender")
+    os.makedirs(db_dir, exist_ok=True)
+    base_db = os.path.join(db_dir, "state.db")
+    self.create_test_db(
+        base_db,
+        [{"finding_id": "fid-1", "title": "SQL Injection", "status": "DETECTED", "updated_at": "2026-08-01"}],
+    )
+
+    tarball_file = os.path.join(transit_base, "workspace_base.tar.gz")
+    with tarfile.open(tarball_file, "w:gz") as tar:
+      tar.add(db_dir, arcname=".codemender")
+
+    shard_dir = os.path.join(self.workspace_dir, ".codemender_transit", "shards", "worker_0")
+    os.makedirs(shard_dir, exist_ok=True)
+    worker_db = os.path.join(shard_dir, "worker_0_state.db")
+    self.create_test_db(
+        worker_db,
+        [{"finding_id": "fid-1", "title": "SQL Injection", "status": "FIXED", "updated_at": "2026-08-02"}],
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "false",
+            "CODEMENDER_TOTAL_WORKERS": "1",
+        },
+    ):
+      run_aggregate_pipeline()
+
+    self.assertTrue(mock_merge_db.called)
+
+  def test_render_step_summary_pr_scan_omits_pre_existing_findings(self):
+    """Verify that _render_step_summary omits PRE_EXISTING_IGNORED findings on PR scans."""
+    from codemender_agent.config import OrchestratorConfig
+
+    db_dir = os.path.join(self.workspace_dir, "test_pr_summary")
+    os.makedirs(db_dir, exist_ok=True)
+    base_db = os.path.join(db_dir, "state.db")
+    self.create_test_db(
+        base_db,
+        [
+            {"finding_id": "fid-1", "title": "SQL Injection in PR diff", "status": "FIXED", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-2", "title": "Pre-existing XSS", "status": "PRE_EXISTING_IGNORED", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-3", "title": "Dismissed Finding", "status": "DISMISSED", "updated_at": "2026-08-01"},
+        ],
+    )
+
+    summary_file = os.path.join(self.workspace_dir, "pr_step_summary.md")
+    cfg = OrchestratorConfig(is_pr_scan=True, github_step_summary=summary_file)
+    summary_md, count = _render_step_summary(
+        base_db,
+        cfg,
+        owner="ilbzzz",
+        repo_name="juice-shop-local",
+        target_sha="1e677199",
+    )
+
+    self.assertEqual(count, 1)
+    self.assertIn("Pull Request Scan (Clean as You Code)", summary_md)
+    self.assertIn("Security Gate Status: FAILED", summary_md)
+    # Total should reflect ONLY the 1 PR-scoped finding
+    self.assertIn("| 1 | 1 | 0 | 0 | 0 | 0 |", summary_md)
+    # fid-1 should be listed in the table
+    self.assertIn("`fid-1`", summary_md)
+    # fid-2 and fid-3 should NOT be in the table
+    self.assertNotIn("`fid-2`", summary_md)
+    self.assertNotIn("`fid-3`", summary_md)
+    self.assertNotIn("Pre-existing XSS", summary_md)
 
 
 if __name__ == "__main__":

@@ -282,23 +282,23 @@ When triggering the workflow, you pass a JSON object to the `--data` flag. The
 coordinator unpacks these values and injects them as environment variables into
 the Cloud Run jobs:
 
-JSON Field                  | Required | Maps to Environment Variable           | Description
-:-------------------------- | :------- | :------------------------------------- | :----------
-`job_name`                  | Yes      | N/A (Cloud Run resource name)          | The name of the provisioned Cloud Run job for the orchestrator (`scan` and `aggregate`).
-`worker_job_name`           | No       | N/A (Cloud Run resource name)          | The name of the provisioned Cloud Run job for the `worker` stage. Defaults to `${job_name}` with `"-runner"` replaced by `"-worker"`.
-`gcs_bucket`                | Yes      | `CODEMENDER_GCS_BUCKET`                | The GCS bucket to use for state and the final report.
-`repo_url`                  | Yes      | `GITHUB_REPO_URL`                      | The GitHub HTTPS URL of the repository to scan.
-`region`                    | No       | N/A (GCP Region)                       | The GCP region where the Cloud Run job resides. Defaults to `"us-central1"`.
-`build_command`             | Yes      | `CODEMENDER_BUILD_COMMAND`             | Your custom test command (e.g., `make test` or `.codemender.yaml`).
-`scan_target`               | No       | `CODEMENDER_SCAN_TARGET`               | Directory or directories to scan. Defaults to `.` (the whole repo). Examples: `"src/"` or `"src/;lib/;cmd/"`.
-`max_tasks`                 | No       | `CODEMENDER_MAX_TASKS`                 | Max parallel worker tasks (containers). Defaults to `20`.
-`timeout_seconds`           | No       | N/A (Job Task Timeout)                 | Task timeout duration in seconds for Cloud Run job stages. Defaults to `86400`.
-`cli_version`               | No       | `CODEMENDER_CLI_VERSION`               | CLI version mode: `"preview"` or `"legacy"`. Defaults to `"preview"`.
-`model`                     | No       | `CODEMENDER_MODEL`                     | Default model override for all CodeMender commands (e.g. `"gemini-3.5-flash"`), check available models in [here](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model).
-`models`                    | No       | `CODEMENDER_<CMD>_MODEL`               | Per-command model selection map: `{"find": "...", "verify": "...", "fix": "..."}`.
-`skip_exploit_verification` | No       | `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | Set to `true` to skip exploit compilation/execution during verify phase.
-`cleanup_ports`*            | No       | `CODEMENDER_CLEANUP_PORTS`             | Comma-separated ports to kill before testing.
-`force_overwrite`*          | No       | `CODEMENDER_FORCE_OVERWRITE`           | Pass `"true"` to bypass PR spam prevention and force re-run fixes and push PRs.
+| JSON Field | Required | Maps to Environment Variable | Description |
+| :--- | :--- | :--- | :--- |
+| `job_name` | Yes | N/A (Cloud Run resource name) | The name of the provisioned Cloud Run job for the orchestrator (`scan` and `aggregate`). |
+| `worker_job_name` | No | N/A (Cloud Run resource name) | The name of the provisioned Cloud Run job for the `worker` stage. Defaults to `${job_name}` with `"-runner"` replaced by `"-worker"`. |
+| `gcs_bucket` | Yes | `CODEMENDER_GCS_BUCKET` | The GCS bucket to use for state and the final report. |
+| `repo_url` | Yes | `GITHUB_REPO_URL` | The GitHub HTTPS URL of the repository to scan. |
+| `region` | No | N/A (GCP Region) | The GCP region where the Cloud Run job resides. Defaults to `"us-central1"`. |
+| `build_command` | Yes | `CODEMENDER_BUILD_COMMAND` | Your custom test command (e.g., `make test` or `.codemender.yaml`). |
+| `scan_target` | No | `CODEMENDER_SCAN_TARGET` | Directory or directories to scan. Defaults to `.` (the whole repo). Examples: `"src/"` or `"src/;lib/;cmd/"`. |
+| `max_tasks` | No | `CODEMENDER_MAX_TASKS` | Max parallel worker tasks (containers). Defaults to `20`. |
+| `timeout_seconds` | No | N/A (Job Task Timeout) | Task timeout duration in seconds for Cloud Run job stages. Defaults to `86400`. |
+| `cli_version` | No | `CODEMENDER_CLI_VERSION` | CLI version mode: `"preview"` or `"legacy"`. Defaults to `"preview"`. |
+| `model` | No | `CODEMENDER_MODEL` | Default model override for all CodeMender commands (e.g. `"gemini-3.5-flash"`), check available models in [here](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model). |
+| `models` | No | `CODEMENDER_<CMD>_MODEL` | Per-command model selection map: `{"find": "...", "verify": "...", "fix": "..."}`. |
+| `skip_exploit_verification` | No | `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | Set to `true` to skip exploit compilation/execution during verify phase. |
+| `cleanup_ports`* | No | `CODEMENDER_CLEANUP_PORTS` | Comma-separated ports to kill before testing. |
+| `force_overwrite`* | No | `CODEMENDER_FORCE_OVERWRITE` | Pass `"true"` to bypass PR spam prevention and force re-run fixes and push PRs. |
 
 > [!NOTE]
 > **\*Customizing Advanced Job Parameters (`cleanup_ports` and

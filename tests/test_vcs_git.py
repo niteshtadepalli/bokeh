@@ -23,6 +23,7 @@ from codemender_agent.vcs.git import (
     enforce_https_url,
     generate_branch_name,
     get_git_auth_header,
+    normalize_repo_relative_path,
     parse_repo_owner_and_name,
     sanitize_git_url,
     setup_local_git_excludes,
@@ -97,6 +98,44 @@ class TestVcsGit(unittest.TestCase):
 
 
 
+  def test_normalize_repo_relative_path(self):
+    """Verify normalize_repo_relative_path strips leading CI runner mount patterns and paths."""
+    test_cases = [
+        (
+            "/__w/juice-shop-local/juice-shop-local/juice-shop-local/routes/profileImageUrlUpload.ts",
+            "/__w/juice-shop-local/juice-shop-local/juice-shop-local",
+            "routes/profileImageUrlUpload.ts",
+        ),
+        (
+            "/__w/juice-shop-local/juice-shop-local/juice-shop-local/routes/profileImageUrlUpload.ts",
+            None,
+            "routes/profileImageUrlUpload.ts",
+        ),
+        (
+            "/workspace/juice-shop-local/routes/profileImageUrlUpload.ts",
+            "/workspace/juice-shop-local",
+            "routes/profileImageUrlUpload.ts",
+        ),
+        (
+            "/github/workspace/routes/profileImageUrlUpload.ts",
+            None,
+            "routes/profileImageUrlUpload.ts",
+        ),
+        (
+            "./routes/profileImageUrlUpload.ts",
+            None,
+            "routes/profileImageUrlUpload.ts",
+        ),
+        (
+            "routes/profileImageUrlUpload.ts",
+            None,
+            "routes/profileImageUrlUpload.ts",
+        ),
+    ]
+    for path, repo_dir, expected in test_cases:
+      with self.subTest(path=path, repo_dir=repo_dir):
+        self.assertEqual(normalize_repo_relative_path(path, repo_dir=repo_dir), expected)
+
   def test_setup_local_git_excludes(self):
     """Verify local git excludes are correctly appended without duplicates."""
     with tempfile.TemporaryDirectory() as repo_dir:
@@ -112,6 +151,50 @@ class TestVcsGit(unittest.TestCase):
 
       self.assertIn(".cm_project", content)
       self.assertIn(".exploit", content)
+      self.assertIn(".codemender_cache", content)
+
+  def test_sanitize_exploit_and_artifacts(self):
+    """Verify sanitize_exploit_and_artifacts removes junk build caches while preserving exploit files."""
+    from codemender_agent.vcs.git import sanitize_exploit_and_artifacts
+
+    with tempfile.TemporaryDirectory() as repo_dir:
+      with tempfile.TemporaryDirectory() as cm_home:
+        # Create .exploit directory with valid files and junk build directories
+        exploit_dir = os.path.join(repo_dir, ".exploit")
+        os.makedirs(os.path.join(exploit_dir, ".cache", "node-gyp", "node"), exist_ok=True)
+        os.makedirs(os.path.join(exploit_dir, "node_modules", "express"), exist_ok=True)
+        os.makedirs(os.path.join(exploit_dir, "venv", "bin"), exist_ok=True)
+        os.makedirs(os.path.join(exploit_dir, "__pycache__"), exist_ok=True)
+
+        valid_poc = os.path.join(exploit_dir, "exploit.py")
+        valid_payload = os.path.join(exploit_dir, "payload.json")
+        with open(valid_poc, "w") as f:
+          f.write("print('poc')")
+        with open(valid_payload, "w") as f:
+          f.write("{}")
+
+        # Create artifacts directory with junk build cache
+        artifacts_dir = os.path.join(cm_home, "artifacts", "finding_123")
+        os.makedirs(os.path.join(artifacts_dir, ".cache"), exist_ok=True)
+        os.makedirs(os.path.join(artifacts_dir, "node_modules"), exist_ok=True)
+        valid_artifact_file = os.path.join(artifacts_dir, "exploit.py")
+        with open(valid_artifact_file, "w") as f:
+          f.write("print('poc')")
+
+        sanitize_exploit_and_artifacts(repo_dir, codemender_home=cm_home)
+
+        # Assert valid files are preserved
+        self.assertTrue(os.path.exists(valid_poc))
+        self.assertTrue(os.path.exists(valid_payload))
+        self.assertTrue(os.path.exists(valid_artifact_file))
+
+        # Assert junk directories are removed
+        self.assertFalse(os.path.exists(os.path.join(exploit_dir, ".cache")))
+        self.assertFalse(os.path.exists(os.path.join(exploit_dir, "node_modules")))
+        self.assertFalse(os.path.exists(os.path.join(exploit_dir, "venv")))
+        self.assertFalse(os.path.exists(os.path.join(exploit_dir, "__pycache__")))
+        self.assertFalse(os.path.exists(os.path.join(artifacts_dir, ".cache")))
+        self.assertFalse(os.path.exists(os.path.join(artifacts_dir, "node_modules")))
 
 
 if __name__ == "__main__":

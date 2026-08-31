@@ -20,7 +20,11 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from codemender_agent.utils import build_cm_command, run_command
+from codemender_agent.utils import (
+    build_cm_command,
+    extract_json_from_output,
+    run_command,
+)
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -88,28 +92,9 @@ class CodeMenderCLIAdapter:
 
 def parse_findings_json(json_str: str) -> List[Dict[str, Any]]:
   """Parses `cm report --format json` output handling empty strings for optional fields."""
-  clean_str = json_str.strip()
-  if not clean_str:
-    return []
-
-  # Find the start of the JSON array or object
-  start_idx = clean_str.find("[")
-  if start_idx == -1:
-    start_idx = clean_str.find("{")
-
-  if start_idx == -1:
+  data = extract_json_from_output(json_str)
+  if data is None:
     logger.error("No valid JSON array or object found in report.")
-    return []
-
-  try:
-    decoder = json.JSONDecoder()
-    data, _ = decoder.raw_decode(clean_str, start_idx)
-  except json.JSONDecodeError as e:
-    logger.error(
-        "Failed to parse JSON findings report: %s\nOriginal string: %s",
-        e,
-        json_str,
-    )
     return []
 
   if isinstance(data, dict):
@@ -145,3 +130,45 @@ def extract_session_id(find_stdout: str) -> Optional[str]:
   if match:
     return match.group(1)
   return None
+
+
+def log_cm_version(
+    cm_binary: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
+) -> Optional[str]:
+  """Runs `cm --version` and logs the CodeMender CLI binary version.
+
+  Args:
+    cm_binary: Path or name of the cm executable.
+    env: Environment variables for the subprocess.
+    cwd: Working directory for running the command.
+
+  Returns:
+    The output version string if successfully retrieved, or None.
+  """
+  bin_path = cm_binary or shutil.which("cm") or "cm"
+  try:
+    res = run_command(
+        [bin_path, "--version"],
+        cwd=cwd,
+        env=env,
+        check=False,
+        capture_stderr=True,
+    )
+    if res.returncode == 0:
+      version_str = res.stdout.strip()
+      if version_str:
+        logger.info("CodeMender CLI version: %s", version_str)
+        return version_str
+      logger.warning("CodeMender CLI returned empty version output.")
+    else:
+      logger.warning(
+          "Failed to retrieve CodeMender CLI version (exit code %d): %s",
+          res.returncode,
+          res.stderr.strip() if getattr(res, "stderr", None) else "",
+      )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Error checking CodeMender CLI version: %s", e)
+  return None
+
