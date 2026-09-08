@@ -680,13 +680,22 @@ new target repository requires only a 3-step checklist:
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                  Phase 2: Target Repository Onboarding Checklist             │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│  [ ] Step 2.1: Install GitHub App on Target Repository                       │
+│  [ ] Step 2.1: Verify GitHub App Access (Only if restricted to select repos) │
 │  [ ] Step 2.2: Grant GHCR Package Access (if runner image is private)         │
 │  [ ] Step 2.3: Add Caller Workflow (.github/workflows/codemender.yml)        │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Step 2.1: Install GitHub App on Target Repository
+### Step 2.1: Verify GitHub App Access (Conditional)
+
+> [!TIP]
+> **Skip this step if:** You selected **"All repositories"** during
+> [Step 1.1](#6-install-the-app-on-repositories). The App is already active on
+> this repository.
+>
+> **Perform this step only if:** Your organization restricts the GitHub App to
+> **"Only select repositories"**, and you need to grant access to this specific
+> target repository.
 
 1.  Navigate to your GitHub App installations dashboard:
     *   **Personal Account**:
@@ -694,8 +703,8 @@ new target repository requires only a 3-step checklist:
     *   **Organization**:
         `https://github.com/organizations/<your-org>/settings/apps/<your-app-name>/installations`
 2.  Click **Configure** next to the installation entry.
-3.  Under **Repository access**, select **All repositories** (recommended) or
-    choose the specific repository.
+3.  Under **Repository access**, ensure your target repository is added to the
+    **Only select repositories** list.
 4.  Click **Save**.
 
 ### Step 2.2: Grant GHCR Package Access (for Private Images)
