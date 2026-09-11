@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import shutil
-from typing import Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from codemender_agent.utils import retry_on_exception
 
@@ -165,6 +165,80 @@ def setup_local_git_excludes(repo_dir: str) -> None:
       logger.info("Successfully added local git excludes: %s", new_entries)
   except Exception as e:
     logger.warning("Failed to configure local git excludes: %s", e)
+
+
+IGNORED_METADATA_DIRS = (
+    ".cm_project",
+    ".exploit",
+    ".codemender_cache",
+    ".codemender",
+    ".git",
+)
+
+
+def filter_stageable_files(
+    repo_dir: str,
+    file_paths: Any,
+) -> List[str]:
+  """Filters, normalizes, deduplicates, and validates paths for git staging.
+
+  Excludes non-existent files, internal CodeMender metadata paths (.exploit, .cm_project,
+  .codemender_cache, .codemender, .git), and files ignored by .gitignore or git excludes.
+  """
+  if not file_paths:
+    return []
+
+  if isinstance(file_paths, str):
+    raw_list = [file_paths]
+  elif isinstance(file_paths, (list, tuple, set)):
+    raw_list = list(file_paths)
+  else:
+    return []
+
+  candidates: List[str] = []
+  seen = set()
+
+  for item in raw_list:
+    if not item or not isinstance(item, str):
+      continue
+    # Normalize to strictly repo-relative forward-slash path
+    norm_path = normalize_repo_relative_path(item, repo_dir=repo_dir)
+    if not norm_path:
+      continue
+
+    # Exclude internal metadata directories
+    parts = norm_path.split("/")
+    if any(part in IGNORED_METADATA_DIRS for part in parts):
+      continue
+
+    # Ensure path exists in repository working tree
+    full_path = os.path.join(repo_dir, norm_path)
+    if not os.path.exists(full_path):
+      continue
+
+    if norm_path not in seen:
+      seen.add(norm_path)
+      candidates.append(norm_path)
+
+  if not candidates:
+    return []
+
+  # Check against git ignore rules (.gitignore and .git/info/exclude)
+  from codemender_agent.utils import run_command
+
+  try:
+    check_res = run_command(
+        ["git", "check-ignore", "--"] + candidates,
+        cwd=repo_dir,
+        check=False,
+    )
+    if check_res.returncode == 0 and check_res.stdout:
+      ignored_paths = set(check_res.stdout.splitlines())
+      candidates = [p for p in candidates if p not in ignored_paths]
+  except Exception as e:
+    logger.warning("git check-ignore query failed: %s", e)
+
+  return candidates
 
 
 def sanitize_exploit_and_artifacts(

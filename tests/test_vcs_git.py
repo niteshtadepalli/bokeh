@@ -16,11 +16,13 @@
 
 import base64
 import os
+import subprocess
 import tempfile
 import unittest
 
 from codemender_agent.vcs.git import (
     enforce_https_url,
+    filter_stageable_files,
     generate_branch_name,
     get_git_auth_header,
     normalize_repo_relative_path,
@@ -195,6 +197,71 @@ class TestVcsGit(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(exploit_dir, "__pycache__")))
         self.assertFalse(os.path.exists(os.path.join(artifacts_dir, ".cache")))
         self.assertFalse(os.path.exists(os.path.join(artifacts_dir, "node_modules")))
+
+  def test_filter_stageable_files(self):
+    """Verify filter_stageable_files normalizes, deduplicates, and excludes metadata and ignored files."""
+    with tempfile.TemporaryDirectory() as repo_dir:
+      # Initialize git repository
+      subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+      setup_local_git_excludes(repo_dir)
+
+      # Create user repository .gitignore
+      with open(os.path.join(repo_dir, ".gitignore"), "w") as f:
+        f.write("*.log\nnode_modules/\n")
+
+      # Create valid source file and directories
+      routes_dir = os.path.join(repo_dir, "routes")
+      os.makedirs(routes_dir, exist_ok=True)
+      valid_source = os.path.join(routes_dir, "userProfile.ts")
+      with open(valid_source, "w") as f:
+        f.write("console.log('profile');")
+
+      # Create exploit directory and exploit script
+      exploit_dir = os.path.join(repo_dir, ".exploit")
+      os.makedirs(exploit_dir, exist_ok=True)
+      exploit_file = os.path.join(exploit_dir, "exploit.sh")
+      with open(exploit_file, "w") as f:
+        f.write("#!/bin/bash\necho evil")
+
+      # Create internal metadata directories and files
+      cm_project_dir = os.path.join(repo_dir, ".cm_project")
+      os.makedirs(cm_project_dir, exist_ok=True)
+      with open(os.path.join(cm_project_dir, "state.json"), "w") as f:
+        f.write("{}")
+
+      # Create git-ignored log file
+      with open(os.path.join(repo_dir, "debug.log"), "w") as f:
+        f.write("debug")
+
+      raw_edited_files = [
+          # Duplicates of absolute path
+          valid_source,
+          valid_source,
+          # CI runner mount path pattern
+          f"/__w/juice-shop-local/juice-shop-local/juice-shop-local/routes/userProfile.ts",
+          # Relative path with ./
+          "./routes/userProfile.ts",
+          # Exploit paths (MUST be excluded)
+          exploit_file,
+          f"/__w/juice-shop-local/juice-shop-local/juice-shop-local/.exploit/exploit.sh",
+          ".exploit/exploit.sh",
+          # Internal metadata paths (MUST be excluded)
+          ".cm_project/state.json",
+          ".codemender_cache/cache.dat",
+          ".codemender/config.yaml",
+          # Git-ignored file (*.log)
+          "debug.log",
+          # Non-existent file
+          "routes/non_existent.ts",
+          # Falsy / invalid items
+          "",
+          None,
+      ]
+
+      stageable = filter_stageable_files(repo_dir, raw_edited_files)
+
+      # Should only contain 'routes/userProfile.ts' exactly once
+      self.assertEqual(stageable, ["routes/userProfile.ts"])
 
 
 if __name__ == "__main__":

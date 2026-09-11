@@ -45,6 +45,7 @@ from codemender_agent.utils import free_port
 from codemender_agent.utils import resolve_command_model
 from codemender_agent.utils import run_command
 from codemender_agent.vcs.git import clean_workspace
+from codemender_agent.vcs.git import filter_stageable_files
 from codemender_agent.vcs.git import get_finding_branch_name
 from codemender_agent.vcs.git import get_git_auth_header
 from codemender_agent.vcs.git import normalize_repo_relative_path
@@ -431,36 +432,50 @@ def _process_finding(
   staged = False
   # Tier 1: Stage explicit edited_files recorded by the agent in patches table
   if edited_files and isinstance(edited_files, list):
-    valid_files = [
-        f
-        for f in edited_files
-        if isinstance(f, str) and os.path.exists(os.path.join(repo_dir, f))
-    ]
+    valid_files = filter_stageable_files(repo_dir, edited_files)
     if valid_files:
-      run_command(["git", "add"] + valid_files, cwd=repo_dir)
-      staged = True
-      logger.info(
-          "Surgical Git Staging (Tier 1 - edited_files): %s", valid_files
-      )
+      try:
+        run_command(["git", "add"] + valid_files, cwd=repo_dir)
+        staged = True
+        logger.info(
+            "Surgical Git Staging (Tier 1 - edited_files): %s", valid_files
+        )
+      except Exception as e:
+        logger.warning(
+            "Failed to stage edited_files %s (falling back): %s", valid_files, e
+        )
 
   # Tier 2: Stage target_file recorded in patches table
-  if (
-      not staged
-      and target_file
-      and os.path.exists(os.path.join(repo_dir, target_file))
-  ):
-    run_command(["git", "add", target_file], cwd=repo_dir)
-    staged = True
-    logger.info("Surgical Git Staging (Tier 2 - target_file): %s", target_file)
+  if not staged and target_file:
+    valid_targets = filter_stageable_files(repo_dir, [target_file])
+    if valid_targets:
+      try:
+        run_command(["git", "add"] + valid_targets, cwd=repo_dir)
+        staged = True
+        logger.info(
+            "Surgical Git Staging (Tier 2 - target_file): %s", valid_targets
+        )
+      except Exception as e:
+        logger.warning(
+            "Failed to stage target_file %s (falling back): %s", valid_targets, e
+        )
 
   # Tier 3: Tracked staging + Finding FilePath fallback
   if not staged:
-    run_command(["git", "add", "-u"], cwd=repo_dir)
-    if file_path and os.path.exists(os.path.join(repo_dir, file_path)):
-      run_command(["git", "add", file_path], cwd=repo_dir)
-    logger.info(
-        "Surgical Git Staging (Tier 3 - Fallback): git add -u + %s", file_path
-    )
+    try:
+      run_command(["git", "add", "-u"], cwd=repo_dir, check=False)
+      valid_fallbacks = (
+          filter_stageable_files(repo_dir, [file_path]) if file_path else []
+      )
+      if valid_fallbacks:
+        run_command(["git", "add"] + valid_fallbacks, cwd=repo_dir, check=False)
+      staged = True
+      logger.info(
+          "Surgical Git Staging (Tier 3 - Fallback): git add -u + %s",
+          valid_fallbacks,
+      )
+    except Exception as e:
+      logger.warning("Failed during Tier 3 fallback staging: %s", e)
 
   # Check if any git modifications are staged
   status_res = run_command(["git", "status", "--porcelain"], cwd=repo_dir)
