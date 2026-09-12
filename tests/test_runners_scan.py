@@ -576,6 +576,65 @@ class TestScanRunner(unittest.TestCase):
     self.assertEqual(ignored, [])
     mock_delete_branch.assert_called_once()
 
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  def test_filter_findings_accepts_cm_070_snake_case_payload(
+      self, mock_check_branch, mock_is_dup_pr
+  ):
+    """Verify cm 0.7.0 snake_case findings survive filtering end-to-end."""
+    from codemender_agent.codemender.cli import parse_findings_json
+    from codemender_agent.runners.scan import _filter_findings
+
+    mock_check_branch.return_value = False
+    mock_is_dup_pr.return_value = False
+
+    # Verbatim `cm report --format json` payload emitted by cm version 0.7.0,
+    # which switched to snake_case struct tags in cl/974628022. Before the
+    # normalization shim this produced 11 parsed but 0 active findings.
+    raw_json = """[
+      {
+        "finding_id": "a722cea6-dced-56fc-8b96-393c12834278",
+        "title": "SQL Injection in User Authentication",
+        "file_path": "/__w/juice-shop-local/juice-shop-local/juice-shop-local/routes/login.ts",
+        "severity": "CRITICAL",
+        "vuln_type": "SQL Injection",
+        "vuln_id": "CWE-89",
+        "status": "OPEN",
+        "start_line": 34,
+        "end_line": 35
+      },
+      {
+        "finding_id": "d83ac117-0f0a-5c3c-8b1e-9a1f2c3d4e5f",
+        "title": "Open Redirect",
+        "file_path": "/__w/juice-shop-local/juice-shop-local/juice-shop-local/lib/insecurity.ts",
+        "severity": "MEDIUM",
+        "vuln_type": "Open Redirect",
+        "vuln_id": "CWE-601",
+        "status": "OPEN",
+        "start_line": 133,
+        "end_line": 139
+      }
+    ]"""
+
+    active, skipped, ignored = _filter_findings(
+        findings=parse_findings_json(raw_json),
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        repo_dir=self.workspace_dir,
+        force_overwrite=False,
+        is_pr_scan=False,
+    )
+
+    self.assertEqual(len(active), 2)
+    self.assertEqual(skipped, [])
+    self.assertEqual(ignored, [])
+    self.assertEqual(
+        active[0]["FindingID"], "a722cea6-dced-56fc-8b96-393c12834278"
+    )
+    self.assertEqual(
+        active[1]["FindingID"], "d83ac117-0f0a-5c3c-8b1e-9a1f2c3d4e5f"
+    )
+
   @patch("codemender_agent.runners.scan.delete_remote_branch")
   @patch("codemender_agent.runners.scan.is_duplicate_pr")
   @patch("codemender_agent.runners.scan.check_remote_branch_exists")

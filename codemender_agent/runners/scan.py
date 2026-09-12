@@ -474,6 +474,12 @@ def _filter_findings(
   for finding in findings:
     finding_id = finding.get("FindingID")
     if not finding_id:
+      logger.warning(
+          "Finding record missing 'FindingID' (available keys: %s). Skipping."
+          " This may indicate an upstream `cm report --format json` schema"
+          " change.",
+          sorted(finding.keys()),
+      )
       continue
     # Only process findings that are not already resolved or false positives
     status = finding.get("Status")
@@ -920,6 +926,19 @@ def run_scan_pipeline() -> None:
   # Compute active findings count after filtering
   active_findings_count = len(active_findings)
   logger.info("Active findings after filtering: %d", active_findings_count)
+
+  # Detect total silent finding loss, which indicates upstream schema drift
+  if (
+      findings
+      and active_findings_count == 0
+      and not skipped_finding_ids
+      and not ignored_finding_ids
+  ):
+    logger.error(
+        "Parsed %d findings but retained 0 active with 0 skipped and 0 ignored."
+        " The `cm report --format json` schema is likely unrecognized.",
+        len(findings),
+    )
 
   # 10. Handle case where all findings were filtered out
   if active_findings_count == 0:

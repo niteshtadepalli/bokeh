@@ -14,12 +14,17 @@
 
 """Unit tests for Stage 2 Worker runner."""
 
+from contextlib import closing
 import json
 import os
+import sqlite3
+import subprocess
 import tempfile
 import unittest
 import unittest.mock
 
+from codemender_agent.config import OrchestratorConfig
+from codemender_agent.runners.worker import _process_finding
 from codemender_agent.runners.worker import run_worker_pipeline
 
 
@@ -547,6 +552,227 @@ class TestWorkerRunner(unittest.TestCase):
     mock_push_branch.assert_called_once()
     mock_create_pr.assert_called_once()
     mock_delete_branch.assert_called_once()
+
+  @unittest.mock.patch("codemender_agent.runners.worker.run_command")
+  @unittest.mock.patch("codemender_agent.runners.worker.check_remote_branch_exists")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_duplicate_pr")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_finding_verified")
+  @unittest.mock.patch("codemender_agent.runners.worker.get_finding_status")
+  @unittest.mock.patch("codemender_agent.runners.worker.create_pull_request")
+  @unittest.mock.patch("codemender_agent.runners.worker.push_branch_to_remote")
+  def test_worker_staging_filters_exploit_files(
+      self,
+      _mock_push,
+      mock_create_pr,
+      mock_get_finding_status,
+      mock_is_verified,
+      mock_is_dup_pr,
+      mock_branch_exists,
+      mock_run_cmd,
+  ):
+    """Verify that _process_finding excludes .exploit files and duplicates during git staging."""
+    mock_branch_exists.return_value = False
+    mock_is_dup_pr.return_value = False
+    mock_is_verified.return_value = True
+    mock_get_finding_status.return_value = "FIXED"
+    mock_create_pr.return_value = "https://github.com/org/repo/pull/1"
+
+    repo_dir = os.path.join(self.workspace_dir, "test_repo")
+    os.makedirs(os.path.join(repo_dir, "routes"), exist_ok=True)
+    valid_file = os.path.join(repo_dir, "routes", "userProfile.ts")
+    with open(valid_file, "w") as f:
+      f.write("console.log('fix');")
+
+    exploit_dir = os.path.join(repo_dir, ".exploit")
+    os.makedirs(exploit_dir, exist_ok=True)
+    exploit_file = os.path.join(exploit_dir, "exploit.sh")
+    with open(exploit_file, "w") as f:
+      f.write("evil")
+
+    state_db_path = os.path.join(self.workspace_dir, "state.db")
+    with closing(sqlite3.connect(state_db_path)) as conn:
+      conn.execute(
+          "CREATE TABLE findings (finding_id TEXT PRIMARY KEY, status TEXT,"
+          " verified INTEGER)"
+      )
+      conn.execute("INSERT INTO findings VALUES ('fid-1', 'FIXED', 1)")
+      conn.execute(
+          "CREATE TABLE patches (finding_id TEXT, edited_files TEXT,"
+          " target_file TEXT, diff TEXT)"
+      )
+      edited_files_json = json.dumps([
+          valid_file,
+          valid_file,
+          exploit_file,
+          f"/__w/repo/repo/{valid_file}",
+          f"/__w/repo/repo/.exploit/exploit.sh",
+      ])
+      conn.execute(
+          "INSERT INTO patches VALUES ('fid-1', ?, 'routes/userProfile.ts',"
+          " 'diff')",
+          (edited_files_json,),
+      )
+      conn.commit()
+
+    mock_git_status = unittest.mock.MagicMock()
+    mock_git_status.stdout = " M routes/userProfile.ts"
+    mock_git_status.returncode = 0
+
+    mock_default = unittest.mock.MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if "status" in cmd_str:
+        return mock_git_status
+      return mock_default
+
+    mock_run_cmd.side_effect = run_cmd_side_effect
+
+    finding = {
+        "FindingID": "fid-1",
+        "Status": "DETECTED",
+        "VulnType": "SQL_INJECTION",
+        "FilePath": "routes/userProfile.ts",
+    }
+    config = OrchestratorConfig(
+        workspace_dir=self.workspace_dir,
+        repo_url="https://github.com/org/repo.git",
+        github_token="fake-token",
+        target_sha="abc123commitsha",
+    )
+
+    _process_finding(
+        finding_id="fid-1",
+        finding=finding,
+        repo_dir=repo_dir,
+        cm_binary="/bin/cm",
+        scrubbed_env={},
+        clean_repo_url="https://github.com/org/repo.git",
+        token="fake-token",
+        owner="org",
+        repo_name="repo",
+        default_branch="main",
+        working_base_ref="abc123commitsha",
+        state_db_path=state_db_path,
+        worker_token_usage={},
+        config=config,
+    )
+
+    # Verify git add was called with only routes/userProfile.ts (no duplicates, no .exploit)
+    git_add_calls = [
+        call[0][0]
+        for call in mock_run_cmd.call_args_list
+        if call[0][0][:2] == ["git", "add"]
+    ]
+    self.assertTrue(git_add_calls, "Expected git add call")
+    for call in git_add_calls:
+      for arg in call[2:]:
+        self.assertNotIn(".exploit", arg)
+    self.assertEqual(git_add_calls[0], ["git", "add", "routes/userProfile.ts"])
+
+  @unittest.mock.patch("codemender_agent.runners.worker.run_command")
+  @unittest.mock.patch("codemender_agent.runners.worker.check_remote_branch_exists")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_duplicate_pr")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_finding_verified")
+  @unittest.mock.patch("codemender_agent.runners.worker.get_finding_status")
+  @unittest.mock.patch("codemender_agent.runners.worker.create_pull_request")
+  @unittest.mock.patch("codemender_agent.runners.worker.push_branch_to_remote")
+  def test_worker_staging_fallback_on_error(
+      self,
+      _mock_push,
+      mock_create_pr,
+      mock_get_finding_status,
+      mock_is_verified,
+      mock_is_dup_pr,
+      mock_branch_exists,
+      mock_run_cmd,
+  ):
+    """Verify that staging gracefully falls back to Tier 2 / Tier 3 when Tier 1 throws."""
+    mock_branch_exists.return_value = False
+    mock_is_dup_pr.return_value = False
+    mock_is_verified.return_value = True
+    mock_get_finding_status.return_value = "FIXED"
+    mock_create_pr.return_value = "https://github.com/org/repo/pull/2"
+
+    repo_dir = os.path.join(self.workspace_dir, "test_repo_fallback")
+    os.makedirs(repo_dir, exist_ok=True)
+    target_file = os.path.join(repo_dir, "server.js")
+    with open(target_file, "w") as f:
+      f.write("console.log('server');")
+
+    state_db_path = os.path.join(self.workspace_dir, "state_fallback.db")
+    with closing(sqlite3.connect(state_db_path)) as conn:
+      conn.execute(
+          "CREATE TABLE findings (finding_id TEXT PRIMARY KEY, status TEXT,"
+          " verified INTEGER)"
+      )
+      conn.execute("INSERT INTO findings VALUES ('fid-2', 'FIXED', 1)")
+      conn.execute(
+          "CREATE TABLE patches (finding_id TEXT, edited_files TEXT,"
+          " target_file TEXT, diff TEXT)"
+      )
+      conn.execute(
+          "INSERT INTO patches VALUES ('fid-2', ?, 'server.js', 'diff')",
+          (json.dumps([target_file]),),
+      )
+      conn.commit()
+
+    mock_git_status = unittest.mock.MagicMock()
+    mock_git_status.stdout = " M server.js"
+    mock_git_status.returncode = 0
+
+    mock_default = unittest.mock.MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if cmd[:3] == ["git", "add", "server.js"] and not getattr(
+          run_cmd_side_effect, "tier1_failed", False
+      ):
+        run_cmd_side_effect.tier1_failed = True
+        raise subprocess.CalledProcessError(1, cmd, output="mock error")
+      elif "status" in cmd_str:
+        return mock_git_status
+      return mock_default
+
+    run_cmd_side_effect.tier1_failed = False
+    mock_run_cmd.side_effect = run_cmd_side_effect
+
+    finding = {
+        "FindingID": "fid-2",
+        "Status": "DETECTED",
+        "VulnType": "XSS",
+        "FilePath": "server.js",
+    }
+    config = OrchestratorConfig(
+        workspace_dir=self.workspace_dir,
+        repo_url="https://github.com/org/repo.git",
+        github_token="fake-token",
+        target_sha="abc123commitsha",
+    )
+
+    # Should not raise exception even when Tier 1 git add fails
+    _process_finding(
+        finding_id="fid-2",
+        finding=finding,
+        repo_dir=repo_dir,
+        cm_binary="/bin/cm",
+        scrubbed_env={},
+        clean_repo_url="https://github.com/org/repo.git",
+        token="fake-token",
+        owner="org",
+        repo_name="repo",
+        default_branch="main",
+        working_base_ref="abc123commitsha",
+        state_db_path=state_db_path,
+        worker_token_usage={},
+        config=config,
+    )
+
+    mock_create_pr.assert_called_once()
 
 
 if __name__ == "__main__":

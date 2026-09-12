@@ -90,8 +90,34 @@ class CodeMenderCLIAdapter:
     return res, usage
 
 
+# Canonical PascalCase finding schema per docs/architecture/guardrails.md Section 6.
+# cm CLI 0.7.0 (cl/974628022) switched `cm report --format json` to snake_case keys,
+# so both casings are normalized to the canonical form for version-agnostic parsing.
+_FINDING_KEY_ALIASES = {
+    "finding_id": "FindingID",
+    "session_id": "SessionID",
+    "title": "Title",
+    "file_path": "FilePath",
+    "severity": "Severity",
+    "confidence": "Confidence",
+    "analysis": "Analysis",
+    "snippet": "Snippet",
+    "vuln_type": "VulnType",
+    "vuln_id": "VulnID",
+    "fingerprint": "Fingerprint",
+    "status": "Status",
+    "source_stage": "SourceStage",
+    "finding_json": "FindingJSON",
+    "updated_at": "UpdatedAt",
+    "start_line": "StartLine",
+    "end_line": "EndLine",
+    "dismiss_reason": "DismissReason",
+    "confidence_level": "ConfidenceLevel",
+}
+
+
 def parse_findings_json(json_str: str) -> List[Dict[str, Any]]:
-  """Parses `cm report --format json` output handling empty strings for optional fields."""
+  """Parses `cm report --format json` output normalizing keys to PascalCase."""
   data = extract_json_from_output(json_str)
   if data is None:
     logger.error("No valid JSON array or object found in report.")
@@ -114,6 +140,12 @@ def parse_findings_json(json_str: str) -> List[Dict[str, Any]]:
         cleaned[k] = None
       else:
         cleaned[k] = v
+      # Mirror snake_case keys onto the canonical PascalCase name. The original
+      # key is retained so downstream snake_case readers keep working, and an
+      # explicit PascalCase key already present in the payload always wins.
+      canonical = _FINDING_KEY_ALIASES.get(k)
+      if canonical and canonical not in item:
+        cleaned[canonical] = cleaned[k]
     cleaned_findings.append(cleaned)
 
   return cleaned_findings
