@@ -52,6 +52,76 @@ class TestCodeMenderCli(unittest.TestCase):
     self.assertEqual(findings[0]["FindingID"], "f123")
     self.assertEqual(findings[0]["VulnType"], "SQL Injection")
 
+  def test_parse_findings_json_cm_070_snake_case(self):
+    """Verify cm 0.7.0 snake_case output normalizes to canonical PascalCase."""
+    # Verbatim `cm report --format json` payload emitted by cm version 0.7.0,
+    # which switched to snake_case struct tags in cl/974628022.
+    raw_json = """[
+      {
+        "finding_id": "a722cea6-dced-56fc-8b96-393c12834278",
+        "session_id": "ChA5ODRmOWZiNDBhMTRmNDU0EAgaATAqBG1haW4",
+        "title": "SQL Injection in User Authentication",
+        "file_path": "/__w/juice-shop-local/juice-shop-local/juice-shop-local/routes/login.ts",
+        "severity": "CRITICAL",
+        "confidence": 100,
+        "analysis": "### Data Flow Analysis\\n- **Source**: `req.body.email`",
+        "snippet": "models.sequelize.query(...)",
+        "vuln_type": "SQL Injection",
+        "vuln_id": "CWE-89",
+        "status": "OPEN",
+        "start_line": 34,
+        "end_line": 35
+      },
+      {
+        "finding_id": "c0b70aa9-78b8-59f5-940a-6f3d9d3b6b6e",
+        "session_id": "ChA5ODRmOWZiNDBhMTRmNDU0EAgaATAqBG1haW4",
+        "title": "UNION SQL Injection in Product Search",
+        "file_path": "/__w/juice-shop-local/juice-shop-local/juice-shop-local/routes/search.ts",
+        "severity": "CRITICAL",
+        "confidence": 100,
+        "analysis": "### Data Flow Analysis\\n- **Source**: `req.query.q`",
+        "snippet": "let criteria: any = req.query.q",
+        "vuln_type": "SQL Injection",
+        "vuln_id": "CWE-89",
+        "status": "OPEN",
+        "start_line": 21,
+        "end_line": 24
+      }
+    ]"""
+    findings = parse_findings_json(raw_json)
+    self.assertEqual(len(findings), 2)
+    first = findings[0]
+    self.assertEqual(first["FindingID"], "a722cea6-dced-56fc-8b96-393c12834278")
+    self.assertEqual(
+        first["SessionID"], "ChA5ODRmOWZiNDBhMTRmNDU0EAgaATAqBG1haW4"
+    )
+    self.assertEqual(first["Title"], "SQL Injection in User Authentication")
+    self.assertEqual(
+        first["FilePath"],
+        "/__w/juice-shop-local/juice-shop-local/juice-shop-local/routes/login.ts",
+    )
+    self.assertEqual(first["Severity"], "CRITICAL")
+    self.assertEqual(first["Confidence"], 100)
+    self.assertEqual(first["VulnType"], "SQL Injection")
+    self.assertEqual(first["VulnID"], "CWE-89")
+    self.assertEqual(first["Status"], "OPEN")
+    self.assertEqual(first["StartLine"], 34)
+    self.assertEqual(first["EndLine"], 35)
+    # Original snake_case keys are retained for snake_case-aware consumers
+    self.assertEqual(first["finding_id"], first["FindingID"])
+    self.assertEqual(
+        findings[1]["FindingID"], "c0b70aa9-78b8-59f5-940a-6f3d9d3b6b6e"
+    )
+
+  def test_parse_findings_json_pascal_case_wins_on_conflict(self):
+    """Verify an explicit PascalCase key is never clobbered by its alias."""
+    raw_json = """[
+      {"FindingID": "pascal-wins", "finding_id": "snake-loses"}
+    ]"""
+    findings = parse_findings_json(raw_json)
+    self.assertEqual(findings[0]["FindingID"], "pascal-wins")
+    self.assertEqual(findings[0]["finding_id"], "snake-loses")
+
   @patch("codemender_agent.codemender.cli.run_command")
   def test_log_cm_version_success(self, mock_run_cmd):
     """Verify log_cm_version logs and returns version string on success."""
