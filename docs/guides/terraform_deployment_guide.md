@@ -298,6 +298,7 @@ the Cloud Run jobs:
 | `models` | No | `CODEMENDER_<CMD>_MODEL` | Per-command model selection map: `{"find": "...", "verify": "...", "fix": "..."}`. |
 | `skip_exploit_verification` | No | `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | Set to `true` to skip exploit compilation/execution during verify phase. |
 | `skip_verify` | No | `CODEMENDER_SKIP_VERIFY` | Set to `false` to run `cm verify` before `cm fix` (default is `true`, which skips verify). |
+| `pr_remediation_mode` | No | `CODEMENDER_PR_REMEDIATION_MODE` | How PR fixes are delivered: `"review_suggestion"` (default, one-click inline suggestions) or `"child_pr"` (push branch & open Child PR). |
 | `cleanup_ports`* | No | `CODEMENDER_CLEANUP_PORTS` | Comma-separated ports to kill before testing. |
 | `force_overwrite`* | No | `CODEMENDER_FORCE_OVERWRITE` | Pass `"true"` to bypass PR spam prevention and force re-run fixes and push PRs. |
 

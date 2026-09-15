@@ -120,8 +120,8 @@ To build this Minimum Viable Product, we will create the following files in the
     *   `cm report --format json` (to extract findings)
     *   `cm find verify <finding_id> --yes`
     *   `cm fix <finding_id> --yes`
-    *   Controlling the sequential "Verify -> Fix -> Branch -> Push -> PR" loop.
-        By executing the push and PR operations immediately after each
+    *   Controlling the sequential "Fix (optional Verify) -> Suggestion / PR" loop.
+        By executing the remediation operation immediately after each
         successful fix (instead of waiting for the end of the entire loop), the
         orchestrator ensures partial progress is preserved if the job times out
         or fails midway.

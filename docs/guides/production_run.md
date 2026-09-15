@@ -309,7 +309,7 @@ gcloud scheduler jobs create http codemender-parallel-nightly \
 ## Deployment Path B: Sequential Job (Alternative for Smaller Repositories)
 
 Use this path if you prefer a simpler architecture that runs all operations
-(Scan $\rightarrow$ Verify $\rightarrow$ Fix $\rightarrow$ PR) sequentially
+(Scan $\rightarrow$ Fix [$\rightarrow$ Verify optional] $\rightarrow$ PR / Suggestion) sequentially
 inside a single container task.
 
 ### Step B.1: Deploy the Cloud Run Job
@@ -396,6 +396,7 @@ You can override LLM models per stage when executing jobs or triggering Workflow
 *   **Stage-Specific Overrides**: `--update-env-vars="CODEMENDER_FIND_MODEL=gemini-2.5-pro,CODEMENDER_FIX_MODEL=gemini-2.5-flash"`
 *   **Skip Exploit Verification**: `--update-env-vars="CODEMENDER_SKIP_EXPLOIT_VERIFICATION=true"` (bypasses compilation/execution of exploits during verification phase).
 *   **Skip Verification Phase**: `--update-env-vars="CODEMENDER_SKIP_VERIFY=false"` (enforces running `cm verify` before `cm fix`; default is `true` which skips verification).
+*   **PR Remediation Mode**: `--update-env-vars="CODEMENDER_PR_REMEDIATION_MODE=child_pr"` (delivers PR fixes via Child PR instead of default one-click inline review suggestions).
 
 ### Scaling Storage Beyond 10GB
 

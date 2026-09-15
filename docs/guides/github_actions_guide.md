@@ -79,9 +79,9 @@ graph TD
     end
 
     subgraph Stage2["Stage 2: Parallel Workers (Matrix [0..N-1])"]
-        Worker0["Worker 0\n(cm verify & cm fix)"]
-        Worker1["Worker 1\n(cm verify & cm fix)"]
-        WorkerN["Worker N-1\n(cm verify & cm fix)"]
+        Worker0["Worker 0\n(cm fix / cm verify)"]
+        Worker1["Worker 1\n(cm fix / cm verify)"]
+        WorkerN["Worker N-1\n(cm fix / cm verify)"]
     end
 
     subgraph Stage3["Stage 3: Aggregate & Report (aggregate job)"]
@@ -176,11 +176,11 @@ inventories, and remediate technical debt.
         (due to closed/rejected PRs, merged leftovers, or interrupted test
         runs), Stage 1 autonomously prunes the dead branch via GitHub REST API /
         Git CLI and retains the finding as `ACTIVE` for fresh remediation.
-3.  **Worker Remediation & Mainline PRs**: Verifies findings (`cm verify`),
-    synthesizes patches (`cm fix`), and opens **Pull Requests targeting the
-    default branch (`main`)**. If PR creation fails after pushing to origin,
-    workers execute an **atomic rollback** by deleting the remote branch to
-    prevent orphan accumulation.
+3.  **Worker Remediation & Mainline PRs**: Synthesizes patches (`cm fix`,
+    with optional `cm verify` gating via `skip_verify`), and opens **Pull
+    Requests targeting the default branch (`main`)**. If PR creation fails after
+    pushing to origin, workers execute an **atomic rollback** by deleting the
+    remote branch to prevent orphan accumulation.
 4.  **Final Outputs & Security Tab Inventory**: Uploads complete `report.sarif`
     to the GitHub Security Tab (tagging duplicate findings with `underReview`
     suppression metadata), renders `$GITHUB_STEP_SUMMARY`, and saves
@@ -208,11 +208,12 @@ pull requests.
         ensure unmerged/closed branch leftovers never suppress genuine
         regressions.
 3.  **Worker Remediation Routing**:
-    *   **Internal PRs**: Opens a **Child Pull Request targeting the developer's
-        feature branch (`pr_head_ref`)**, allowing 1-click merging into the PR.
-    *   **Fork PRs**: Respects fork security boundaries by posting an inline
-        **Markdown Review Comment** on the PR with exploit analysis, unified
-        patch diff, and `git apply` commands.
+    *   **One-Click Inline Review Suggestions (Default, `pr_remediation_mode: review_suggestion`)**:
+        Posts GitHub review comments with native suggestion blocks directly on the PR diff lines where the vulnerability was introduced. Developers can review and commit the fix with a single click in GitHub's web UI without switching branches.
+    *   **Child Pull Requests (`pr_remediation_mode: child_pr`)**:
+        Pushes a dedicated branch (`codemender/fix-...`) and opens a Child Pull Request targeting the developer's feature branch (`pr_head_ref`).
+    *   **Fork PRs & Fallbacks**:
+        Posts inline review suggestions directly on the Fork PR diff. If the patch touches lines outside the PR diff or cannot be expressed inline, it falls back to a Markdown patch comment with analysis, diff, and `git apply` commands.
 4.  **Final Outputs**:
     *   Purges `PRE_EXISTING_IGNORED` records so PR status checks and SARIF
         annotations strictly reflect vulnerabilities on the PR diff.
@@ -1225,29 +1226,32 @@ jobs:
 
 ### Review Surfaces
 
-CodeMender provides 4 integrated review surfaces:
+CodeMender provides 5 integrated review surfaces:
 
-#### 1. In-PR Child Pull Requests (Internal PRs)
+#### 1. In-PR Inline Review Suggestions (Default on PRs)
 
-When a vulnerability is discovered on an active internal Pull Request,
-CodeMender creates a **Child Pull Request** targeting the developer's feature
-branch (`pr_head_ref`).
+When a vulnerability is discovered on an active Pull Request (internal or fork), CodeMender posts **one-click inline review suggestions** directly on the PR diff lines where the vulnerability was introduced:
+
+*   **Zero Branch Friction**: Developers do not need to check out, pull, or merge secondary branches.
+*   **1-Click Commit**: Applying the suggestion commits the fix directly to the PR branch via GitHub's web interface.
+*   **Scoped Line Precision**: Multi-hunk patches are mapped to their respective diff lines with contextual security analysis.
+
+#### 2. In-PR Child Pull Requests (Configured via `pr_remediation_mode: child_pr`)
+
+When configured with `pr_remediation_mode: child_pr` (or as a fallback when an internal PR fix cannot be expressed as an inline suggestion):
 
 *   **Zero Merge Collisions**: Developers review the fix in isolation.
-*   **1-Click Merge**: Merging the Child PR incorporates the security patch
-    directly into the developer's branch.
+*   **1-Click Merge**: Merging the Child PR incorporates the security patch directly into the developer's branch.
 
-#### 2. Fork Pull Request Review Comments
+#### 3. Fork Pull Request Review Comments (Fallback)
 
-For Pull Requests originating from repository forks, Child PR creation is
-skipped to respect security boundaries. CodeMender posts a Markdown review
-comment directly on the Fork PR containing:
+For Pull Requests originating from repository forks where a patch cannot be expressed as an inline suggestion, CodeMender posts a Markdown review comment containing:
 
 *   Exploit analysis and vulnerability summary.
-*   Unified patch diff.
+*   Unified patch diff with 4-backtick Markdown fencing.
 *   One-line copyable local `git apply` instructions.
 
-#### 3. GitHub Actions Step Summary (`$GITHUB_STEP_SUMMARY`)
+#### 4. GitHub Actions Step Summary (`$GITHUB_STEP_SUMMARY`)
 
 Every CI run renders a Markdown summary dashboard directly in the GitHub Actions
 run overview, showing:
@@ -1257,7 +1261,7 @@ run overview, showing:
 *   Discovered Findings & Status Table.
 *   LLM Token Usage Summary.
 
-#### 4. GitHub Security Tab (SARIF Integration)
+#### 5. GitHub Security Tab (SARIF Integration)
 
 *   **Nightly Scans on `main`**: All findings (including existing remediations
     marked `SKIPPED_DUPLICATE`) are published to SARIF with `underReview`

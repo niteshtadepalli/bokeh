@@ -59,11 +59,11 @@ inside your own secure container runners across a scalable, 3-stage pipeline:
         synthesis to prevent artifact bloat.
     -   For each finding, the worker optionally verifies exploitability (`cm verify`,
         gated by `skip_verify` which defaults to skipping verify), synthesizes and
-        validates an automated patch (`cm fix`), and pushes a dedicated branch to GitHub.
-    -   Opens a Child Pull Request targeting the feature/default branch (or
-        posts a detailed review comment on Fork PRs) with **transactional
-        rollback** (pruning the remote branch if PR creation fails) and exports
-        its local SQLite state database shard and token telemetry.
+        validates an automated patch (`cm fix`), and delivers remediation according
+        to `pr_remediation_mode` (defaulting to one-click inline review suggestions on
+        the PR diff, or pushing a dedicated branch and opening a Child Pull Request
+        with **transactional rollback** if PR creation fails) and exports its local
+        SQLite state database shard and token telemetry.
 3.  **Stage 3: Aggregator & Reporter (`runners/aggregate.py`)**:
     -   Collects all worker database shards and token usage files.
     -   Merges database shards via `SQLite ATTACH` and schema unification.
@@ -108,9 +108,9 @@ graph TD
         WLoop --> WVerify[10. Verify Exploitability<br/>'cm verify' / skip-verify]
         WVerify --> WCleanCache[11. Sanitize Exploit Caches]
         WCleanCache --> WFix[12. Generate & Validate Patch<br/>'cm fix']
-        WFix --> WType{Target PR Type?}
-        WType -- "Internal PR / Nightly" --> WPR[13a. Push Branch & Open Child PR<br/>Transactional Rollback on Error]
-        WType -- "Fork PR" --> WComment[13b. Post Review Comment with Patch]
+        WFix --> WType{Remediation Mode / Target PR?}
+        WType -- "PR Scan (review_suggestion / Fork)" --> WComment[13a. Post Inline Suggestion / Review Comment]
+        WType -- "Nightly / child_pr" --> WPR[13b. Push Branch & Open Child / Top-level PR<br/>Transactional Rollback on Error]
         WPR --> WLoop
         WComment --> WLoop
         WLoop -- Done --> WUpload[14. Upload SQLite DB Shard & Token Telemetry]
@@ -195,9 +195,10 @@ optimized for CI/CD developer feedback and ongoing repository health:
 *   **Mode B: Pull Request CI/CD ("Clean as You Code")**: Designed for
     shift-left security. By calculating `git diff -U0 origin/<base>...HEAD`,
     CodeMender isolates vulnerabilities introduced by the PR, ignores
-    pre-existing legacy issues to avoid developer fatigue, opens child PRs
-    directly against the feature branch, and enforces a dedicated Commit Status
-    check before merge.
+    pre-existing legacy issues to avoid developer fatigue, posts one-click
+    inline review suggestions directly on the PR diff (or opens child PRs
+    when configured via `pr_remediation_mode: child_pr`), and enforces a dedicated
+    Commit Status check before merge.
 
 ### 2. Google Cloud Platform (GCP) Deployment
 
@@ -223,7 +224,7 @@ optimized for CI/CD developer feedback and ongoing repository health:
 -   **Credential Scrubbing**: `orchestrator.py` explicitly scrubs sensitive
     credentials (`GITHUB_APP_TOKEN`, `GITHUB_PAT`, `GITHUB_TOKEN`, `GH_TOKEN`,
     `GITHUB_SECRET`, `GCP_SA_KEY`) from the subprocess environment before
-    invoking `cm` commands (`cm verify`, `cm fix`) to eliminate remote code
+    invoking `cm` commands (`cm fix` / `cm verify`) to eliminate remote code
     execution (RCE) exfiltration risks.
 -   **Single-Sync Git Rule & Commit Pinning**: The orchestrator synchronizes the
     repository only once during Stage 1 (`git clone`). On Pull Request scans,
