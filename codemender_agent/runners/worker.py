@@ -15,7 +15,6 @@
 """Stage 2: Parallel Worker runner for CodeMender Agent."""
 
 from contextlib import closing
-import hashlib
 import json
 import logging
 import os
@@ -32,10 +31,12 @@ from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.db import get_finding_status
 from codemender_agent.codemender.db import is_finding_verified
 from codemender_agent.config import OrchestratorConfig
+from codemender_agent.config import PR_MODE_REVIEW_SUGGESTION
 from codemender_agent.config import get_cleanup_ports
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import resolve_pr_remediation_mode
 from codemender_agent.storage import download_from_url
 from codemender_agent.storage import get_storage_adapter
 from codemender_agent.storage import upload_to_url
@@ -49,17 +50,25 @@ from codemender_agent.vcs.git import filter_stageable_files
 from codemender_agent.vcs.git import get_finding_branch_name
 from codemender_agent.vcs.git import get_git_auth_header
 from codemender_agent.vcs.git import normalize_repo_relative_path
+from codemender_agent.vcs.git import parse_patch_to_suggestions
 from codemender_agent.vcs.git import parse_repo_owner_and_name
 from codemender_agent.vcs.git import push_branch_to_remote
 from codemender_agent.vcs.git import sanitize_exploit_and_artifacts
 from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
+from codemender_agent.vcs.github import MAX_COMMENT_BODY_CHARS
+from codemender_agent.vcs.github import build_review_comment
 from codemender_agent.vcs.github import check_remote_branch_exists
 from codemender_agent.vcs.github import create_pr_comment
+from codemender_agent.vcs.github import create_pr_review_with_suggestions
 from codemender_agent.vcs.github import create_pull_request
 from codemender_agent.vcs.github import delete_remote_branch
+from codemender_agent.vcs.github import finding_marker
+from codemender_agent.vcs.github import format_suggestion_body
 from codemender_agent.vcs.github import get_default_branch
+from codemender_agent.vcs.github import get_pr_diff_line_ranges
 from codemender_agent.vcs.github import is_duplicate_pr
+from codemender_agent.vcs.github import list_reviewed_finding_ids
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -203,6 +212,169 @@ def _restore_state(
   return partition_path, finding_ids
 
 
+def _mark_skipped_duplicate(
+    state_db_path: str, finding_id: str, reason: str
+) -> None:
+  """Mutes a finding in the worker state database as an already-handled duplicate."""
+  if not os.path.exists(state_db_path):
+    return
+  try:
+    with closing(sqlite3.connect(state_db_path)) as conn:
+      conn.execute(
+          "UPDATE findings SET status = 'SKIPPED_DUPLICATE', muted = 1,"
+          " mute_reason = ? WHERE finding_id = ?",
+          (reason, finding_id),
+      )
+      conn.commit()
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Failed to set SKIPPED_DUPLICATE in worker state.db: %s", e)
+
+
+def _skip_if_duplicate_branch_or_pr(
+    clean_repo_url: str,
+    token: str,
+    repo_dir: str,
+    branch_name: str,
+    file_path: str,
+    vuln_type: str,
+    start_line: int,
+    finding_id: str,
+    state_db_path: str,
+) -> bool:
+  """Reports whether a branch or PR already remediates this finding."""
+  is_branch_dup = check_remote_branch_exists(
+      clean_repo_url, token, branch_name, cwd=repo_dir
+  )
+  is_pr_dup = is_duplicate_pr(
+      clean_repo_url,
+      token,
+      file_path,
+      vuln_type,
+      start_line,
+      head_branch=branch_name,
+  )
+  if not (is_branch_dup or is_pr_dup):
+    return False
+
+  logger.info(
+      "Finding %s skipped due to existing duplicate branch/PR.", finding_id
+  )
+  _mark_skipped_duplicate(
+      state_db_path, finding_id, "Duplicate PR or branch already exists"
+  )
+  return True
+
+
+# -----------------------------------------------------------------------------
+# Fork Pull Request Patch Comment Construction
+# -----------------------------------------------------------------------------
+def _fit_fork_comment(
+    header: str, diff_section: str, apply_section: str, footer: str
+) -> str:
+  """Assembles the fork patch comment, dropping sections that will not fit.
+
+  The patch appears twice (once to read, once inside a `git apply` heredoc), so
+  a large diff overflows GitHub's comment limit. Sections are dropped whole
+  rather than letting the body be cut mid-patch: a truncated heredoc still
+  renders as a complete-looking block, and pasting it yields a corrupt patch.
+  """
+  oversize_note = (
+      "> [!WARNING]\n"
+      "> The patch is too large to embed in a pull request comment. Download"
+      " the `codemender-report` artifact from the workflow run for the full"
+      " diff.\n\n"
+  )
+  candidates = (
+      header + diff_section + apply_section + footer,
+      header + diff_section + footer,
+      header + oversize_note + footer,
+  )
+  for body in candidates:
+    if len(body) <= MAX_COMMENT_BODY_CHARS:
+      return body
+  # Even the header alone is oversized; the API layer truncates as a last resort.
+  return candidates[-1]
+
+
+# -----------------------------------------------------------------------------
+# GitHub Review Suggestion Construction
+# -----------------------------------------------------------------------------
+def _build_suggestion_comments(
+    finding_id: str,
+    finding_meta: dict[str, any],
+    repo_dir: str,
+    patch_diff: str,
+    pr_diff_line_ranges: dict[str, set[int]],
+) -> tuple[list[dict], Optional[str]]:
+  """Converts a fix patch into inline suggestion comments, or reports a blocker.
+
+  Remediation is offered as a suggestion only when the *entire* patch can be
+  expressed as one-click suggestions. A patch that creates, renames or deletes
+  files, or that touches a line GitHub will not render as part of the PR diff,
+  is rejected wholesale so the caller can route it to a fallback instead of
+  posting a partial fix the reviewer could mistake for a complete one.
+
+  Returns:
+    Tuple of (comments, blocker_reason). Exactly one is populated.
+  """
+  # 1. Translate the unified diff into anchorable replacement hunks
+  hunks, blockers = parse_patch_to_suggestions(repo_dir, patch_diff)
+  if blockers:
+    return [], "; ".join(blockers)
+  if not hunks:
+    return [], "the fix produced no suggestable hunks"
+
+  # 2. Reject the whole patch unless every anchor line is inside the PR diff
+  for hunk in hunks:
+    addressable = pr_diff_line_ranges.get(hunk.path)
+    if not addressable:
+      return [], f"`{hunk.path}` is not part of the reviewable pull request diff"
+    outside = [
+        line
+        for line in range(hunk.start_line, hunk.end_line + 1)
+        if line not in addressable
+    ]
+    if outside:
+      return [], (
+          f"`{hunk.path}` line(s) {outside[0]}-{outside[-1]} fall outside the"
+          " pull request diff"
+      )
+
+  # 3. Render one suggestion comment per hunk, each carrying the dedup marker
+  marker = finding_marker(finding_id)
+  severity = finding_meta.get("severity") or "UNKNOWN"
+  vuln_type = finding_meta.get("vuln_type") or "vulnerability"
+  analysis = finding_meta.get("analysis") or ""
+  total = len(hunks)
+
+  comments: list[dict] = []
+  for index, hunk in enumerate(hunks, start=1):
+    if index == 1:
+      preamble = (
+          f"{marker}\n"
+          f"### 🛡️ CodeMender: {severity} `{vuln_type}`\n\n"
+          f"{analysis}\n\n"
+          f"Commit the suggestion below to apply the fix"
+          f"{f' (part 1 of {total})' if total > 1 else ''}."
+      )
+    else:
+      preamble = (
+          f"{marker}\n"
+          f"🛡️ **CodeMender** — part {index} of {total} of the fix for"
+          f" `{vuln_type}` in this pull request."
+      )
+    comments.append(
+        build_review_comment(
+            path=hunk.path,
+            start_line=hunk.start_line,
+            end_line=hunk.end_line,
+            body=format_suggestion_body(hunk.replacement_lines, preamble=preamble),
+        )
+    )
+
+  return comments, None
+
+
 # -----------------------------------------------------------------------------
 # Single Finding Remediation and PR Pipeline
 # -----------------------------------------------------------------------------
@@ -222,8 +394,16 @@ def _process_finding(
     state_db_path: str,
     worker_token_usage: dict[str, dict[str, int]],
     config: OrchestratorConfig,
-) -> None:
-  """Handles verification, surgical staging, and PR routing for a single finding."""
+    pr_diff_line_ranges: Optional[dict[str, set[int]]] = None,
+    already_suggested: Optional[set[str]] = None,
+) -> Optional[str]:
+  """Handles verification, surgical staging, and PR routing for a single finding.
+
+  Returns:
+    The URL of the remediation that was delivered — an inline suggestion
+    review, a fork patch comment, or a Child Pull Request — or None when the
+    finding was skipped or no remediation could be routed.
+  """
   # 1. Extract finding metadata, vulnerability type, and target file path
   cli_version = config.cli_version
   vuln_type = finding.get("VulnType") or "vulnerability"
@@ -246,41 +426,49 @@ def _process_finding(
   # 2. Compute canonical branch name for finding
   branch_name = get_finding_branch_name(file_path, vuln_type, start_line)
 
-  logger.info("Processing finding %s (Branch: %s)", finding_id, branch_name)
+  # 3. Resolve the remediation route for this finding
+  suggestion_mode = (
+      config.is_pr_scan
+      and bool(config.pr_number)
+      and resolve_pr_remediation_mode(config) == PR_MODE_REVIEW_SUGGESTION
+  )
+
+  logger.info(
+      "Processing finding %s (Branch: %s, Remediation: %s)",
+      finding_id,
+      branch_name,
+      "review suggestion" if suggestion_mode else "pull request",
+  )
 
   # 1. Enforce force_overwrite = False on all PR scans to avoid branch clobbering
   force_overwrite = config.force_overwrite and not config.is_pr_scan
 
-  if not force_overwrite:
-    is_branch_dup = check_remote_branch_exists(
-        clean_repo_url, token, branch_name, cwd=repo_dir
-    )
-    is_pr_dup = is_duplicate_pr(
+  if suggestion_mode:
+    # No branch or PR is created in suggestion mode, so remote-branch dedup
+    # cannot apply. The marker embedded in a previously posted suggestion is
+    # the equivalent idempotency signal across re-runs.
+    if already_suggested and finding_id in already_suggested:
+      logger.info(
+          "Finding %s skipped; a suggestion was already posted on PR #%s.",
+          finding_id,
+          config.pr_number,
+      )
+      _mark_skipped_duplicate(
+          state_db_path, finding_id, "Suggestion already posted on this PR"
+      )
+      return
+  elif not force_overwrite:
+    if _skip_if_duplicate_branch_or_pr(
         clean_repo_url,
         token,
+        repo_dir,
+        branch_name,
         file_path,
         vuln_type,
         start_line,
-        head_branch=branch_name,
-    )
-    if is_branch_dup or is_pr_dup:
-      logger.info(
-          "Finding %s skipped due to existing duplicate branch/PR.", finding_id
-      )
-      if os.path.exists(state_db_path):
-        try:
-          with closing(sqlite3.connect(state_db_path)) as conn:
-            conn.execute(
-                "UPDATE findings SET status = 'SKIPPED_DUPLICATE', muted = 1,"
-                " mute_reason = 'Duplicate PR or branch already exists' WHERE"
-                " finding_id = ?",
-                (finding_id,),
-            )
-            conn.commit()
-        except Exception as e:  # pylint: disable=broad-exception-caught
-          logger.warning(
-              "Failed to set SKIPPED_DUPLICATE in worker state.db: %s", e
-          )
+        finding_id,
+        state_db_path,
+    ):
       return
 
   # 2. Verification Retry Loop (Executes 'cm verify' with port cleanup)
@@ -488,8 +676,77 @@ def _process_finding(
     diff_res = run_command(["git", "diff", "HEAD"], cwd=repo_dir, check=False)
     patch_diff = diff_res.stdout
 
-  # 5. Commit, Push Branch, and Route Pull Request
+  # 5. Route the remediation to the reviewer
   try:
+    if suggestion_mode:
+      fallback_route = "patch comment" if config.is_fork_pr else "Child PR"
+      # Suggestions must be derived before committing: the parser reads the
+      # pre-fix content from HEAD, which is still the pull request head commit.
+      # Any failure here degrades to the fallback route rather than propagating
+      # to the handler below, which would strand the finding with no fix at all.
+      try:
+        comments, blocker = _build_suggestion_comments(
+            finding_id,
+            {"severity": severity, "vuln_type": vuln_type, "analysis": analysis},
+            repo_dir,
+            patch_diff,
+            pr_diff_line_ranges or {},
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        comments, blocker = [], f"suggestion construction failed: {e}"
+      if blocker:
+        logger.info(
+            "Finding %s cannot be offered as a one-click suggestion (%s);"
+            " falling back to %s.",
+            finding_id,
+            blocker,
+            fallback_route,
+        )
+      else:
+        review_body = (
+            f"### 🛡️ CodeMender proposed a fix for a {severity} `{vuln_type}`\n\n"
+            f"**{title}**\n\n"
+            f"`{file_path}:{start_line}` · Finding `{finding_id}`\n\n"
+            "Commit the inline suggestion(s) in this review to apply the fix"
+            " directly to this pull request.\n\n"
+            "---\n"
+            "*Automatically generated by CodeMender Orchestrator.*"
+        )
+        review_url = create_pr_review_with_suggestions(
+            token=token,
+            owner=owner,
+            repo=repo_name,
+            pr_number=config.pr_number,
+            commit_id=config.target_sha,
+            body=review_body,
+            comments=comments,
+        )
+        if review_url:
+          return review_url
+        logger.warning(
+            "Suggestion review was rejected for finding %s; falling back to %s.",
+            finding_id,
+            fallback_route,
+        )
+
+    # The fallback and Child PR routes both build on a dedicated fix branch.
+    if suggestion_mode and not config.is_fork_pr and not force_overwrite:
+      # The upfront duplicate check was skipped because suggestion mode pushes
+      # no branch. Falling back to the Child PR route does push one, so the
+      # check has to happen now to avoid clobbering an earlier fallback's work.
+      if _skip_if_duplicate_branch_or_pr(
+          clean_repo_url,
+          token,
+          repo_dir,
+          branch_name,
+          file_path,
+          vuln_type,
+          start_line,
+          finding_id,
+          state_db_path,
+      ):
+        return None
+
     run_command(["git", "checkout", "-B", branch_name], cwd=repo_dir)
     commit_msg = f"fix(security): resolve {vuln_type} in {file_path}"
     run_command(["git", "commit", "-m", commit_msg], cwd=repo_dir)
@@ -502,7 +759,7 @@ def _process_finding(
           config.pr_number,
       )
       # Construct formatted Markdown review comment body with analysis, patch diff, and git apply instructions
-      comment_body = (
+      comment_header = (
           "### 🛡️ CodeMender Security Fix Suggestion\n\n"
           f"**Finding ID**: `{finding_id}`\n"
           f"**Title**: {title}\n"
@@ -511,17 +768,23 @@ def _process_finding(
           f"**File**: `{file_path}`\n"
           f"**Start Line**: {start_line}\n\n"
           f"#### Analysis\n{analysis}\n\n"
+      )
+      comment_body = _fit_fork_comment(
+          header=comment_header,
           # Render code diff block with 4-backtick fence to prevent premature closure on embedded markdown/backticks
-          f"#### Suggested Patch Diff\n````diff\n{patch_diff}\n````\n\n"
+          diff_section=(
+              f"#### Suggested Patch Diff\n````diff\n{patch_diff}\n````\n\n"
+          ),
           # Render local git apply snippet with 4-backtick fence
-          "#### How to Apply Locally\n````bash\ngit apply <<"
-          f" 'EOF'\n{patch_diff}\nEOF\n````\n\n"
-          "---\n"
-          "*Automatically generated by CodeMender Orchestrator.*"
+          apply_section=(
+              "#### How to Apply Locally\n````bash\ngit apply <<"
+              f" 'EOF'\n{patch_diff}\nEOF\n````\n\n"
+          ),
+          footer="---\n*Automatically generated by CodeMender Orchestrator.*",
       )
       # Submit Markdown review comment to Fork PR via GitHub REST API
       if config.pr_number:
-        create_pr_comment(
+        return create_pr_comment(
             token=token,
             owner=owner,
             repo=repo_name,
@@ -533,6 +796,7 @@ def _process_finding(
         logger.warning(
             "Fork PR Scan: CODEMENDER_PR_NUMBER not set; cannot post comment."
         )
+        return None
     else:
       # Internal Branch / Nightly Scan: Push fix branch to origin
       logger.info("Pushing branch %s...", branch_name)
@@ -887,7 +1151,29 @@ def run_worker_pipeline() -> None:
 
   worker_finding_prs: dict[str, str] = {}
 
-  # 10. Process each assigned finding sequentially (Verify -> Fix -> Stage -> PR)
+  # 10. Pre-fetch pull request review context shared by every assigned finding
+  pr_diff_line_ranges: dict[str, set[int]] = {}
+  already_suggested: set[str] = set()
+  if (
+      config.is_pr_scan
+      and config.pr_number
+      and resolve_pr_remediation_mode(config) == PR_MODE_REVIEW_SUGGESTION
+  ):
+    pr_diff_line_ranges = get_pr_diff_line_ranges(
+        token, owner, repo_name, config.pr_number
+    )
+    already_suggested = list_reviewed_finding_ids(
+        token, owner, repo_name, config.pr_number
+    )
+    logger.info(
+        "Review suggestion mode: %d file(s) addressable in PR #%d, %d finding(s)"
+        " already suggested.",
+        len(pr_diff_line_ranges),
+        config.pr_number,
+        len(already_suggested),
+    )
+
+  # 11. Process each assigned finding sequentially (Verify -> Fix -> Stage -> Route)
   for finding_id in finding_ids:
     finding = findings_dict.get(finding_id)
     if not finding:
@@ -896,7 +1182,7 @@ def run_worker_pipeline() -> None:
       )
       continue
 
-    # Execute verify, fix, staging, and PR creation routine for finding
+    # Execute verify, fix, staging, and remediation routing routine for finding
     pr_url = _process_finding(
         finding_id,
         finding,
@@ -912,12 +1198,14 @@ def run_worker_pipeline() -> None:
         state_db_path,
         worker_token_usage,
         config=config,
+        pr_diff_line_ranges=pr_diff_line_ranges,
+        already_suggested=already_suggested,
     )
     # Track generated Pull Request URL for Step Summary linking
     if pr_url and isinstance(pr_url, str) and pr_url.startswith("http"):
       worker_finding_prs[finding_id] = pr_url
 
-  # 11. Upload mutated worker state database shard and token telemetry
+  # 12. Upload mutated worker state database shard and token telemetry
   logger.info("Uploading mutated database to transit storage...")
   if not upload_to_url(state_db_path, upload_url):
     logger.error("Failed to upload mutated database.")
@@ -932,7 +1220,7 @@ def run_worker_pipeline() -> None:
       finding_prs=worker_finding_prs,
   )
 
-  # 12. Adjust file permissions on transit directory if running in local container
+  # 13. Adjust file permissions on transit directory if running in local container
   transit_dir = os.path.join(workspace_dir, ".codemender_transit")
   if os.path.exists(transit_dir):
     try:

@@ -213,17 +213,28 @@ full support for **Bring-Your-Own-Image (BYOI)** custom toolchains.
         *only* the exact files modified or created by CodeMender, with a 3-tier
         fallback hierarchy (`edited_files` $\rightarrow$ `target_file`
         $\rightarrow$ `git add -u` + `finding.FilePath`).
-    *   **Global Branch Naming & Dual PR Routing**:
-        *   All scans use canonical naming:
-            `codemender/fix-<vuln_type>-<fingerprint>`.
-        *   **Nightly / Manual Scans**: Pushes branch and opens a top-level PR
-            targeting `main`.
-        *   **Internal PR Scans**: Pushes branch and opens a Child PR targeting
-            the developer's feature branch (`pr_head_ref`, populated from
-            `GITHUB_HEAD_REF`).
-        *   **Fork PR Scans**: Posts a Markdown review comment on the Fork PR
-            (`pr_number`) with findings, patch diff, and local `git apply`
-            instructions.
+    *   **Remediation Routing** (gated by `CODEMENDER_PR_REMEDIATION_MODE`,
+        default `review_suggestion`):
+        *   **PR Scans (internal and fork)**: The fix patch is parsed into
+            contiguous RIGHT-side line ranges and posted as one-click
+            ` ```suggestion ` blocks in a single PR review. No branch is pushed.
+            Each comment embeds a `<!-- codemender-finding:<id> -->` marker,
+            which replaces remote-branch dedup across re-runs. Routing is
+            **all-or-nothing per finding**: every hunk is pre-validated against
+            `GET /pulls/{n}/files` before posting, because the REST API rejects
+            comments anchored outside a diff hunk with HTTP 422.
+        *   **Fallback when the patch is not suggestable** (new/renamed/deleted
+            files, binary patches, or hunks outside the PR diff):
+            *   *Internal PRs*: pushes `codemender/fix-<vuln_type>-<fingerprint>`
+                and opens a Child PR targeting the developer's feature branch
+                (`pr_head_ref`, populated from `GITHUB_HEAD_REF`).
+            *   *Fork PRs*: posts a Markdown comment with the patch diff and
+                local `git apply` instructions.
+        *   **`child_pr` mode**: internal PRs skip suggestions entirely and go
+            straight to the Child PR route. Fork PRs ignore the flag, since the
+            orchestrator cannot push a branch to a fork.
+        *   **Nightly / Manual Scans**: unaffected — pushes branch and opens a
+            top-level PR targeting `main`.
     *   Saves mutated `worker_${i}_state.db` to
         `.codemender_transit/shards/worker_${i}/` and uploads as run artifact.
 
@@ -400,6 +411,31 @@ following major design alternatives were evaluated and explicitly rejected:
     conditions and risks clobbering active branches. `force_overwrite` is
     strictly disabled on all PR scans and reserved exclusively for Nightly scans
     on `main`.
+
+### 13. Posting Partial Suggestions for Patches That Do Not Fully Fit the Diff
+
+-   **What was considered:** In `review_suggestion` mode, posting inline
+    suggestions for whichever hunks land inside the PR diff, and describing the
+    remaining hunks in prose.
+-   **Why it was ruled out:** `cm fix` is unconstrained — Stage 1 guarantees the
+    *finding* is in-diff, but the *fix* may touch out-of-diff lines or create
+    new files. A reviewer who commits a partially suggested patch gets code that
+    compiles against a fix that was never fully applied, silently leaving the
+    vulnerability open while the finding reads as remediated. Remediation is
+    therefore **all-or-nothing per finding**: every hunk is pre-validated
+    against `GET /pulls/{n}/files`, and a single unsuggestable hunk routes the
+    whole finding to the Child PR (internal) or patch comment (fork) fallback.
+
+### 14. Delivering One-Click Fixes via SARIF `result.fixes`
+
+-   **What was considered:** Populating the `fixes` property on SARIF results so
+    GitHub's code scanning UI renders a native "Apply fix" button, reusing the
+    existing SARIF upload path instead of adding review-comment plumbing.
+-   **Why it was ruled out:** GitHub ignores `result.fixes` on third-party SARIF
+    uploads; the "Apply fix" affordance is produced server-side by Copilot
+    Autofix and cannot be driven by an uploaded artifact. Inline ` ```suggestion `
+    blocks in a PR review are the only mechanism available to a third-party
+    integration that yields a real one-click commit.
 
 --------------------------------------------------------------------------------
 

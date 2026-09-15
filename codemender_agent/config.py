@@ -37,6 +37,15 @@ SENSITIVE_ENV_VARS = [
     "GOOGLE_CREDENTIALS",
 ]
 
+# Pull Request remediation routing modes.
+#   review_suggestion: Post inline GitHub ```suggestion review comments enabling
+#                      one-click "Commit suggestion" application on the PR.
+#   child_pr:          Push a remediation branch and open a Child Pull Request
+#                      targeting the developer's feature branch.
+PR_MODE_REVIEW_SUGGESTION = "review_suggestion"
+PR_MODE_CHILD_PR = "child_pr"
+VALID_PR_REMEDIATION_MODES = (PR_MODE_REVIEW_SUGGESTION, PR_MODE_CHILD_PR)
+
 
 @dataclass(frozen=True)
 class OrchestratorConfig:
@@ -84,6 +93,7 @@ class OrchestratorConfig:
   is_fork_pr: bool = False
   pr_number: Optional[int] = None
   fail_on_findings: bool = False
+  pr_remediation_mode: str = PR_MODE_REVIEW_SUGGESTION
 
   # Sandbox & Security Settings
   sandbox_enabled: bool = True
@@ -208,6 +218,23 @@ class OrchestratorConfig:
     else:
       fail_on_findings = False
 
+    # Parse PR remediation routing mode, falling back to the default when unset
+    # or when an unrecognized value is supplied.
+    mode_env = (os.environ.get("CODEMENDER_PR_REMEDIATION_MODE") or "").strip().lower()
+    if mode_env and mode_env not in VALID_PR_REMEDIATION_MODES:
+      logger.warning(
+          "Unrecognized CODEMENDER_PR_REMEDIATION_MODE '%s' (expected one of %s)."
+          " Falling back to '%s'.",
+          mode_env,
+          ", ".join(VALID_PR_REMEDIATION_MODES),
+          PR_MODE_REVIEW_SUGGESTION,
+      )
+    pr_remediation_mode = (
+        mode_env
+        if mode_env in VALID_PR_REMEDIATION_MODES
+        else PR_MODE_REVIEW_SUGGESTION
+    )
+
     # 7. Parse Sandbox and Cleanup Port Configurations
     sandbox_env = os.environ.get("CODEMENDER_SANDBOX_ENABLED")
     if sandbox_env is not None and sandbox_env.strip():
@@ -281,11 +308,24 @@ class OrchestratorConfig:
         is_fork_pr=is_fork_pr,
         pr_number=pr_number,
         fail_on_findings=fail_on_findings,
+        pr_remediation_mode=pr_remediation_mode,
         # Sandbox execution flags and network isolation profiles
         sandbox_enabled=sandbox_enabled,
         sandbox_network_profile=sandbox_network_profile,
         cleanup_ports=cleanup_ports,
     )
+
+
+def resolve_pr_remediation_mode(config: "OrchestratorConfig") -> str:
+  """Resolves the effective PR remediation mode for the current scan.
+
+  Fork Pull Requests always use inline review suggestions: CodeMender cannot
+  push remediation branches across the fork boundary (HTTP 403), so the
+  `pr_remediation_mode` flag only governs internal Pull Requests.
+  """
+  if config.is_fork_pr:
+    return PR_MODE_REVIEW_SUGGESTION
+  return config.pr_remediation_mode
 
 
 def get_scrubbed_env(repo_dir: Optional[str] = None) -> Dict[str, str]:

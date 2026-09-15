@@ -153,9 +153,9 @@ is triggered on a recurring schedule or against an active Pull Request:
 | **Target Base Ref** | Default branch (`main` / `master`) | PR Base branch (e.g. `main`) | PR Base branch |
 | **Scan Scope** | Entire repository (`cm find .`) | Differential: PR changed lines only | Differential: PR changed lines only |
 | **Legacy Tech Debt** | Discovered & triaged | Marked `PRE_EXISTING_IGNORED` & suppressed | Marked `PRE_EXISTING_IGNORED` & suppressed |
-| **Duplicate Handling** | Marked `SKIPPED_DUPLICATE` (kept in SARIF as `underReview`) | Skipped if fix branch/PR exists | Skipped if fix branch/PR exists |
-| **Remediation Action** | Pushes `codemender/fix-...` & opens PR to `main` | Pushes `codemender/fix-...` & opens Child PR to developer branch | Posts Markdown review comment with diff on Fork PR |
-| **Reporting Output** | Full SARIF alert inventory, HTML, JSON, Step Summary | PR-scoped SARIF, Child PR, Step Summary | PR-scoped SARIF, PR Review Comment, Step Summary |
+| **Duplicate Handling** | Marked `SKIPPED_DUPLICATE` (kept in SARIF as `underReview`) | Skipped if a suggestion was already posted (or, in `child_pr` mode, if the fix branch/PR exists) | Skipped if a suggestion was already posted |
+| **Remediation Action** | Pushes `codemender/fix-...` & opens PR to `main` | Posts one-click inline review suggestions on the PR (default); falls back to a Child PR when the patch cannot be suggested inline | Posts one-click inline review suggestions on the Fork PR; falls back to a Markdown patch comment |
+| **Reporting Output** | Full SARIF alert inventory, HTML, JSON, Step Summary | PR-scoped SARIF, inline suggestions, sticky summary comment, Step Summary | PR-scoped SARIF, inline suggestions, sticky summary comment, Step Summary |
 
 --------------------------------------------------------------------------------
 
@@ -974,6 +974,14 @@ on:
         required: false
         default: false
         type: boolean
+      pr_remediation_mode:
+        description: 'How PR scan fixes are delivered (review_suggestion = one-click inline suggestions, child_pr = fix branch + Child PR)'
+        required: false
+        default: 'review_suggestion'
+        type: choice
+        options:
+          - review_suggestion
+          - child_pr
       model:
         description: 'Default Gemini model across all stages (leave empty for CodeMender default)'
         required: false
@@ -1048,7 +1056,25 @@ jobs:
       max_tasks: ${{ inputs.max_tasks && fromJson(inputs.max_tasks) || 6 }}
 
       # =======================================================================
-      # 4. AI MODEL CONFIGURATION (OPTIONAL)
+      # 4. PULL REQUEST REMEDIATION ROUTING
+      # =======================================================================
+      # Controls how Stage 2 delivers fixes on Pull Request scans.
+      #   'review_suggestion' - Posts the patch as inline GitHub "suggestion" review blocks.
+      #                         Reviewers apply the fix with a single "Commit suggestion" click,
+      #                         and no 'codemender/fix-...' branches are created.
+      #                         Falls back to 'child_pr' when a patch cannot be expressed as a
+      #                         suggestion (new/deleted/renamed/binary files, or hunks that land
+      #                         outside the PR diff).
+      #   'child_pr'          - Pushes a 'codemender/fix-...' branch and opens a Child Pull
+      #                         Request targeting the scanned PR's head branch.
+      # ⚠️ Fallback Default ('review_suggestion'): Applies to all automated PR scans.
+      # Note: This input has no effect on Nightly/full-repo scans (which always open standard PRs),
+      # and Fork PRs always use 'review_suggestion' regardless of this setting, since the
+      # workflow cannot push branches to a contributor's fork.
+      pr_remediation_mode: ${{ inputs.pr_remediation_mode || 'review_suggestion' }}
+
+      # =======================================================================
+      # 5. AI MODEL CONFIGURATION (OPTIONAL)
       # =======================================================================
       # ⚠️ Fallback Defaults: During automated PR and Nightly scans, inputs.* is null.
       # If you want a specific model used on PR scans, specify it as the fallback value after '||'.
@@ -1062,7 +1088,7 @@ jobs:
 
     secrets:
       # =======================================================================
-      # 5. GCP AUTHENTICATION (CHOOSE WIF OR STATIC SA KEY)
+      # 6. GCP AUTHENTICATION (CHOOSE WIF OR STATIC SA KEY)
       # =======================================================================
       # Option A: Workload Identity Federation (WIF) - RECOMMENDED (Keyless)
       gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -1072,7 +1098,7 @@ jobs:
       # gcp_sa_key: ${{ secrets.GCP_SA_KEY }}
 
       # =======================================================================
-      # 6. GITHUB AUTHENTICATION (CHOOSE GITHUB APP OR CUSTOM PAT)
+      # 7. GITHUB AUTHENTICATION (CHOOSE GITHUB APP OR CUSTOM PAT)
       # =======================================================================
       # Option A: GitHub App Credentials - RECOMMENDED (Bypasses branch protection & posts as bot)
       github_app_id: ${{ secrets.GH_APP_ID }}
@@ -1318,6 +1344,7 @@ Build and push your image to GitHub Container Registry
 | `report_artifact_retention_days` | `number` | `90` | Retention period (days) for final HTML, JSON, and SARIF triage reports. |
 | `upload_sarif` | `boolean` | `true` | Upload generated `report.sarif` findings to GitHub Security Tab. |
 | `fail_on_findings` | `boolean` | `true` *(on PR)*, `false` *(on Nightly)* | Exit with non-zero code in Stage 3 if actionable vulnerabilities are detected on PR diff. |
+| `pr_remediation_mode` | `string` | `review_suggestion` | How PR scan fixes are delivered. `review_suggestion` posts one-click inline suggestions on the PR; `child_pr` pushes a fix branch and opens a Child Pull Request. Fork PRs always use `review_suggestion`. |
 | `model` | `string` | `""` *(CodeMender default)* | Global Gemini model override across all stages. Check up-to-date defaults & supported models [here](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model). |
 | `find_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 1 vulnerability discovery (`cm find`). |
 | `verify_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 2 exploit verification (`cm verify`). |
@@ -1348,6 +1375,7 @@ Build and push your image to GitHub Container Registry
 | `CODEMENDER_VERIFY_MODEL` | *(inherits base)* | Dedicated model override for Stage 2 exploit PoC generation & verification. |
 | `CODEMENDER_FIX_MODEL` | *(inherits base)* | Dedicated model override for Stage 2 code patch synthesis (`cm fix`). |
 | `CODEMENDER_FAIL_ON_FINDINGS` | `true` *(on PR)*, `false` *(on Nightly)* | Exit with non-zero status in Stage 3 if actionable vulnerabilities are detected on PR. |
+| `CODEMENDER_PR_REMEDIATION_MODE` | `review_suggestion` | PR scan remediation route: `review_suggestion` (one-click inline suggestions) or `child_pr` (fix branch + Child Pull Request). Ignored on fork PRs, which always use `review_suggestion`. Unrecognized values fall back to `review_suggestion`. |
 | `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | `false` | When `true`, skips dynamic exploit verification and generates patches directly. |
 | `CODEMENDER_SANDBOX_ENABLED` | `true` | Enable `cm` process namespace and filesystem isolation. |
 | `CODEMENDER_SANDBOX_NETWORK_PROFILE` | `permissive-open` | Sandbox network policy (`permissive-open` or `restricted-local`). |
