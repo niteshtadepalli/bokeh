@@ -70,6 +70,7 @@ when running in Docker or Cloud Run.
 *   `CODEMENDER_VERIFY_MODEL`: Overrides the LLM model specifically for the Stage 2 verification (`cm verify`) phase.
 *   `CODEMENDER_FIX_MODEL`: Overrides the LLM model specifically for the Stage 2 fix (`cm fix`) phase.
 *   `CODEMENDER_SKIP_EXPLOIT_VERIFICATION`: Set to `"true"` to append `--skip-exploit-verification` during the verification phase, skipping compilation and execution of exploits.
+*   `CODEMENDER_SKIP_VERIFY`: Set to `"false"` to run `cm verify` before `cm fix`. Defaults to `"true"`, which skips the verification phase and proceeds directly to patch synthesis.
 
 ### Execution Modes
 

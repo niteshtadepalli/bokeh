@@ -472,71 +472,78 @@ def _process_finding(
       return
 
   # 2. Verification Retry Loop (Executes 'cm verify' with port cleanup)
-  max_verify_attempts = 3
-  verified = False
+  if not config.skip_verify:
+    max_verify_attempts = 3
+    verified = False
 
-  for attempt in range(1, max_verify_attempts + 1):
-    logger.info(
-        "Verifying finding %s (Attempt %d/%d)...",
-        finding_id,
-        attempt,
-        max_verify_attempts,
-    )
-    # Free configured development ports before running probers/exploit verification
-    for port in get_cleanup_ports(config=config):
-      free_port(port)
-
-    # Reset repository workspace to clean state before running verify
-    run_command(["git", "checkout", "-f", working_base_ref], cwd=repo_dir)
-    clean_workspace(repo_dir)
-
-    # Execute 'cm verify' command
-    verify_cmd = build_cm_command(
-        cm_binary, "verify", finding_id, cli_version=cli_version
-    )
-    verify_res = run_command(
-        verify_cmd,
-        cwd=repo_dir,
-        env=scrubbed_env,
-        check=False,
-    )
-    token_usage = getattr(verify_res, "token_usage", None)
-    if isinstance(token_usage, dict):
-      accumulate_model_token_usage(
-          worker_token_usage, verify_model, token_usage
+    for attempt in range(1, max_verify_attempts + 1):
+      logger.info(
+          "Verifying finding %s (Attempt %d/%d)...",
+          finding_id,
+          attempt,
+          max_verify_attempts,
       )
+      # Free configured development ports before running probers/exploit verification
+      for port in get_cleanup_ports(config=config):
+        free_port(port)
 
-    # Free cleanup ports after verification completes
-    for port in get_cleanup_ports(config=config):
-      free_port(port)
+      # Reset repository workspace to clean state before running verify
+      run_command(["git", "checkout", "-f", working_base_ref], cwd=repo_dir)
+      clean_workspace(repo_dir)
 
-    # Check whether the verification succeeded and state.db reflects verification
-    if verify_res.returncode == 0 and is_finding_verified(
-        state_db_path, finding_id
-    ):
-      logger.info("Successfully verified finding %s.", finding_id)
-      verified = True
-      break
-    else:
-      logger.warning(
-          "Attempt %d failed to verify finding %s.", attempt, finding_id
+      # Execute 'cm verify' command
+      verify_cmd = build_cm_command(
+          cm_binary, "verify", finding_id, cli_version=cli_version
       )
-      if attempt < max_verify_attempts:
-        time.sleep(5)
+      verify_res = run_command(
+          verify_cmd,
+          cwd=repo_dir,
+          env=scrubbed_env,
+          check=False,
+      )
+      token_usage = getattr(verify_res, "token_usage", None)
+      if isinstance(token_usage, dict):
+        accumulate_model_token_usage(
+            worker_token_usage, verify_model, token_usage
+        )
 
-  if not verified:
-    logger.error(
-        "Verification failed for finding %s. Skipping fix.", finding_id
-    )
+      # Free cleanup ports after verification completes
+      for port in get_cleanup_ports(config=config):
+        free_port(port)
+
+      # Check whether the verification succeeded and state.db reflects verification
+      if verify_res.returncode == 0 and is_finding_verified(
+          state_db_path, finding_id
+      ):
+        logger.info("Successfully verified finding %s.", finding_id)
+        verified = True
+        break
+      else:
+        logger.warning(
+            "Attempt %d failed to verify finding %s.", attempt, finding_id
+        )
+        if attempt < max_verify_attempts:
+          time.sleep(5)
+
+    if not verified:
+      logger.error(
+          "Verification failed for finding %s. Skipping fix.", finding_id
+      )
+      sanitize_exploit_and_artifacts(
+          repo_dir, codemender_home=os.path.dirname(state_db_path)
+      )
+      return
+
+    # Sanitize any accidental package/build caches from .exploit before fix starts
     sanitize_exploit_and_artifacts(
         repo_dir, codemender_home=os.path.dirname(state_db_path)
     )
-    return
-
-  # Sanitize any accidental package/build caches from .exploit before fix starts
-  sanitize_exploit_and_artifacts(
-      repo_dir, codemender_home=os.path.dirname(state_db_path)
-  )
+  else:
+    logger.info(
+        "Skipping 'cm verify' for finding %s (skip_verify=True). Proceeding"
+        " directly to fix.",
+        finding_id,
+    )
 
   # 3. Apply Automated Fix (Executes 'cm fix' with up to 3 attempts)
   max_fix_attempts = 3

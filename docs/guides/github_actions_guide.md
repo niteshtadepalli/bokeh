@@ -148,8 +148,8 @@ is triggered on a recurring schedule or against an active Pull Request:
 
 | Feature | Scheduled Nightly Scan | Internal Pull Request Scan | Fork Pull Request Scan |
 | :--- | :--- | :--- | :--- |
-| **Trigger Event** | `schedule` (cron) / `workflow_dispatch` | `pull_request` (`types: [labeled]`) | `pull_request` (`types: [labeled]`) |
-| **Activation Condition** | Cron triggers on default branch | `codemender-scan` label on PR | `codemender-scan` label on PR |
+| **Trigger Event** | `schedule` (cron) / `workflow_dispatch` | `pull_request` (`types: [opened, reopened, labeled, synchronize]`) | `pull_request` (`types: [opened, reopened, labeled, synchronize]`) |
+| **Activation Condition** | Cron triggers on default branch | New PR targeting `main`/`master` OR `codemender-scan` label on any branch | New PR targeting `main`/`master` OR `codemender-scan` label on any branch |
 | **Target Base Ref** | Default branch (`main` / `master`) | PR Base branch (e.g. `main`) | PR Base branch |
 | **Scan Scope** | Entire repository (`cm find .`) | Differential: PR changed lines only | Differential: PR changed lines only |
 | **Legacy Tech Debt** | Discovered & triaged | Marked `PRE_EXISTING_IGNORED` & suppressed | Marked `PRE_EXISTING_IGNORED` & suppressed |
@@ -194,11 +194,10 @@ Pull Request scans ensure that no new security vulnerabilities are merged into
 the codebase, while preventing legacy repository debt from blocking developer
 pull requests.
 
-1.  **Triggering & Labeling (`types: [labeled]`)**:
-    *   Activates on `pull_request` events when the **`codemender-scan`** label
-        is attached.
-    *   **Zero Noise**: Using `types: [labeled]` avoids spawning 1-second
-        "Skipped" runs when regular PRs are opened or pushed to.
+1.  **Dual-Trigger Architecture**:
+    *   **Automatic Scan**: Automatically scans any new or reopened PR targeting `main` or `master`.
+    *   **On-Demand Scan**: Can be triggered on any PR (including feature and release branches) by adding the **`codemender-scan`** label.
+    *   **Iterative Re-scan**: Automatically re-scans on new commits pushed to active PRs (`synchronize`), auto-canceling obsolete in-flight runs via concurrency.
 2.  **Differential PR Scanning & Deduplication**:
     *   Calculates merge-base diff hunks (`git diff -U0 origin/<base>...HEAD`)
         to isolate modified lines.
@@ -837,12 +836,12 @@ Create `.github/workflows/codemender.yml` in your target repository:
 > automatically to all PR and Nightly runs!
 
 > [!TIP]
-> **Customizing Pull Request Triggers**: By default, CodeMender triggers
-> on-demand when the `codemender-scan` label is added to a PR (`types:
-> [labeled]`). To configure automatic label application, alternative trigger
-> patterns (such as scanning on commit push or scanning every PR), or file path
-> filtering, see
-> [Section 8: Pull Request Trigger Reference & Patterns](#8-appendix-pull-request-trigger-reference--patterns).
+> **Customizing Pull Request Triggers**: By default, CodeMender uses the
+> **Dual-Trigger** pattern (`types: [opened, reopened, labeled, synchronize]`),
+> which auto-scans new PRs targeting `main`/`master` and allows on-demand
+> `codemender-scan` labeling on any branch. To configure alternative trigger
+> patterns (such as pure label-gating, ready-for-review only, or path filtering),
+> see [Section 8: Pull Request Trigger Reference & Patterns](#8-appendix-pull-request-trigger-reference--patterns).
 
 ### Example 1: Production Standard Workflow (Scheduled & Pull Request CI)
 
@@ -865,15 +864,12 @@ on:
     - cron: '0 2 * * 0'
 
   # ---------------------------------------------------------------------------
-  # 2. Pull Request Scanning ("Clean as You Code")
+  # 2. Pull Request Scanning (Dual-Trigger: Auto on main/master + On-Demand Label)
   # ---------------------------------------------------------------------------
   pull_request:
-    # Trigger on-demand when 'codemender-scan' label is added to a PR.
-    # (To configure scans on push, scan-every-PR, or path filters, see Section 8).
-    types: [labeled]
-
-    # Target base branches to guard (e.g. main, master, release/*)
-    branches: [main, master]
+    # Trigger on new PRs, commit pushes, and on-demand 'codemender-scan' label.
+    # (Do NOT restrict branches here so on-demand labeling works on any branch, e.g. develop).
+    types: [opened, reopened, labeled, synchronize]
 
   # ---------------------------------------------------------------------------
   # 3. Manual On-Demand Trigger (GitHub UI / gh CLI)
@@ -893,11 +889,18 @@ permissions:
 
 jobs:
   remediate:
-    # Execution Guard: Run on Schedule, Manual Dispatch, or PRs with 'codemender-scan' label
+    # Execution Guard:
+    # 1. Runs on Schedule and Manual Dispatch
+    # 2. Runs on ANY branch when labeled 'codemender-scan'
+    # 3. Runs AUTOMATICALLY on new/reopened PRs targeting main or master
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'codemender-scan') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (github.base_ref == 'main' || github.base_ref == 'master'))
+      ))
 
     # -------------------------------------------------------------------------
     # Reusable Orchestrator Workflow Call:
@@ -972,6 +975,11 @@ on:
         description: 'Skip dynamic exploit verification (cm verify --skip-exploit-verification)'
         required: false
         default: false
+        type: boolean
+      skip_verify:
+        description: 'Skip Stage 2 verification phase (cm verify) and proceed directly to patch synthesis (cm fix)'
+        required: false
+        default: true
         type: boolean
       pr_remediation_mode:
         description: 'How PR scan fixes are delivered (review_suggestion = one-click inline suggestions, child_pr = fix branch + Child PR)'
@@ -1050,6 +1058,10 @@ jobs:
       # Optional: Skip dynamic exploit verification during Stage 2 (cm verify --skip-exploit-verification).
       # ⚠️ Fallback Default (false): Generates & verifies PoC exploits dynamically before synthesis.
       skip_exploit_verification: ${{ inputs.skip_exploit_verification || false }}
+
+      # Optional: Skip Stage 2 verification phase (cm verify) and proceed directly to patch synthesis (cm fix).
+      # ⚠️ Fallback Default (true): Skips cm verify by default for faster remediation. Set to false to enforce exploit/test verification.
+      skip_verify: ${{ inputs.skip_verify != false }}
 
       # =======================================================================
       # 3. PARALLELISM & CONCURRENCY
@@ -1361,6 +1373,7 @@ Build and push your image to GitHub Container Registry
 | `verify_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 2 exploit verification (`cm verify`). |
 | `fix_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 2 patch synthesis (`cm fix`). |
 | `skip_exploit_verification` | `boolean` | `false` | When `true`, skips dynamic exploit verification (`cm verify --skip-exploit-verification`) and generates patches directly. |
+| `skip_verify` | `boolean` | `true` | When `true` (default), skips the `cm verify` phase and proceeds directly to patch synthesis (`cm fix`). Set to `false` to enforce exploit/test verification. |
 
 ---
 
@@ -1388,6 +1401,7 @@ Build and push your image to GitHub Container Registry
 | `CODEMENDER_FAIL_ON_FINDINGS` | `true` *(on PR)*, `false` *(on Nightly)* | Exit with non-zero status in Stage 3 if actionable vulnerabilities are detected on PR. |
 | `CODEMENDER_PR_REMEDIATION_MODE` | `review_suggestion` | PR scan remediation route: `review_suggestion` (one-click inline suggestions) or `child_pr` (fix branch + Child Pull Request). Ignored on fork PRs, which always use `review_suggestion`. Unrecognized values fall back to `review_suggestion`. |
 | `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | `false` | When `true`, skips dynamic exploit verification and generates patches directly. |
+| `CODEMENDER_SKIP_VERIFY` | `true` | When `true` (default), skips `cm verify` and proceeds directly to `cm fix`. Set to `false` to run verification before fix. |
 | `CODEMENDER_SANDBOX_ENABLED` | `true` | Enable `cm` process namespace and filesystem isolation. |
 | `CODEMENDER_SANDBOX_NETWORK_PROFILE` | `permissive-open` | Sandbox network policy (`permissive-open` or `restricted-local`). |
 | `CODEMENDER_FORCE_OVERWRITE` | `false` | When `true`, overwrites existing branches and PRs instead of skipping duplicates. |

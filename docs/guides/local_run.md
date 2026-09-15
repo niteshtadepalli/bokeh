@@ -162,6 +162,7 @@ export CODEMENDER_CLI_VERSION="preview"
 export CODEMENDER_MODEL="gemini-2.5-flash"
 # export CODEMENDER_FIND_MODEL="gemini-2.5-pro"
 # export CODEMENDER_SKIP_EXPLOIT_VERIFICATION="true"
+# export CODEMENDER_SKIP_VERIFY="false" # Set to false to run cm verify before cm fix (default: true)
 ```
 
 > [!NOTE]

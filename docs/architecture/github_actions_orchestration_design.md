@@ -160,10 +160,9 @@ full support for **Bring-Your-Own-Image (BYOI)** custom toolchains.
     *   Scans are strictly triggered in three ways only:
         1.  **Manual trigger** (`workflow_dispatch`)
         2.  **Nightly scan** (`schedule` on default branch)
-        3.  **Pull Requests targeting `main`/`master`** — every such PR is
-            scanned automatically on open, push, and reopen
-            (`types: [opened, synchronize, reopened]`). Deployments that prefer
-            narrower coverage can gate on a `codemender-scan` label instead.
+        3.  **Pull Requests** — Dual-Trigger architecture scans every new/reopened
+            PR targeting `main`/`master` automatically (`types: [opened, reopened, synchronize]`)
+            while allowing on-demand scanning on any branch via the `codemender-scan` label.
     *   **Internal PR Scans**: Run with secure access to repository secrets.
         Propose remediation via one-click inline review suggestions, falling
         back to Child PRs targeting the developer's feature branch
@@ -893,7 +892,7 @@ repository to implement native GitHub Actions support.
 
 | Dimension | GCP Cloud Run Mode (Existing) | GitHub Actions Mode (New) |
 | :--- | :--- | :--- |
-| **Trigger Mechanism** | Cloud Scheduler $\rightarrow$ Cloud Workflows JSON payload | GitHub Schedule (cron), `workflow_dispatch`, or any `pull_request` to `main`/`master` |
+| **Trigger Mechanism** | Cloud Scheduler $\rightarrow$ Cloud Workflows JSON payload | GitHub Schedule (cron), `workflow_dispatch`, or Dual-Trigger `pull_request` |
 | **Control Plane** | Google Cloud Workflows (`gcp_parallel_workflow.yaml`) | GHA Reusable Workflow (`.github/workflows/codemender_parallel.yml`) |
 | **Worker Scaling** | Cloud Run Job Task Array (`taskCount: N`) | GHA Dynamic Matrix (`strategy.matrix: [0..N-1]`, `fail-fast: false`) |
 | **State Transit** | Google Cloud Storage Bucket + Signed URLs | GHA Run Artifacts v4 (`.codemender_transit/shards/worker_${i}/`) |
@@ -901,8 +900,8 @@ repository to implement native GitHub Actions support.
 | **Backend Auth** | Cloud Run Service Account (built-in) | Workload Identity Federation (OIDC) or SA Key JSON |
 | **Token Lifecycle** | Secret Manager (`GITHUB_APP_TOKEN`) | `actions/create-github-app-token@v1` or `GITHUB_TOKEN` ($\le 55\text{ min}$ timeout) |
 | **Nightly Remediation** | Top-level PRs against `main` (`codemender/fix-...`) | Top-level PRs against `main` (`codemender/fix-...`) |
-| **Internal PR Remediation** | N/A | **Child PRs targeting developer's feature branch (`pr_head_ref`)** |
-| **Fork PR Remediation** | N/A | **Markdown review comments on Fork PR (`pr_number`) with diff & apply** |
+| **Internal PR Remediation** | N/A | **One-click inline review suggestions (default) or Child PRs targeting `pr_head_ref`** |
+| **Fork PR Remediation** | N/A | **One-click inline review suggestions (default) or Markdown comments on Fork PR** |
 | **PR Finding Scope** | N/A | **Differential PR Scan (Untouched findings ignored & omitted from PR reports)** |
 | **Staging Mechanism** | `git add -u` | **Surgical Staging (`patches.edited_files` with 3-tier fallback)** |
 | **Reporting Surfaces** | GCS HTML Report (Signed URL in logs) | Scoped SARIF (Security Tab) + `$GITHUB_STEP_SUMMARY` + GHA Artifact |

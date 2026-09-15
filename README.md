@@ -57,9 +57,9 @@ inside your own secure container runners across a scalable, 3-stage pipeline:
         (registered in `.git/info/exclude`) and automatically prunes
         non-reproduction build caches from `.exploit/` and artifacts before
         synthesis to prevent artifact bloat.
-    -   For each finding, the worker verifies exploitability (`cm verify`, with
-        optional `--skip-exploit-verification`), synthesizes and validates an
-        automated patch (`cm fix`), and pushes a dedicated branch to GitHub.
+    -   For each finding, the worker optionally verifies exploitability (`cm verify`,
+        gated by `skip_verify` which defaults to skipping verify), synthesizes and
+        validates an automated patch (`cm fix`), and pushes a dedicated branch to GitHub.
     -   Opens a Child Pull Request targeting the feature/default branch (or
         posts a detailed review comment on Fork PRs) with **transactional
         rollback** (pruning the remote branch if PR creation fails) and exports

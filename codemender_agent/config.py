@@ -58,6 +58,7 @@ class OrchestratorConfig:
   verify_model: Optional[str] = None
   fix_model: Optional[str] = None
   skip_exploit_verification: bool = False
+  skip_verify: bool = True
 
   # Workspace & Execution Environment
   workspace_dir: str = ""
@@ -114,6 +115,10 @@ class OrchestratorConfig:
     skip_exploit = (
         os.environ.get("CODEMENDER_SKIP_EXPLOIT_VERIFICATION", "false").lower()
         == "true"
+    )
+    skip_verify = (
+        os.environ.get("CODEMENDER_SKIP_VERIFY", "true").strip().lower()
+        in ("true", "1", "yes")
     )
 
     # 2. Parse Workspace Directories and Runner Step Outputs
@@ -277,6 +282,7 @@ class OrchestratorConfig:
         verify_model=verify_model,
         fix_model=fix_model,
         skip_exploit_verification=skip_exploit,
+        skip_verify=skip_verify,
         # Execution environment and worker coordinates
         workspace_dir=workspace_dir,
         worker_index=worker_index,

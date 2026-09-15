@@ -395,6 +395,7 @@ You can override LLM models per stage when executing jobs or triggering Workflow
 *   **Global Model Override**: `--update-env-vars="CODEMENDER_MODEL=gemini-2.5-flash"`
 *   **Stage-Specific Overrides**: `--update-env-vars="CODEMENDER_FIND_MODEL=gemini-2.5-pro,CODEMENDER_FIX_MODEL=gemini-2.5-flash"`
 *   **Skip Exploit Verification**: `--update-env-vars="CODEMENDER_SKIP_EXPLOIT_VERIFICATION=true"` (bypasses compilation/execution of exploits during verification phase).
+*   **Skip Verification Phase**: `--update-env-vars="CODEMENDER_SKIP_VERIFY=false"` (enforces running `cm verify` before `cm fix`; default is `true` which skips verification).
 
 ### Scaling Storage Beyond 10GB
 
