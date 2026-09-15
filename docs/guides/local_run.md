@@ -162,6 +162,8 @@ export CODEMENDER_CLI_VERSION="preview"
 export CODEMENDER_MODEL="gemini-2.5-flash"
 # export CODEMENDER_FIND_MODEL="gemini-2.5-pro"
 # export CODEMENDER_SKIP_EXPLOIT_VERIFICATION="true"
+# export CODEMENDER_SKIP_VERIFY="false" # Set to false to run cm verify before cm fix (default: true)
+# export CODEMENDER_PR_REMEDIATION_MODE="review_suggestion" # "review_suggestion" (default) or "child_pr"
 ```
 
 > [!NOTE]
@@ -192,8 +194,6 @@ If the run is successful, you should see logs showing:
 2.  Git committer identity configured.
 3.  The codebase scanned for findings.
 4.  For each finding:
-    -   Branch created locally (`codemender/fix-...`).
-    -   Fix generated and staged (`git add -u`).
-    -   Branch pushed to GitHub.
-    -   Pull Request opened on GitHub (with PR URL printed in logs).
+    -   Fix synthesized with `cm fix` (or optionally verified first if `CODEMENDER_SKIP_VERIFY="false"`).
+    -   Remediation applied via inline review suggestions on PR diff, or dedicated fix branch pushed and Pull Request opened on GitHub (with PR URL printed in logs).
 5.  Clean workspace reset back to default branch.

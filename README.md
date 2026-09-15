@@ -57,13 +57,13 @@ inside your own secure container runners across a scalable, 3-stage pipeline:
         (registered in `.git/info/exclude`) and automatically prunes
         non-reproduction build caches from `.exploit/` and artifacts before
         synthesis to prevent artifact bloat.
-    -   For each finding, the worker verifies exploitability (`cm verify`, with
-        optional `--skip-exploit-verification`), synthesizes and validates an
-        automated patch (`cm fix`), and pushes a dedicated branch to GitHub.
-    -   Opens a Child Pull Request targeting the feature/default branch (or
-        posts a detailed review comment on Fork PRs) with **transactional
-        rollback** (pruning the remote branch if PR creation fails) and exports
-        its local SQLite state database shard and token telemetry.
+    -   For each finding, the worker optionally verifies exploitability (`cm verify`,
+        gated by `skip_verify` which defaults to skipping verify), synthesizes and
+        validates an automated patch (`cm fix`), and delivers remediation according
+        to `pr_remediation_mode` (defaulting to one-click inline review suggestions on
+        the PR diff, or pushing a dedicated branch and opening a Child Pull Request
+        with **transactional rollback** if PR creation fails) and exports its local
+        SQLite state database shard and token telemetry.
 3.  **Stage 3: Aggregator & Reporter (`runners/aggregate.py`)**:
     -   Collects all worker database shards and token usage files.
     -   Merges database shards via `SQLite ATTACH` and schema unification.
@@ -84,7 +84,7 @@ inside your own secure container runners across a scalable, 3-stage pipeline:
 
 ```mermaid
 graph TD
-    Trigger([Trigger: Schedule, Dispatch, or PR Label 'codemender-scan']) --> S1
+    Trigger([Trigger: Schedule, Dispatch, or Pull Request to main/master]) --> S1
 
     subgraph "Stage 1: Coordinator (Scan & Partition)"
         S1[1. Checkout Repository & Pin target_sha] --> S1Scan[2. Run Vulnerability Discovery<br/>'cm find .']
@@ -108,9 +108,9 @@ graph TD
         WLoop --> WVerify[10. Verify Exploitability<br/>'cm verify' / skip-verify]
         WVerify --> WCleanCache[11. Sanitize Exploit Caches]
         WCleanCache --> WFix[12. Generate & Validate Patch<br/>'cm fix']
-        WFix --> WType{Target PR Type?}
-        WType -- "Internal PR / Nightly" --> WPR[13a. Push Branch & Open Child PR<br/>Transactional Rollback on Error]
-        WType -- "Fork PR" --> WComment[13b. Post Review Comment with Patch]
+        WFix --> WType{Remediation Mode / Target PR?}
+        WType -- "PR Scan (review_suggestion / Fork)" --> WComment[13a. Post Inline Suggestion / Review Comment]
+        WType -- "Nightly / child_pr" --> WPR[13b. Push Branch & Open Child / Top-level PR<br/>Transactional Rollback on Error]
         WPR --> WLoop
         WComment --> WLoop
         WLoop -- Done --> WUpload[14. Upload SQLite DB Shard & Token Telemetry]
@@ -154,8 +154,8 @@ multiple environments via `codemender_agent/storage.py`:
 *   **Automated GCP WIF & GitHub Configuration**: The repository provides an
     automated Terraform module at [`terraform/gha_wif/`](terraform/gha_wif/)
     that provisions GCP Workload Identity Federation (WIF), IAM Service Accounts
-    with `roles/aiplatform.user`, repository `codemender-scan` PR trigger
-    labels, and non-sensitive GitHub Actions secrets
+    with `roles/aiplatform.user`, the optional `codemender-scan` PR trigger
+    label, and non-sensitive GitHub Actions secrets
     (`GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GH_APP_ID`).
 *   **Decoupled Secret Injection**: Sensitive credentials (such as the GitHub
     App private key `GH_APP_PRIVATE_KEY`) are injected out-of-band via GitHub
@@ -179,11 +179,11 @@ optimized for CI/CD developer feedback and ongoing repository health:
 
 | Feature | Scheduled Nightly Scan | Pull Request Scan ("Clean as You Code") |
 | :--- | :--- | :--- |
-| **Trigger** | Schedule (`schedule.cron`) or manual (`workflow_dispatch`) | Pull Request labeled (`codemender-scan`), opened, or synchronized |
+| **Trigger** | Schedule (`schedule.cron`) or manual (`workflow_dispatch`) | Any Pull Request opened, synchronized, or reopened against `main`/`master` |
 | **Scope** | Full repository audit against default branch (`main`) | **Differential scan**: Analyzes only lines changed in the PR merge-base diff |
 | **Base Ref** | Default branch head commit | Pull Request target base ref (`origin/<base_ref>`) |
-| **Remediation** | Opens PRs targeting default branch (`main`) | Opens Child PRs targeting the developer's PR feature branch (`pr_head_ref`) |
-| **Fork PRs** | N/A (runs on upstream repository) | Posts an inline PR review comment with patch diff and git apply commands |
+| **Remediation** | Opens PRs targeting default branch (`main`) | Posts one-click inline review suggestions on the PR; falls back to a Child PR targeting the developer's feature branch (`pr_head_ref`) |
+| **Fork PRs** | N/A (runs on upstream repository) | Same one-click inline suggestions; falls back to a Markdown comment with the patch diff and `git apply` commands |
 | **Alerts & SARIF** | Uploads full SARIF alert inventory with `underReview` suppressions | Scoped SARIF upload creating inline annotations on PR **Files changed** and **Checks** tabs |
 | **Quality Gate** | Non-blocking (informational audit & remediation pipeline) | **Blocking Quality Gate** via dedicated Commit Status (`CodeMender / Security Gate`) & `fail_on_findings=true` |
 | **Step Summary** | Full repository finding breakdown with LLM token metrics | Scoped PR table with Severity badges, CWE IDs, hyperlinked PRs, and `⚡ LLM Token Usage Summary` |
@@ -195,9 +195,10 @@ optimized for CI/CD developer feedback and ongoing repository health:
 *   **Mode B: Pull Request CI/CD ("Clean as You Code")**: Designed for
     shift-left security. By calculating `git diff -U0 origin/<base>...HEAD`,
     CodeMender isolates vulnerabilities introduced by the PR, ignores
-    pre-existing legacy issues to avoid developer fatigue, opens child PRs
-    directly against the feature branch, and enforces a dedicated Commit Status
-    check before merge.
+    pre-existing legacy issues to avoid developer fatigue, posts one-click
+    inline review suggestions directly on the PR diff (or opens child PRs
+    when configured via `pr_remediation_mode: child_pr`), and enforces a dedicated
+    Commit Status check before merge.
 
 ### 2. Google Cloud Platform (GCP) Deployment
 
@@ -223,7 +224,7 @@ optimized for CI/CD developer feedback and ongoing repository health:
 -   **Credential Scrubbing**: `orchestrator.py` explicitly scrubs sensitive
     credentials (`GITHUB_APP_TOKEN`, `GITHUB_PAT`, `GITHUB_TOKEN`, `GH_TOKEN`,
     `GITHUB_SECRET`, `GCP_SA_KEY`) from the subprocess environment before
-    invoking `cm` commands (`cm verify`, `cm fix`) to eliminate remote code
+    invoking `cm` commands (`cm fix` / `cm verify`) to eliminate remote code
     execution (RCE) exfiltration risks.
 -   **Single-Sync Git Rule & Commit Pinning**: The orchestrator synchronizes the
     repository only once during Stage 1 (`git clone`). On Pull Request scans,

@@ -150,7 +150,7 @@ class TestWorkerRunner(unittest.TestCase):
       elif "fix" in cmd_str and "fid-1" in cmd_str:
         fix_called = True
 
-    self.assertTrue(verify_called)
+    self.assertFalse(verify_called)
     self.assertTrue(fix_called)
     mock_create_pr.assert_called_once()
     mock_upload_to_url.assert_any_call(
@@ -173,6 +173,103 @@ class TestWorkerRunner(unittest.TestCase):
           meta_data["finding_prs"].get("fid-1"),
           "https://github.com/org/repo/pull/42",
       )
+
+  @unittest.mock.patch("codemender_agent.runners.worker.run_command")
+  @unittest.mock.patch("codemender_agent.runners.worker.download_from_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.upload_to_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.check_remote_branch_exists")
+  @unittest.mock.patch("codemender_agent.runners.worker.push_branch_to_remote")
+  @unittest.mock.patch("codemender_agent.runners.worker.create_pull_request")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_duplicate_pr")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_finding_verified")
+  @unittest.mock.patch("codemender_agent.runners.worker.get_finding_status")
+  @unittest.mock.patch("tarfile.open")
+  @unittest.mock.patch("shutil.which")
+  def test_worker_pipeline_with_verify_enabled(
+      self,
+      mock_which,
+      _mock_tarfile_open,
+      mock_get_finding_status,
+      mock_is_finding_verified,
+      mock_is_duplicate_pr,
+      mock_create_pr,
+      mock_push_branch,
+      mock_check_remote_branch_exists,
+      mock_upload_to_url,
+      mock_download_from_url,
+      mock_run_cmd,
+  ):
+    """Verify worker pipeline executes 'cm verify' when CODEMENDER_SKIP_VERIFY is false."""
+    mock_which.return_value = "/bin/cm"
+    mock_check_remote_branch_exists.return_value = False
+    mock_is_duplicate_pr.return_value = False
+    mock_is_finding_verified.return_value = True
+    mock_get_finding_status.return_value = "FIXED"
+    mock_create_pr.return_value = "https://github.com/org/repo/pull/42"
+
+    def download_side_effect(url, dest_path):
+      if "partition" in url:
+        with open(dest_path, "w") as f:
+          json.dump({"partition_index": 0, "finding_ids": ["fid-1"]}, f)
+        return True
+      elif "base.tar.gz" in url:
+        return True
+      return False
+
+    mock_download_from_url.side_effect = download_side_effect
+    mock_upload_to_url.return_value = True
+
+    mock_cm_report = unittest.mock.MagicMock()
+    mock_cm_report.stdout = json.dumps([
+        {
+            "FindingID": "fid-1",
+            "Status": "DETECTED",
+            "VulnType": "SQL_INJECTION",
+            "FilePath": "db.py",
+            "Title": "SQL Injection in db.py",
+            "Severity": "HIGH",
+            "Analysis": "Fix it.",
+        }
+    ])
+    mock_cm_report.returncode = 0
+
+    mock_git_status = unittest.mock.MagicMock()
+    mock_git_status.stdout = " M db.py"
+    mock_git_status.returncode = 0
+
+    mock_default = unittest.mock.MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if "report" in cmd_str:
+        return mock_cm_report
+      elif "status" in cmd_str:
+        return mock_git_status
+      else:
+        return mock_default
+
+    mock_run_cmd.side_effect = run_cmd_side_effect
+
+    with unittest.mock.patch.dict(
+        os.environ, {"CODEMENDER_SKIP_VERIFY": "false"}
+    ):
+      run_worker_pipeline()
+
+    verify_called = False
+    fix_called = False
+    for call in mock_run_cmd.call_args_list:
+      cmd = call[0][0]
+      cmd_str = " ".join(cmd)
+      if "verify" in cmd_str and "fid-1" in cmd_str:
+        verify_called = True
+      elif "fix" in cmd_str and "fid-1" in cmd_str:
+        fix_called = True
+
+    self.assertTrue(verify_called)
+    self.assertTrue(fix_called)
+    mock_create_pr.assert_called_once()
 
   @unittest.mock.patch("codemender_agent.runners.worker.run_command")
   @unittest.mock.patch("codemender_agent.runners.worker.download_from_url")
@@ -773,6 +870,166 @@ class TestWorkerRunner(unittest.TestCase):
     )
 
     mock_create_pr.assert_called_once()
+
+  @unittest.mock.patch("codemender_agent.runners.worker.run_command")
+  @unittest.mock.patch("codemender_agent.runners.worker.check_remote_branch_exists")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_duplicate_pr")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_finding_verified")
+  @unittest.mock.patch("codemender_agent.runners.worker.get_finding_status")
+  @unittest.mock.patch("codemender_agent.runners.worker.create_pull_request")
+  @unittest.mock.patch("codemender_agent.runners.worker.push_branch_to_remote")
+  def test_process_finding_skips_verify_when_configured(
+      self,
+      _mock_push,
+      mock_create_pr,
+      mock_get_finding_status,
+      mock_is_verified,
+      mock_is_dup_pr,
+      mock_branch_exists,
+      mock_run_cmd,
+  ):
+    """Verify _process_finding skips cm verify completely when skip_verify=True."""
+    mock_branch_exists.return_value = False
+    mock_is_dup_pr.return_value = False
+    mock_is_verified.return_value = True
+    mock_get_finding_status.return_value = "FIXED"
+    mock_create_pr.return_value = "https://github.com/org/repo/pull/10"
+
+    repo_dir = os.path.join(self.workspace_dir, "test_repo_skip_verify")
+    os.makedirs(repo_dir, exist_ok=True)
+    state_db_path = os.path.join(self.workspace_dir, "state_skip_verify.db")
+    with closing(sqlite3.connect(state_db_path)) as conn:
+      conn.execute(
+          "CREATE TABLE findings (finding_id TEXT PRIMARY KEY, status TEXT, verified INTEGER)"
+      )
+      conn.execute("INSERT INTO findings VALUES ('fid-skip', 'FIXED', 0)")
+      conn.execute(
+          "CREATE TABLE patches (finding_id TEXT, edited_files TEXT, target_file TEXT, diff TEXT)"
+      )
+      conn.commit()
+
+    mock_default = unittest.mock.MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+    mock_run_cmd.return_value = mock_default
+
+    finding = {
+        "FindingID": "fid-skip",
+        "Status": "DETECTED",
+        "VulnType": "XSS",
+        "FilePath": "app.js",
+    }
+    config = OrchestratorConfig(
+        workspace_dir=self.workspace_dir,
+        repo_url="https://github.com/org/repo.git",
+        github_token="fake-token",
+        target_sha="abc123commitsha",
+        skip_verify=True,
+    )
+
+    _process_finding(
+        finding_id="fid-skip",
+        finding=finding,
+        repo_dir=repo_dir,
+        cm_binary="/bin/cm",
+        scrubbed_env={},
+        clean_repo_url="https://github.com/org/repo.git",
+        token="fake-token",
+        owner="org",
+        repo_name="repo",
+        default_branch="main",
+        working_base_ref="abc123commitsha",
+        state_db_path=state_db_path,
+        worker_token_usage={},
+        config=config,
+    )
+
+    verify_calls = [
+        call[0][0]
+        for call in mock_run_cmd.call_args_list
+        if "verify" in " ".join(call[0][0])
+    ]
+    self.assertEqual(len(verify_calls), 0)
+
+  @unittest.mock.patch("codemender_agent.runners.worker.run_command")
+  @unittest.mock.patch("codemender_agent.runners.worker.check_remote_branch_exists")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_duplicate_pr")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_finding_verified")
+  @unittest.mock.patch("codemender_agent.runners.worker.get_finding_status")
+  @unittest.mock.patch("codemender_agent.runners.worker.create_pull_request")
+  @unittest.mock.patch("codemender_agent.runners.worker.push_branch_to_remote")
+  def test_process_finding_runs_verify_when_skip_verify_false(
+      self,
+      _mock_push,
+      mock_create_pr,
+      mock_get_finding_status,
+      mock_is_verified,
+      mock_is_dup_pr,
+      mock_branch_exists,
+      mock_run_cmd,
+  ):
+    """Verify _process_finding executes cm verify when skip_verify=False."""
+    mock_branch_exists.return_value = False
+    mock_is_dup_pr.return_value = False
+    mock_is_verified.return_value = True
+    mock_get_finding_status.return_value = "FIXED"
+    mock_create_pr.return_value = "https://github.com/org/repo/pull/11"
+
+    repo_dir = os.path.join(self.workspace_dir, "test_repo_run_verify")
+    os.makedirs(repo_dir, exist_ok=True)
+    state_db_path = os.path.join(self.workspace_dir, "state_run_verify.db")
+    with closing(sqlite3.connect(state_db_path)) as conn:
+      conn.execute(
+          "CREATE TABLE findings (finding_id TEXT PRIMARY KEY, status TEXT, verified INTEGER)"
+      )
+      conn.execute("INSERT INTO findings VALUES ('fid-run', 'FIXED', 1)")
+      conn.execute(
+          "CREATE TABLE patches (finding_id TEXT, edited_files TEXT, target_file TEXT, diff TEXT)"
+      )
+      conn.commit()
+
+    mock_default = unittest.mock.MagicMock()
+    mock_default.stdout = ""
+    mock_default.returncode = 0
+    mock_run_cmd.return_value = mock_default
+
+    finding = {
+        "FindingID": "fid-run",
+        "Status": "DETECTED",
+        "VulnType": "XSS",
+        "FilePath": "app.js",
+    }
+    config = OrchestratorConfig(
+        workspace_dir=self.workspace_dir,
+        repo_url="https://github.com/org/repo.git",
+        github_token="fake-token",
+        target_sha="abc123commitsha",
+        skip_verify=False,
+    )
+
+    _process_finding(
+        finding_id="fid-run",
+        finding=finding,
+        repo_dir=repo_dir,
+        cm_binary="/bin/cm",
+        scrubbed_env={},
+        clean_repo_url="https://github.com/org/repo.git",
+        token="fake-token",
+        owner="org",
+        repo_name="repo",
+        default_branch="main",
+        working_base_ref="abc123commitsha",
+        state_db_path=state_db_path,
+        worker_token_usage={},
+        config=config,
+    )
+
+    verify_calls = [
+        call[0][0]
+        for call in mock_run_cmd.call_args_list
+        if "verify" in " ".join(call[0][0])
+    ]
+    self.assertGreater(len(verify_calls), 0)
 
 
 if __name__ == "__main__":

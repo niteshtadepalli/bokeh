@@ -16,7 +16,7 @@
 
 import logging
 import re
-from typing import Optional
+from typing import Dict, List, Optional, Set
 
 import requests
 from codemender_agent.utils import retry_on_exception, run_command
@@ -347,7 +347,10 @@ def create_pr_comment(
       "Accept": "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
   }
-  payload = {"body": body}
+  # The fork fallback comment embeds the patch diff twice (once to read, once
+  # for `git apply`), so a large patch can exceed GitHub's body limit and lose
+  # the remediation to a 422. Cap it here to cover every caller.
+  payload = {"body": truncate_comment_body(body)}
 
   # 3. Post review comment payload to GitHub Issue/PR comments API
   resp = requests.post(url, headers=headers, json=payload, timeout=15)
@@ -496,3 +499,440 @@ def post_commit_status(
     logger.warning("Failed to post commit status check '%s' to GitHub: %s", context, e)
     return False
 
+
+# HTML marker embedded in the single sticky summary comment posted by the
+# aggregate stage, used to locate and update that comment on subsequent runs.
+STICKY_SUMMARY_MARKER = "<!-- codemender-summary -->"
+
+# Prefix of the HTML marker embedded in each inline suggestion comment, used to
+# deduplicate findings across re-runs (suggestion mode pushes no branch, so the
+# usual remote-branch dedup cannot apply).
+FINDING_MARKER_PREFIX = "<!-- codemender-finding:"
+
+# Matches a unified diff hunk header, capturing the RIGHT (new) side range.
+_PR_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def finding_marker(finding_id: str) -> str:
+  """Builds the HTML comment marker identifying a finding's suggestion."""
+  return f"{FINDING_MARKER_PREFIX}{finding_id} -->"
+
+
+@retry_on_exception(max_tries=3, initial_delay=2, backoff_factor=2)
+def _fetch_pr_files(
+    token: str, owner: str, repo: str, pr_number: int
+) -> List[Dict]:
+  """Fetches the full paginated list of files changed in a Pull Request."""
+  # 1. Handle mock token in test suites
+  if token == "fake-token":
+    return []
+
+  # 2. Build headers and the first page URL
+  headers = {
+      "Authorization": f"Bearer {token}",
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+  }
+  url: Optional[str] = (
+      f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files?per_page=100"
+  )
+
+  # 3. Traverse every page, accumulating file entries
+  files: List[Dict] = []
+  with requests.Session() as session:
+    while url:
+      resp = session.get(url, headers=headers, timeout=15)
+      if resp.status_code == 403 and any(
+          msg in resp.text.lower() for msg in ["rate limit", "abuse detection"]
+      ):
+        resp.raise_for_status()
+      resp.raise_for_status()
+
+      page = resp.json()
+      if not isinstance(page, list):
+        break
+      files.extend(page)
+      url = resp.links.get("next", {}).get("url")
+
+  return files
+
+
+def get_pr_diff_line_ranges(
+    token: str, owner: str, repo: str, pr_number: int
+) -> Dict[str, Set[int]]:
+  """Maps each changed file to the RIGHT-side line numbers inside its diff hunks.
+
+  GitHub rejects inline review comments that anchor outside a diff hunk with
+  HTTP 422, so callers use this map to pre-validate suggestions before posting.
+  Files served without a ``patch`` body (too large, or binary) are omitted so
+  that they are treated as not addressable and force a fallback.
+  """
+  try:
+    files = _fetch_pr_files(token, owner, repo, pr_number)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning(
+        "Failed to fetch changed files for PR #%d (%s); treating the whole diff"
+        " as not suggestable.",
+        pr_number,
+        e,
+    )
+    return {}
+
+  # 1. Parse each file's unified diff patch into a set of addressable lines
+  ranges: Dict[str, Set[int]] = {}
+  for entry in files:
+    path = entry.get("filename")
+    patch = entry.get("patch")
+    if not path or not patch:
+      # No patch body means GitHub cannot render an anchorable diff.
+      continue
+
+    lines: Set[int] = set()
+    for line in patch.splitlines():
+      match = _PR_HUNK_HEADER_RE.match(line)
+      if not match:
+        continue
+      # 2. Expand the hunk header's new-side range into individual line numbers
+      start = int(match.group(1))
+      count = int(match.group(2)) if match.group(2) is not None else 1
+      if count <= 0:
+        continue
+      lines.update(range(start, start + count))
+
+    if lines:
+      ranges[path] = lines
+
+  return ranges
+
+
+# Matches a Markdown code fence opener or closer at the start of a line.
+_MD_FENCE_RE = re.compile(r"^(`{3,}|~{3,})(.*)$")
+
+
+def _terminate_open_fence(text: str) -> str:
+  """Appends a closing delimiter if `text` leaves a Markdown code fence open.
+
+  Follows CommonMark fence pairing: a closing fence uses the same character as
+  its opener, is at least as long, and carries no info string.
+  """
+  open_delim = ""
+  for line in text.split("\n"):
+    match = _MD_FENCE_RE.match(line)
+    if not match:
+      continue
+    delim, info = match.group(1), match.group(2)
+    if not open_delim:
+      open_delim = delim
+    elif (
+        delim[0] == open_delim[0]
+        and len(delim) >= len(open_delim)
+        and not info.strip()
+    ):
+      open_delim = ""
+  return f"{text}\n{open_delim}" if open_delim else text
+
+
+# GitHub rejects issue and pull request comment bodies longer than this with
+# HTTP 422 ("Body is too long (maximum is 65536 characters)").
+MAX_COMMENT_BODY_CHARS = 65536
+
+_TRUNCATION_NOTICE = (
+    "\n\n---\n"
+    "*⚠️ This comment was truncated because it exceeded GitHub's 65,536"
+    " character limit. See the workflow run summary for the full report.*"
+)
+
+# Headroom for the closing fence that _terminate_open_fence may append when the
+# cut lands inside a code block.
+_TRUNCATION_SLACK = 16
+
+
+def truncate_comment_body(body: str, reserved: int = 0) -> str:
+  """Trims a comment body to GitHub's maximum length, appending a notice.
+
+  Args:
+    body: The rendered Markdown comment body.
+    reserved: Characters the caller will prepend (e.g. a sticky marker), which
+      count against the same budget.
+  """
+  limit = MAX_COMMENT_BODY_CHARS - reserved
+  if len(body) <= limit:
+    return body
+
+  head = body[: limit - len(_TRUNCATION_NOTICE) - _TRUNCATION_SLACK]
+  # Cut on a line boundary so a Markdown table row or list item is not split.
+  last_newline = head.rfind("\n")
+  if last_newline > 0:
+    head = head[:last_newline]
+  # The cut may have landed inside a fenced block; close it before appending.
+  result = _terminate_open_fence(head) + _TRUNCATION_NOTICE
+  # Belt and braces: a pathologically long fence delimiter could still overrun
+  # the slack above, and exceeding the cap costs the whole comment to a 422.
+  return result if len(result) <= limit else result[:limit]
+
+
+def format_suggestion_body(replacement_lines: List[str], preamble: str = "") -> str:
+  """Wraps replacement lines in a GitHub ```suggestion block, fence-safe.
+
+  The replacement may itself contain backtick runs (e.g. Markdown or shell
+  snippets), so the fence is widened past the longest run in the content.
+  An empty replacement renders as an empty suggestion block, which GitHub
+  interprets as "delete these lines".
+  """
+  # 1. Size the fence past the longest backtick run in the payload
+  longest_run = 0
+  for line in replacement_lines:
+    for run in re.findall(r"`+", line):
+      longest_run = max(longest_run, len(run))
+  fence = "`" * max(3, longest_run + 1)
+
+  # 2. Assemble the suggestion block
+  if replacement_lines:
+    block = f"{fence}suggestion\n" + "\n".join(replacement_lines) + f"\n{fence}"
+  else:
+    block = f"{fence}suggestion\n{fence}"
+
+  if preamble:
+    # The preamble embeds LLM-authored analysis, which may leave a code fence
+    # unterminated. An open fence would absorb the suggestion block below and
+    # GitHub would render it as inert text, so close it first.
+    return f"{_terminate_open_fence(preamble)}\n\n{block}"
+  return block
+
+
+def build_review_comment(
+    path: str, start_line: int, end_line: int, body: str
+) -> Dict:
+  """Builds a single inline review comment payload anchored on the RIGHT side."""
+  comment: Dict = {
+      "path": path,
+      "line": end_line,
+      "side": "RIGHT",
+      "body": body,
+  }
+  # GitHub requires start_line to be strictly less than line; a single-line
+  # anchor must omit it entirely.
+  if start_line < end_line:
+    comment["start_line"] = start_line
+    comment["start_side"] = "RIGHT"
+  return comment
+
+
+@retry_on_exception(max_tries=3, initial_delay=3, backoff_factor=2)
+def _create_pr_review_api(
+    token: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    commit_id: Optional[str],
+    body: str,
+    comments: List[Dict],
+) -> Optional[str]:
+  """Posts a Pull Request review carrying inline suggestion comments."""
+  # 1. Handle mock token in test suites
+  if token == "fake-token":
+    logger.info("Mock GitHub token detected ('fake-token'), simulating PR review.")
+    return f"https://github.com/{owner}/{repo}/pull/{pr_number}#pullrequestreview-1"
+
+  # 2. Prepare the review payload
+  url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+  headers = {
+      "Authorization": f"Bearer {token}",
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+  }
+  payload = {
+      "body": body,
+      # COMMENT rather than REQUEST_CHANGES: the Security Gate commit status
+      # posted by the aggregate stage is what blocks the merge.
+      "event": "COMMENT",
+      "comments": comments,
+  }
+  # Omitting commit_id lets GitHub anchor the review on the PR's latest commit.
+  if commit_id:
+    payload["commit_id"] = commit_id
+
+  # 3. Submit the review
+  resp = requests.post(url, headers=headers, json=payload, timeout=20)
+
+  # A 422 means at least one comment anchors outside the PR diff. This is a
+  # permanent failure for this payload, so surface it to the caller as None
+  # rather than retrying or raising, allowing a fallback remediation route.
+  if resp.status_code == 422:
+    logger.warning(
+        "GitHub rejected the suggestion review for PR #%d (422): %s",
+        pr_number,
+        resp.text[:500],
+    )
+    return None
+
+  if resp.status_code == 403 and any(
+      msg in resp.text.lower() for msg in ["rate limit", "abuse detection"]
+  ):
+    resp.raise_for_status()
+  resp.raise_for_status()
+  review_url = resp.json().get("html_url")
+  logger.info(
+      "Successfully posted suggestion review with %d comment(s) on PR #%d: %s",
+      len(comments),
+      pr_number,
+      review_url,
+  )
+  return review_url
+
+
+def create_pr_review_with_suggestions(
+    token: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    commit_id: Optional[str],
+    body: str,
+    comments: List[Dict],
+) -> Optional[str]:
+  """Safely posts a suggestion review, returning None so callers can fall back."""
+  if not comments:
+    return None
+  try:
+    return _create_pr_review_api(
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        commit_id=commit_id,
+        body=body,
+        comments=comments,
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Failed to post suggestion review on PR #%d: %s", pr_number, e)
+    return None
+
+
+@retry_on_exception(max_tries=3, initial_delay=3, backoff_factor=2)
+def _post_or_update_sticky_comment_api(
+    token: str, owner: str, repo: str, pr_number: int, body: str
+) -> Optional[str]:
+  """Creates or updates the single marker-tagged summary comment on a PR."""
+  # 1. Handle mock token in test suites
+  if token == "fake-token":
+    logger.info("Mock GitHub token detected ('fake-token'), simulating sticky comment.")
+    return f"https://github.com/{owner}/{repo}/issues/{pr_number}#issuecomment-1"
+
+  headers = {
+      "Authorization": f"Bearer {token}",
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+  }
+  # The marker must survive truncation, or the next run cannot find this
+  # comment to update, so it is reserved out of the body's budget.
+  marked_body = f"{STICKY_SUMMARY_MARKER}\n" + truncate_comment_body(
+      body, reserved=len(STICKY_SUMMARY_MARKER) + 1
+  )
+
+  # 2. Search existing PR comments for the sticky marker
+  existing_id: Optional[int] = None
+  url: Optional[str] = (
+      f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments?per_page=100"
+  )
+  with requests.Session() as session:
+    while url and existing_id is None:
+      resp = session.get(url, headers=headers, timeout=15)
+      resp.raise_for_status()
+      comments = resp.json()
+      if not isinstance(comments, list):
+        break
+      for comment in comments:
+        if STICKY_SUMMARY_MARKER in (comment.get("body") or ""):
+          existing_id = comment.get("id")
+          break
+      url = resp.links.get("next", {}).get("url")
+
+  # 3. Update the existing comment in place, or create a new one
+  if existing_id is not None:
+    patch_url = (
+        f"https://api.github.com/repos/{owner}/{repo}/issues/comments/{existing_id}"
+    )
+    resp = requests.patch(
+        patch_url, headers=headers, json={"body": marked_body}, timeout=15
+    )
+  else:
+    post_url = (
+        f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
+    )
+    resp = requests.post(
+        post_url, headers=headers, json={"body": marked_body}, timeout=15
+    )
+
+  if resp.status_code == 403 and any(
+      msg in resp.text.lower() for msg in ["rate limit", "abuse detection"]
+  ):
+    resp.raise_for_status()
+  resp.raise_for_status()
+  comment_url = resp.json().get("html_url")
+  logger.info(
+      "Successfully %s sticky summary comment on PR #%d: %s",
+      "updated" if existing_id is not None else "posted",
+      pr_number,
+      comment_url,
+  )
+  return comment_url
+
+
+def post_or_update_sticky_comment(
+    token: str, owner: str, repo: str, pr_number: int, body: str
+) -> Optional[str]:
+  """Safely posts or updates the sticky summary comment, never raising."""
+  try:
+    return _post_or_update_sticky_comment_api(token, owner, repo, pr_number, body)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning(
+        "Failed to post sticky summary comment on PR #%d: %s", pr_number, e
+    )
+    return None
+
+
+def list_reviewed_finding_ids(
+    token: str, owner: str, repo: str, pr_number: int
+) -> Set[str]:
+  """Collects finding IDs already carrying a posted inline suggestion.
+
+  Suggestion mode pushes no remote branch, so the remote-branch duplicate check
+  used by Child PR mode cannot apply. The marker embedded in each suggestion
+  comment provides the equivalent idempotency signal across re-runs.
+  """
+  if token == "fake-token":
+    return set()
+
+  headers = {
+      "Authorization": f"Bearer {token}",
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+  }
+  marker_re = re.compile(re.escape(FINDING_MARKER_PREFIX) + r"([^\s]+) -->")
+  finding_ids: Set[str] = set()
+
+  try:
+    url: Optional[str] = (
+        f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments?per_page=100"
+    )
+    with requests.Session() as session:
+      while url:
+        resp = session.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        comments = resp.json()
+        if not isinstance(comments, list):
+          break
+        for comment in comments:
+          for match in marker_re.finditer(comment.get("body") or ""):
+            finding_ids.add(match.group(1))
+        url = resp.links.get("next", {}).get("url")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning(
+        "Failed to list existing suggestion comments on PR #%d (%s); duplicate"
+        " suggestions may be posted.",
+        pr_number,
+        e,
+    )
+    return set()
+
+  return finding_ids

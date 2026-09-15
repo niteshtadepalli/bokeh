@@ -59,7 +59,7 @@ explicit partition lists.
         ├── Downloads & extracts workspace_base.tar.gz to ~/.codemender/ (via Signed URL)
         ├── Downloads its assigned partition list (partition_i.json)
         ├── Runs idempotency check (skips if remote branch/PR exists and finding is verified)
-        ├── Each container runs 'cm verify <id>' & 'cm fix <id>' ONLY for assigned IDs -> Pushes PRs
+        ├── Each container runs 'cm fix <id>' (and optional 'cm verify <id>' if skip_verify=False) -> Delivers PR suggestions / PRs
         └── Uploads its mutated database to GCS as worker_i_state.db (via Signed URL)
               │
               ▼ (Triggers automatically when all Workers finish)
@@ -329,8 +329,9 @@ structure, we will create or modify the following files:
     *   For each assigned finding, checks if a remote branch/PR already exists.
         If so, runs `cm verify` to see if it is resolved. If already resolved,
         skips `cm fix` (idempotency).
-    *   Executes `cm verify` and `cm fix` for unresolved findings; pushes
-        feature branches & PRs.
+    *   Executes `cm fix` (and `cm verify` if `skip_verify=False`) for
+        unresolved findings; delivers PR review suggestions or pushes feature
+        branches & PRs.
     *   Uploads mutated state database to
         `scans/[scan_id]/worker_[worker_index]_state.db` on GCS (via GCS Signed
         URL).

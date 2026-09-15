@@ -28,9 +28,11 @@ from typing import Optional, Set
 
 from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.config import OrchestratorConfig
+from codemender_agent.config import PR_MODE_REVIEW_SUGGESTION
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import resolve_pr_remediation_mode
 from codemender_agent.storage import download_file_from_gcs
 from codemender_agent.storage import get_storage_adapter
 from codemender_agent.storage import list_gcs_blobs
@@ -47,6 +49,7 @@ from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
 from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import post_commit_status
+from codemender_agent.vcs.github import post_or_update_sticky_comment
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -658,13 +661,27 @@ def _render_step_summary(
 
   if config.is_pr_scan:
     if findings_stats["total"] > 0:
+      # Describe the route the workers actually used to deliver remediations.
+      if resolve_pr_remediation_mode(config) == PR_MODE_REVIEW_SUGGESTION:
+        remediation_hint = (
+            "> Remediations have been synthesized and posted as inline review"
+            " suggestions. Commit the suggestions on this pull request to"
+            " resolve (patches that cannot be suggested inline are delivered as"
+            " a Child Pull Request or a patch comment instead)."
+        )
+      else:
+        remediation_hint = (
+            "> Remediations have been synthesized. Please review and merge the"
+            " proposed Child Pull Request into your feature branch (or apply"
+            " the patches) to resolve."
+        )
       lines.extend([
           "- **Security Gate:** ❌ **FAILED (Action Required)**",
           "",
           "> [!CAUTION]",
           f"> **Security Gate Status: FAILED ({findings_stats['total']} actionable vulnerability(ies) detected)**",
           "> ",
-          "> Remediations have been synthesized. Please review and merge the proposed Child Pull Request into your feature branch (or apply the patches) to resolve.",
+          remediation_hint,
           "",
       ])
     else:
@@ -721,14 +738,21 @@ def _render_step_summary(
       title_clean = f["title"].replace("|", "\\|") if f["title"] else "-"
       status = f["status"]
 
-      # Format Status with Child/Fix Pull Request hyperlinking if available
+      # Format Status with remediation hyperlinking if available
       pr_url = (finding_prs or {}).get(fid)
       if status in ("FIXED", "REMEDIATED") and pr_url:
-        pr_match = re.search(r"/pull/(\d+)", pr_url)
-        if pr_match:
-          status_display = f"[{status} (#{pr_match.group(1)})]({pr_url})"
+        # Review and comment anchors live on the scanned pull request itself,
+        # so their "/pull/<n>" segment is the parent PR number, not a Child PR.
+        if "#discussion_r" in pr_url or "#pullrequestreview-" in pr_url:
+          status_display = f"[{status} (suggested)]({pr_url})"
+        elif "#issuecomment-" in pr_url:
+          status_display = f"[{status} (patch posted)]({pr_url})"
         else:
-          status_display = f"[{status}]({pr_url})"
+          pr_match = re.search(r"/pull/(\d+)", pr_url)
+          if pr_match:
+            status_display = f"[{status} (#{pr_match.group(1)})]({pr_url})"
+          else:
+            status_display = f"[{status}]({pr_url})"
       else:
         status_display = f"`{status}`"
 
@@ -1317,7 +1341,7 @@ def run_aggregate_pipeline() -> None:
     logger.warning("Failed to aggregate worker metadata: %s", e)
 
   # 8. Render Step Summary before DB cleanup (preserves differential statistics)
-  _, active_findings_count = _render_step_summary(
+  summary_md, active_findings_count = _render_step_summary(
       base_db_path,
       config,
       owner,
@@ -1415,6 +1439,28 @@ def run_aggregate_pipeline() -> None:
           description=gate_desc,
           context=gate_context,
       )
+
+  # 13. Mirror the run summary into a single sticky comment on the Pull Request
+  # This runs here rather than in the workers because the matrix workers execute
+  # in parallel, and a read-modify-write of one shared comment would lose
+  # updates. The aggregate stage is single-instance and holds the merged DB.
+  if config.is_pr_scan and config.pr_number and token and summary_md:
+    # The "#artifacts" anchor only resolves on the workflow run page.
+    server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    repo_slug = os.environ.get("GITHUB_REPOSITORY")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    run_link = (
+        f"[workflow run]({server_url}/{repo_slug}/actions/runs/{run_id})"
+        if repo_slug and run_id
+        else "the workflow run"
+    )
+    post_or_update_sticky_comment(
+        token=token,
+        owner=owner,
+        repo=repo_name,
+        pr_number=config.pr_number,
+        body=summary_md.replace("[Artifacts section](#artifacts) below", run_link),
+    )
 
   # Log final aggregator completion notice
   logger.info("Stage 3 (Aggregate) completed successfully.")

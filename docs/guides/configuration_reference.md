@@ -34,6 +34,20 @@ when running in Docker or Cloud Run.
 *   `CODEMENDER_FORCE_OVERWRITE`: If set to `true`, bypasses the "PR Spam
     Prevention" check. The orchestrator will attempt to recreate and force-push
     verify/fix branches even if they already exist on the remote.
+*   `CODEMENDER_PR_REMEDIATION_MODE`: How fixes are delivered on Pull Request
+    scans.
+    *   `review_suggestion` (*default*): posts the patch as one-click inline
+        GitHub review suggestions on the Pull Request itself. No branch is
+        pushed.
+    *   `child_pr`: pushes a `codemender/fix-...` branch and opens a Child Pull
+        Request targeting the developer's branch.
+    *   Fork Pull Requests ignore this flag and always use `review_suggestion`,
+        because the orchestrator cannot push a branch to a fork.
+    *   A patch that cannot be expressed entirely as inline suggestions (it
+        creates, renames or deletes a file, or touches lines outside the Pull
+        Request diff) automatically falls back: to a Child Pull Request on
+        internal PRs, or to a Markdown patch comment with `git apply`
+        instructions on fork PRs.
 *   `CODEMENDER_REPORT_BUCKET`: The name of a Google Cloud Storage (GCS) bucket
     where the final HTML summary report should be uploaded (primarily used in
     sequential mode).
@@ -56,6 +70,7 @@ when running in Docker or Cloud Run.
 *   `CODEMENDER_VERIFY_MODEL`: Overrides the LLM model specifically for the Stage 2 verification (`cm verify`) phase.
 *   `CODEMENDER_FIX_MODEL`: Overrides the LLM model specifically for the Stage 2 fix (`cm fix`) phase.
 *   `CODEMENDER_SKIP_EXPLOIT_VERIFICATION`: Set to `"true"` to append `--skip-exploit-verification` during the verification phase, skipping compilation and execution of exploits.
+*   `CODEMENDER_SKIP_VERIFY`: Set to `"false"` to run `cm verify` before `cm fix`. Defaults to `"true"`, which skips the verification phase and proceeds directly to patch synthesis.
 
 ### Execution Modes
 

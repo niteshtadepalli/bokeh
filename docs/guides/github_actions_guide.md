@@ -79,9 +79,9 @@ graph TD
     end
 
     subgraph Stage2["Stage 2: Parallel Workers (Matrix [0..N-1])"]
-        Worker0["Worker 0\n(cm verify & cm fix)"]
-        Worker1["Worker 1\n(cm verify & cm fix)"]
-        WorkerN["Worker N-1\n(cm verify & cm fix)"]
+        Worker0["Worker 0\n(cm fix / cm verify)"]
+        Worker1["Worker 1\n(cm fix / cm verify)"]
+        WorkerN["Worker N-1\n(cm fix / cm verify)"]
     end
 
     subgraph Stage3["Stage 3: Aggregate & Report (aggregate job)"]
@@ -148,14 +148,14 @@ is triggered on a recurring schedule or against an active Pull Request:
 
 | Feature | Scheduled Nightly Scan | Internal Pull Request Scan | Fork Pull Request Scan |
 | :--- | :--- | :--- | :--- |
-| **Trigger Event** | `schedule` (cron) / `workflow_dispatch` | `pull_request` (`types: [labeled]`) | `pull_request` (`types: [labeled]`) |
-| **Activation Condition** | Cron triggers on default branch | `codemender-scan` label on PR | `codemender-scan` label on PR |
+| **Trigger Event** | `schedule` (cron) / `workflow_dispatch` | `pull_request` (`types: [opened, reopened, labeled, synchronize]`) | `pull_request` (`types: [opened, reopened, labeled, synchronize]`) |
+| **Activation Condition** | Cron triggers on default branch | New PR targeting `main`/`master` OR `codemender-scan` label on any branch | New PR targeting `main`/`master` OR `codemender-scan` label on any branch |
 | **Target Base Ref** | Default branch (`main` / `master`) | PR Base branch (e.g. `main`) | PR Base branch |
 | **Scan Scope** | Entire repository (`cm find .`) | Differential: PR changed lines only | Differential: PR changed lines only |
 | **Legacy Tech Debt** | Discovered & triaged | Marked `PRE_EXISTING_IGNORED` & suppressed | Marked `PRE_EXISTING_IGNORED` & suppressed |
-| **Duplicate Handling** | Marked `SKIPPED_DUPLICATE` (kept in SARIF as `underReview`) | Skipped if fix branch/PR exists | Skipped if fix branch/PR exists |
-| **Remediation Action** | Pushes `codemender/fix-...` & opens PR to `main` | Pushes `codemender/fix-...` & opens Child PR to developer branch | Posts Markdown review comment with diff on Fork PR |
-| **Reporting Output** | Full SARIF alert inventory, HTML, JSON, Step Summary | PR-scoped SARIF, Child PR, Step Summary | PR-scoped SARIF, PR Review Comment, Step Summary |
+| **Duplicate Handling** | Marked `SKIPPED_DUPLICATE` (kept in SARIF as `underReview`) | Skipped if a suggestion was already posted (or, in `child_pr` mode, if the fix branch/PR exists) | Skipped if a suggestion was already posted |
+| **Remediation Action** | Pushes `codemender/fix-...` & opens PR to `main` | Posts one-click inline review suggestions on the PR (default); falls back to a Child PR when the patch cannot be suggested inline | Posts one-click inline review suggestions on the Fork PR; falls back to a Markdown patch comment |
+| **Reporting Output** | Full SARIF alert inventory, HTML, JSON, Step Summary | PR-scoped SARIF, inline suggestions, sticky summary comment, Step Summary | PR-scoped SARIF, inline suggestions, sticky summary comment, Step Summary |
 
 --------------------------------------------------------------------------------
 
@@ -176,11 +176,11 @@ inventories, and remediate technical debt.
         (due to closed/rejected PRs, merged leftovers, or interrupted test
         runs), Stage 1 autonomously prunes the dead branch via GitHub REST API /
         Git CLI and retains the finding as `ACTIVE` for fresh remediation.
-3.  **Worker Remediation & Mainline PRs**: Verifies findings (`cm verify`),
-    synthesizes patches (`cm fix`), and opens **Pull Requests targeting the
-    default branch (`main`)**. If PR creation fails after pushing to origin,
-    workers execute an **atomic rollback** by deleting the remote branch to
-    prevent orphan accumulation.
+3.  **Worker Remediation & Mainline PRs**: Synthesizes patches (`cm fix`,
+    with optional `cm verify` gating via `skip_verify`), and opens **Pull
+    Requests targeting the default branch (`main`)**. If PR creation fails after
+    pushing to origin, workers execute an **atomic rollback** by deleting the
+    remote branch to prevent orphan accumulation.
 4.  **Final Outputs & Security Tab Inventory**: Uploads complete `report.sarif`
     to the GitHub Security Tab (tagging duplicate findings with `underReview`
     suppression metadata), renders `$GITHUB_STEP_SUMMARY`, and saves
@@ -194,11 +194,10 @@ Pull Request scans ensure that no new security vulnerabilities are merged into
 the codebase, while preventing legacy repository debt from blocking developer
 pull requests.
 
-1.  **Triggering & Labeling (`types: [labeled]`)**:
-    *   Activates on `pull_request` events when the **`codemender-scan`** label
-        is attached.
-    *   **Zero Noise**: Using `types: [labeled]` avoids spawning 1-second
-        "Skipped" runs when regular PRs are opened or pushed to.
+1.  **Dual-Trigger Architecture**:
+    *   **Automatic Scan**: Automatically scans any new or reopened PR targeting `main` or `master`.
+    *   **On-Demand Scan**: Can be triggered on any PR (including feature and release branches) by adding the **`codemender-scan`** label.
+    *   **Iterative Re-scan**: Automatically re-scans on new commits pushed to active PRs (`synchronize`), auto-canceling obsolete in-flight runs via concurrency.
 2.  **Differential PR Scanning & Deduplication**:
     *   Calculates merge-base diff hunks (`git diff -U0 origin/<base>...HEAD`)
         to isolate modified lines.
@@ -209,11 +208,12 @@ pull requests.
         ensure unmerged/closed branch leftovers never suppress genuine
         regressions.
 3.  **Worker Remediation Routing**:
-    *   **Internal PRs**: Opens a **Child Pull Request targeting the developer's
-        feature branch (`pr_head_ref`)**, allowing 1-click merging into the PR.
-    *   **Fork PRs**: Respects fork security boundaries by posting an inline
-        **Markdown Review Comment** on the PR with exploit analysis, unified
-        patch diff, and `git apply` commands.
+    *   **One-Click Inline Review Suggestions (Default, `pr_remediation_mode: review_suggestion`)**:
+        Posts GitHub review comments with native suggestion blocks directly on the PR diff lines where the vulnerability was introduced. Developers can review and commit the fix with a single click in GitHub's web UI without switching branches.
+    *   **Child Pull Requests (`pr_remediation_mode: child_pr`)**:
+        Pushes a dedicated branch (`codemender/fix-...`) and opens a Child Pull Request targeting the developer's feature branch (`pr_head_ref`).
+    *   **Fork PRs & Fallbacks**:
+        Posts inline review suggestions directly on the Fork PR diff. If the patch touches lines outside the PR diff or cannot be expressed inline, it falls back to a Markdown patch comment with analysis, diff, and `git apply` commands.
 4.  **Final Outputs**:
     *   Purges `PRE_EXISTING_IGNORED` records so PR status checks and SARIF
         annotations strictly reflect vulnerabilities on the PR diff.
@@ -837,12 +837,12 @@ Create `.github/workflows/codemender.yml` in your target repository:
 > automatically to all PR and Nightly runs!
 
 > [!TIP]
-> **Customizing Pull Request Triggers**: By default, CodeMender triggers
-> on-demand when the `codemender-scan` label is added to a PR (`types:
-> [labeled]`). To configure automatic label application, alternative trigger
-> patterns (such as scanning on commit push or scanning every PR), or file path
-> filtering, see
-> [Section 8: Pull Request Trigger Reference & Patterns](#8-appendix-pull-request-trigger-reference--patterns).
+> **Customizing Pull Request Triggers**: By default, CodeMender uses the
+> **Dual-Trigger** pattern (`types: [opened, reopened, labeled, synchronize]`),
+> which auto-scans new PRs targeting `main`/`master` and allows on-demand
+> `codemender-scan` labeling on any branch. To configure alternative trigger
+> patterns (such as pure label-gating, ready-for-review only, or path filtering),
+> see [Section 8: Pull Request Trigger Reference & Patterns](#8-appendix-pull-request-trigger-reference--patterns).
 
 ### Example 1: Production Standard Workflow (Scheduled & Pull Request CI)
 
@@ -865,15 +865,12 @@ on:
     - cron: '0 2 * * 0'
 
   # ---------------------------------------------------------------------------
-  # 2. Pull Request Scanning ("Clean as You Code")
+  # 2. Pull Request Scanning (Dual-Trigger: Auto on main/master + On-Demand Label)
   # ---------------------------------------------------------------------------
   pull_request:
-    # Trigger on-demand when 'codemender-scan' label is added to a PR.
-    # (To configure scans on push, scan-every-PR, or path filters, see Section 8).
-    types: [labeled]
-
-    # Target base branches to guard (e.g. main, master, release/*)
-    branches: [main, master]
+    # Trigger on new PRs, commit pushes, and on-demand 'codemender-scan' label.
+    # (Do NOT restrict branches here so on-demand labeling works on any branch, e.g. develop).
+    types: [opened, reopened, labeled, synchronize]
 
   # ---------------------------------------------------------------------------
   # 3. Manual On-Demand Trigger (GitHub UI / gh CLI)
@@ -893,11 +890,18 @@ permissions:
 
 jobs:
   remediate:
-    # Execution Guard: Run on Schedule, Manual Dispatch, or PRs with 'codemender-scan' label
+    # Execution Guard:
+    # 1. Runs on Schedule and Manual Dispatch
+    # 2. Runs on ANY branch when labeled 'codemender-scan'
+    # 3. Runs AUTOMATICALLY on new/reopened PRs targeting main or master
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'codemender-scan') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (github.base_ref == 'main' || github.base_ref == 'master'))
+      ))
 
     # -------------------------------------------------------------------------
     # Reusable Orchestrator Workflow Call:
@@ -947,9 +951,8 @@ on:
   schedule:
     - cron: '0 2 * * 0'  # Weekly on Sunday at 2:00 AM UTC
   pull_request:
-    # Pattern B: Triggers when 'codemender-scan' label is attached AND re-scans on new commits pushed to the PR
-    types: [labeled, synchronize]
-    branches: [main, master]
+    # Dual-Trigger: Auto-scan main/master PRs, allow on-demand 'codemender-scan' on any PR
+    types: [opened, reopened, labeled, synchronize]
     # paths-ignore: ['docs/**', '**.md', '.github/**']
   workflow_dispatch:
     # Interactive UI inputs shown when manually clicking "Run workflow" in GitHub UI
@@ -974,6 +977,19 @@ on:
         required: false
         default: false
         type: boolean
+      skip_verify:
+        description: 'Skip Stage 2 verification phase (cm verify) and proceed directly to patch synthesis (cm fix)'
+        required: false
+        default: true
+        type: boolean
+      pr_remediation_mode:
+        description: 'How PR scan fixes are delivered (review_suggestion = one-click inline suggestions, child_pr = fix branch + Child PR)'
+        required: false
+        default: 'review_suggestion'
+        type: choice
+        options:
+          - review_suggestion
+          - child_pr
       model:
         description: 'Default Gemini model across all stages (leave empty for CodeMender default)'
         required: false
@@ -1008,7 +1024,11 @@ jobs:
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'codemender-scan') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (github.base_ref == 'main' || github.base_ref == 'master'))
+      ))
 
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
 
@@ -1040,6 +1060,10 @@ jobs:
       # ⚠️ Fallback Default (false): Generates & verifies PoC exploits dynamically before synthesis.
       skip_exploit_verification: ${{ inputs.skip_exploit_verification || false }}
 
+      # Optional: Skip Stage 2 verification phase (cm verify) and proceed directly to patch synthesis (cm fix).
+      # ⚠️ Fallback Default (true): Skips cm verify by default for faster remediation. Set to false to enforce exploit/test verification.
+      skip_verify: ${{ inputs.skip_verify != false }}
+
       # =======================================================================
       # 3. PARALLELISM & CONCURRENCY
       # =======================================================================
@@ -1048,7 +1072,25 @@ jobs:
       max_tasks: ${{ inputs.max_tasks && fromJson(inputs.max_tasks) || 6 }}
 
       # =======================================================================
-      # 4. AI MODEL CONFIGURATION (OPTIONAL)
+      # 4. PULL REQUEST REMEDIATION ROUTING
+      # =======================================================================
+      # Controls how Stage 2 delivers fixes on Pull Request scans.
+      #   'review_suggestion' - Posts the patch as inline GitHub "suggestion" review blocks.
+      #                         Reviewers apply the fix with a single "Commit suggestion" click,
+      #                         and no 'codemender/fix-...' branches are created.
+      #                         Falls back to 'child_pr' when a patch cannot be expressed as a
+      #                         suggestion (new/deleted/renamed/binary files, or hunks that land
+      #                         outside the PR diff).
+      #   'child_pr'          - Pushes a 'codemender/fix-...' branch and opens a Child Pull
+      #                         Request targeting the scanned PR's head branch.
+      # ⚠️ Fallback Default ('review_suggestion'): Applies to all automated PR scans.
+      # Note: This input has no effect on Nightly/full-repo scans (which always open standard PRs),
+      # and Fork PRs always use 'review_suggestion' regardless of this setting, since the
+      # workflow cannot push branches to a contributor's fork.
+      pr_remediation_mode: ${{ inputs.pr_remediation_mode || 'review_suggestion' }}
+
+      # =======================================================================
+      # 5. AI MODEL CONFIGURATION (OPTIONAL)
       # =======================================================================
       # ⚠️ Fallback Defaults: During automated PR and Nightly scans, inputs.* is null.
       # If you want a specific model used on PR scans, specify it as the fallback value after '||'.
@@ -1062,7 +1104,7 @@ jobs:
 
     secrets:
       # =======================================================================
-      # 5. GCP AUTHENTICATION (CHOOSE WIF OR STATIC SA KEY)
+      # 6. GCP AUTHENTICATION (CHOOSE WIF OR STATIC SA KEY)
       # =======================================================================
       # Option A: Workload Identity Federation (WIF) - RECOMMENDED (Keyless)
       gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -1072,7 +1114,7 @@ jobs:
       # gcp_sa_key: ${{ secrets.GCP_SA_KEY }}
 
       # =======================================================================
-      # 6. GITHUB AUTHENTICATION (CHOOSE GITHUB APP OR CUSTOM PAT)
+      # 7. GITHUB AUTHENTICATION (CHOOSE GITHUB APP OR CUSTOM PAT)
       # =======================================================================
       # Option A: GitHub App Credentials - RECOMMENDED (Bypasses branch protection & posts as bot)
       github_app_id: ${{ secrets.GH_APP_ID }}
@@ -1098,8 +1140,8 @@ on:
   schedule:
     - cron: '0 2 * * 0'  # Weekly on Sunday at 2:00 AM UTC
   pull_request:
-    types: [labeled]
-    branches: [main, master]
+    # Dual-Trigger: Auto-scan main/master PRs, allow on-demand 'codemender-scan' on any PR
+    types: [opened, reopened, labeled, synchronize]
   workflow_dispatch:
 
 permissions:
@@ -1116,7 +1158,11 @@ jobs:
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'codemender-scan') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (github.base_ref == 'main' || github.base_ref == 'master'))
+      ))
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
     with:
       scan_target: 'services/backend'
@@ -1133,7 +1179,11 @@ jobs:
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'codemender-scan') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (github.base_ref == 'main' || github.base_ref == 'master'))
+      ))
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
     with:
       scan_target: 'services/frontend'
@@ -1176,29 +1226,32 @@ jobs:
 
 ### Review Surfaces
 
-CodeMender provides 4 integrated review surfaces:
+CodeMender provides 5 integrated review surfaces:
 
-#### 1. In-PR Child Pull Requests (Internal PRs)
+#### 1. In-PR Inline Review Suggestions (Default on PRs)
 
-When a vulnerability is discovered on an active internal Pull Request,
-CodeMender creates a **Child Pull Request** targeting the developer's feature
-branch (`pr_head_ref`).
+When a vulnerability is discovered on an active Pull Request (internal or fork), CodeMender posts **one-click inline review suggestions** directly on the PR diff lines where the vulnerability was introduced:
+
+*   **Zero Branch Friction**: Developers do not need to check out, pull, or merge secondary branches.
+*   **1-Click Commit**: Applying the suggestion commits the fix directly to the PR branch via GitHub's web interface.
+*   **Scoped Line Precision**: Multi-hunk patches are mapped to their respective diff lines with contextual security analysis.
+
+#### 2. In-PR Child Pull Requests (Configured via `pr_remediation_mode: child_pr`)
+
+When configured with `pr_remediation_mode: child_pr` (or as a fallback when an internal PR fix cannot be expressed as an inline suggestion):
 
 *   **Zero Merge Collisions**: Developers review the fix in isolation.
-*   **1-Click Merge**: Merging the Child PR incorporates the security patch
-    directly into the developer's branch.
+*   **1-Click Merge**: Merging the Child PR incorporates the security patch directly into the developer's branch.
 
-#### 2. Fork Pull Request Review Comments
+#### 3. Fork Pull Request Review Comments (Fallback)
 
-For Pull Requests originating from repository forks, Child PR creation is
-skipped to respect security boundaries. CodeMender posts a Markdown review
-comment directly on the Fork PR containing:
+For Pull Requests originating from repository forks where a patch cannot be expressed as an inline suggestion, CodeMender posts a Markdown review comment containing:
 
 *   Exploit analysis and vulnerability summary.
-*   Unified patch diff.
+*   Unified patch diff with 4-backtick Markdown fencing.
 *   One-line copyable local `git apply` instructions.
 
-#### 3. GitHub Actions Step Summary (`$GITHUB_STEP_SUMMARY`)
+#### 4. GitHub Actions Step Summary (`$GITHUB_STEP_SUMMARY`)
 
 Every CI run renders a Markdown summary dashboard directly in the GitHub Actions
 run overview, showing:
@@ -1208,7 +1261,7 @@ run overview, showing:
 *   Discovered Findings & Status Table.
 *   LLM Token Usage Summary.
 
-#### 4. GitHub Security Tab (SARIF Integration)
+#### 5. GitHub Security Tab (SARIF Integration)
 
 *   **Nightly Scans on `main`**: All findings (including existing remediations
     marked `SKIPPED_DUPLICATE`) are published to SARIF with `underReview`
@@ -1318,11 +1371,13 @@ Build and push your image to GitHub Container Registry
 | `report_artifact_retention_days` | `number` | `90` | Retention period (days) for final HTML, JSON, and SARIF triage reports. |
 | `upload_sarif` | `boolean` | `true` | Upload generated `report.sarif` findings to GitHub Security Tab. |
 | `fail_on_findings` | `boolean` | `true` *(on PR)*, `false` *(on Nightly)* | Exit with non-zero code in Stage 3 if actionable vulnerabilities are detected on PR diff. |
+| `pr_remediation_mode` | `string` | `review_suggestion` | How PR scan fixes are delivered. `review_suggestion` posts one-click inline suggestions on the PR; `child_pr` pushes a fix branch and opens a Child Pull Request. Fork PRs always use `review_suggestion`. |
 | `model` | `string` | `""` *(CodeMender default)* | Global Gemini model override across all stages. Check up-to-date defaults & supported models [here](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model). |
 | `find_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 1 vulnerability discovery (`cm find`). |
 | `verify_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 2 exploit verification (`cm verify`). |
 | `fix_model` | `string` | `""` *(inherits `model`)* | Dedicated model override for Stage 2 patch synthesis (`cm fix`). |
 | `skip_exploit_verification` | `boolean` | `false` | When `true`, skips dynamic exploit verification (`cm verify --skip-exploit-verification`) and generates patches directly. |
+| `skip_verify` | `boolean` | `true` | When `true` (default), skips the `cm verify` phase and proceeds directly to patch synthesis (`cm fix`). Set to `false` to enforce exploit/test verification. |
 
 ---
 
@@ -1348,7 +1403,9 @@ Build and push your image to GitHub Container Registry
 | `CODEMENDER_VERIFY_MODEL` | *(inherits base)* | Dedicated model override for Stage 2 exploit PoC generation & verification. |
 | `CODEMENDER_FIX_MODEL` | *(inherits base)* | Dedicated model override for Stage 2 code patch synthesis (`cm fix`). |
 | `CODEMENDER_FAIL_ON_FINDINGS` | `true` *(on PR)*, `false` *(on Nightly)* | Exit with non-zero status in Stage 3 if actionable vulnerabilities are detected on PR. |
+| `CODEMENDER_PR_REMEDIATION_MODE` | `review_suggestion` | PR scan remediation route: `review_suggestion` (one-click inline suggestions) or `child_pr` (fix branch + Child Pull Request). Ignored on fork PRs, which always use `review_suggestion`. Unrecognized values fall back to `review_suggestion`. |
 | `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | `false` | When `true`, skips dynamic exploit verification and generates patches directly. |
+| `CODEMENDER_SKIP_VERIFY` | `true` | When `true` (default), skips `cm verify` and proceeds directly to `cm fix`. Set to `false` to run verification before fix. |
 | `CODEMENDER_SANDBOX_ENABLED` | `true` | Enable `cm` process namespace and filesystem isolation. |
 | `CODEMENDER_SANDBOX_NETWORK_PROFILE` | `permissive-open` | Sandbox network policy (`permissive-open` or `restricted-local`). |
 | `CODEMENDER_FORCE_OVERWRITE` | `false` | When `true`, overwrites existing branches and PRs instead of skipping duplicates. |
@@ -1404,86 +1461,68 @@ which PR lifecycle events trigger the workflow.
 > [GitHub Actions Events: pull_request](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#pull_request)
 > documentation.
 
-### 8.1 Automating the `codemender-scan` Label (Default Trigger Flow)
+### 8.1 Trigger Architecture & Why Dual-Trigger is the Default
 
-Because CodeMender defaults to the `codemender-scan` label trigger to preserve
-AI model tokens and CI runner minutes, teams frequently automate the label
-attachment process to fit their developer workflows. Several practical
-strategies include:
+CodeMender defaults to the **Dual-Trigger Single Workflow** pattern:
+1. **Automatic Zero-Friction Scan**: Scans every newly opened or reopened Pull Request targeting `main` or `master` without requiring developers to apply labels or memorize commands.
+2. **On-Demand Flexibility**: Allows reviewers, authors, or automated tools to trigger scans on **any PR** (including `develop`, `release/*`, or feature branches) simply by adding the `codemender-scan` label.
 
-*   **Path-Based Auto-Labeling (e.g., via `actions/labeler`)**: Automatically
-    attach `codemender-scan` when a Pull Request modifies files in
-    security-sensitive paths (e.g., `src/**`, `api/**`, `backend/**`, or
-    specific file extensions). Modifying non-code files (such as documentation
-    or assets) will not trigger the label.
-*   **ChatOps / Slash Commands (e.g., `/codemender` or `/scan`)**: Allow
-    developers and reviewers to trigger scans on-demand by commenting
-    `/codemender` or `/scan` on the Pull Request. A lightweight comment-handling
-    action validates the commenter's permissions and applies the label.
-*   **Author Role & Contributor Tiering**: Automatically attach
-    `codemender-scan` for Pull Requests opened by internal team members or
-    organization collaborators, while requiring manual maintainer approval or
-    labeling for external/fork contributors.
-*   **Draft-to-Ready State Transitions**: Automatically apply `codemender-scan`
-    only when a Draft PR is transitioned to "Ready for review", preventing
-    premature scans on incomplete work-in-progress code.
-*   **Post-Scan Label Lifecycle Cleanup**: Remove the `codemender-scan` label
-    upon pipeline completion so that authors can easily re-trigger a fresh scan
-    simply by re-attaching the label.
+> [!IMPORTANT]
+> **Branch Filtering Gotcha in GitHub Actions**:
+> If `branches: [main, master]` is placed under `on.pull_request:`, GitHub Actions **drops all events** on other branches before the workflow even runs. Even if a reviewer adds `codemender-scan` to a PR targeting `develop`, the workflow will **not fire**.
+>
+> To support on-demand labeling on *any* branch while auto-scanning *only* `main`/`master`, branch matching is checked inside the job's `if:` condition:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, reopened, labeled, synchronize]
+
+jobs:
+  remediate:
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'codemender-scan') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (github.base_ref == 'main' || github.base_ref == 'master'))
+      ))
+```
+
+> [!TIP]
+> **Why Not Use an Auto-Labeler Action to Trigger the Scan?**:
+> In GitHub Actions, events triggered by the default `GITHUB_TOKEN` (such as a separate step adding a label) **do not trigger downstream workflows** (GitHub's recursion guard). A single workflow listening directly to both `opened` and `labeled` events avoids needing a dedicated GitHub App or PAT just to bridge two workflows.
 
 ### 8.2 Alternative PR Trigger Patterns & Reference
 
-If your team prefers an automated trigger model other than label-based gating,
-you can configure GitHub Actions to trigger scans using alternative activity
-types and filter rules.
+If your team has specific security or token budget requirements, you can customize the trigger behavior:
 
 #### 1. Practical Trigger Patterns for CodeMender
 
-You can choose one of the following patterns based on your team's workflow and
-token budget:
-
-*   **Pattern A: On-Demand Label-Triggered (Recommended Default)**:
-    -   `types: [labeled]`
-    -   *Behavior*: Scans run **only** when a developer or reviewer attaches the
-        `codemender-scan` label.
-    -   *Advantages*: Highest cost and token efficiency. Avoids running on
-        unfinished WIP commits and avoids generating 1-second skipped runs on
-        untagged PRs.
-*   **Pattern B: Label-Triggered + Auto Re-scan on Push**:
-    -   `types: [labeled, synchronize]`
-    -   *Behavior*: Scans run when `codemender-scan` is added, and
-        **automatically re-scans** whenever the author pushes new commits to
-        that PR.
-    -   *Advantages*: Ideal for iterative remediation. The author can see if
-        their fixes resolved the findings without having to remove and re-add
-        the label.
-*   **Pattern C: Universal CI Security Gate (Scan Every PR Automatically)**:
+*   **Pattern A: Dual-Trigger (Shipped Default)**:
+    -   `types: [opened, reopened, labeled, synchronize]` + branch guard in `if:`.
+    -   *Behavior*: Auto-scans new PRs targeting `main`/`master`, and allows on-demand `codemender-scan` labeling on any branch.
+    -   *Advantages*: Zero friction for primary development, full flexibility for long-running feature or release branches.
+*   **Pattern B: Pure On-Demand Label-Triggered (Manual Gate)**:
+    -   `types: [labeled, synchronize]` + `if: contains(github.event.pull_request.labels.*.name, 'codemender-scan')`
+    -   *Behavior*: Scans run **only** when `codemender-scan` is attached to a PR.
+    -   *Advantages*: Highest token efficiency. Useful if you only want to scan PRs after code review sign-off.
+*   **Pattern C: Universal CI Security Gate (Scan Every PR & Every Push)**:
     -   `types: [opened, synchronize, reopened]`
-    -   *Behavior*: Scans **every single PR** automatically upon creation and on
-        every commit push, without requiring any label.
-    -   *How to enable*: Update `types:` and remove the
-        `contains(github.event.pull_request.labels.*.name, 'codemender-scan')`
-        check from the job's `if:` condition.
-    -   *Advantages*: Maximum enforcement for zero-trust or highly regulated
-        repositories.
+    -   *Behavior*: Scans **every single PR and commit push** without checking for labels.
+    -   *Advantages*: Maximum enforcement for zero-trust repositories.
 *   **Pattern D: Ready-for-Review (Draft PR Optimization)**:
-    -   `types: [ready_for_review, synchronize]`
-    -   *Behavior*: Skips initial Draft PRs completely and only starts scanning
-        once the PR is marked "Ready for review", continuing to scan on
-        subsequent pushes.
+    -   Add `!github.event.pull_request.draft` to the job's `if:` condition and add `ready_for_review` to `types:`.
+    -   *Behavior*: Skips Draft PRs completely and triggers only when the PR is marked "Ready for review".
 
 #### 2. Filtering by Branches and File Paths
 
-*   **Target Branches (`branches: [...]`)**: Restrict PR scans to PRs targeting
-    specific branches (e.g. `branches: [main, master, 'release/**']`).
-*   **Path Filtering (`paths:` or `paths-ignore:`)**: Save LLM tokens and CI
-    runner minutes by ignoring PRs that only modify documentation or CI
-    configurations:
+*   **Path Filtering (`paths-ignore:`)**: Save LLM tokens and CI runner minutes by ignoring PRs that only modify documentation or CI configurations:
 
     ```yaml
     pull_request:
-      types: [labeled, synchronize]
-      branches: [main, master]
+      types: [opened, reopened, labeled, synchronize]
       paths-ignore:
         - 'docs/**'
         - '**.md'
@@ -1492,15 +1531,12 @@ token budget:
 
 #### 3. Available GitHub PR Activity Types (`types: [...]`)
 
-If `types:` is omitted under `pull_request:`, GitHub Actions defaults to
-`[opened, synchronize, reopened]`.
-
 | Activity Type | When It Triggers | Relevance to CodeMender |
 | :--- | :--- | :--- |
-| **`labeled`** *(Recommended)* | A label is added to the PR | **Primary trigger for on-demand scans**. Allows scanning only when `codemender-scan` label is attached, preventing token waste on WIP drafts. |
-| **`synchronize`** | New commits are pushed to the PR head branch | **Iterative development**. Auto-triggers a re-scan when new commits are pushed to an already-labeled PR. Stale in-flight runs are auto-canceled via concurrency. |
-| **`opened`** | A new PR is created | **Universal scan**. Used when teams want CodeMender to automatically scan *every* newly opened PR. |
-| **`reopened`** | A previously closed PR is reopened | **Universal scan**. Ensures newly revived PRs are validated against current base branch code. |
+| **`opened`** *(Default)* | A new PR is created | **Primary trigger.** Every PR targeting `main`/`master` is scanned automatically on creation. |
+| **`reopened`** *(Default)* | A previously closed PR is reopened | Ensures revived PRs are re-validated against current base branch code. |
+| **`labeled`** *(Default)* | A label is added to the PR | **On-demand trigger.** Allows running CodeMender on any PR by adding the `codemender-scan` label. |
+| **`synchronize`** *(Default)* | New commits are pushed to the PR head branch | **Iterative remediation.** Auto-triggers a re-scan when new commits are pushed to an active PR. Stale in-flight runs are auto-canceled via concurrency. |
 | **`ready_for_review`** | A Draft PR is converted to ready for review | **Draft workflow**. Prevents running scans while developers are actively drafting WIP code. |
 | `unlabeled` | A label is removed from the PR | Rarely used for CodeMender. |
 | `edited` | PR title, description, or base branch is modified | Useful if changing the target base branch requires a differential re-scan. |

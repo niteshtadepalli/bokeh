@@ -82,13 +82,12 @@ full support for **Bring-Your-Own-Image (BYOI)** custom toolchains.
 |  - Read partition_${{ matrix.worker_index }}.json                                                       |
 |  - For each assigned finding:                                                                           |
 |      * Targeted Live Dedup: O(1) 'git ls-remote' + 'GET /pulls?head={owner}:{branch}'                   |
-|      * Verify finding exploitability: 'cm verify -y --bypass-warning <id>' (Tier 1 retries)             |
-|      * Generate and apply patch: 'cm fix -y --bypass-warning <id>'                                      |
-|      * Surgical Git Staging: Query SQLite 'patches.edited_files' with 3-tier fallback to stage fix files|
-|      * Push remediation branch:                                                                         |
+|      * Generate and apply patch: 'cm fix -y --bypass-warning <id>' (skip 'cm verify' if skip_verify)    |
+|      * Deliver remediation:                                                                             |
+|          - If PR Scan (default): Post one-click inline review suggestions directly on PR diff           |
+|          - If PR Scan (child_pr mode): Push 'codemender/fix-<vuln>-<hash>' & open Child PR to head     |
+|          - If Fork PR Scan: Post inline suggestions (or fallback Markdown patch comment on fork PR)     |
 |          - If Nightly / Manual Scan: Push 'codemender/fix-<vuln>-<hash>' & open top-level PR to main    |
-|          - If Internal PR Scan: Push 'codemender/fix-<vuln>-<hash>' & open Child PR to pr_head_ref      |
-|          - If Fork PR Scan: Skip Child PR; post Markdown review comment on Fork PR (pr_number) with diff|
 |  - Save mutated state.db to .codemender_transit/shards/worker_${i}/worker_${i}_state.db                 |
 |  - Upload GHA Artifact: 'worker-shard-${{ matrix.worker_index }}' (retention: intermediate days)        |
 +---------------------------------------------------------------------------------------------------------+
@@ -108,7 +107,7 @@ full support for **Bring-Your-Own-Image (BYOI)** custom toolchains.
 |  - Publish 4-Tier Reporting Surfaces:                                                                   |
 |      1. Upload SARIF to GitHub Security Tab ('github/codeql-action/upload-sarif', continue-on-error)     |
 |      2. Render Markdown overview to $GITHUB_STEP_SUMMARY (truncated at 1000 KiB buffer guardrail)       |
-|      3. In-PR Context: Embedded Child PR descriptions or Fork PR Markdown review comments               |
+|      3. In-PR Context: Inline review suggestions, Child PR descriptions, or Fork review comments         |
 |      4. Upload downloadable HTML/JSON report artifacts: 'codemender-final-report' (retention: 90 days)  |
 +---------------------------------------------------------------------------------------------------------+
 ```
@@ -155,21 +154,24 @@ full support for **Bring-Your-Own-Image (BYOI)** custom toolchains.
         `os.environ["GITHUB_TOKEN"]`, keeping runtime dependencies minimal and
         hermetic.
 
-3.  **Strict Trigger Restrictions & Security Boundaries**:
+3.  **Trigger Surface & Security Boundaries**:
 
     *   Scans are strictly triggered in three ways only:
         1.  **Manual trigger** (`workflow_dispatch`)
         2.  **Nightly scan** (`schedule` on default branch)
-        3.  **Certain PRs** (targeting `main`/`master` branch only) triggered by
-            a specific tag/label only (e.g. `codemender-scan`).
+        3.  **Pull Requests** — Dual-Trigger architecture scans every new/reopened
+            PR targeting `main`/`master` automatically (`types: [opened, reopened, synchronize]`)
+            while allowing on-demand scanning on any branch via the `codemender-scan` label.
     *   **Internal PR Scans**: Run with secure access to repository secrets.
-        Propose remediation via Child PRs targeting the developer's feature
-        branch (`pr_head_ref`).
+        Propose remediation via one-click inline review suggestions, falling
+        back to Child PRs targeting the developer's feature branch
+        (`pr_head_ref`).
     *   **Fork PR Scans**: Automated Child PR branch pushes are skipped
-        (avoiding HTTP 403/422 errors on cross-repo boundaries). Instead,
-        CodeMender calls the GitHub REST API using `pr_number` to post a
-        structured Markdown review comment directly on the Fork PR with the
-        patch diff and local `git apply` instructions.
+        (avoiding HTTP 403/422 errors on cross-repo boundaries). Inline review
+        suggestions still apply, as they cross the fork boundary; when a patch
+        cannot be suggested inline, CodeMender calls the GitHub REST API using
+        `pr_number` to post a structured Markdown comment directly on the Fork
+        PR with the patch diff and local `git apply` instructions.
 
 4.  **Stage 1 Coordinator (`scan`)**:
 
@@ -207,23 +209,35 @@ full support for **Bring-Your-Own-Image (BYOI)** custom toolchains.
         ls-remote` and `GET
         /repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open`. Resilient
         across worker retries with zero pagination over entire PR lists.
-    *   Executes exploit verification (`cm verify`) and patch synthesis (`cm
-        fix`).
+    *   Executes patch synthesis (`cm fix`), optionally preceded by exploit
+        verification (`cm verify`) when `skip_verify` is set to `false` (defaults
+        to `true`, which skips verification).
     *   **Surgical Git Staging**: Queries SQLite `patches.edited_files` to stage
         *only* the exact files modified or created by CodeMender, with a 3-tier
         fallback hierarchy (`edited_files` $\rightarrow$ `target_file`
         $\rightarrow$ `git add -u` + `finding.FilePath`).
-    *   **Global Branch Naming & Dual PR Routing**:
-        *   All scans use canonical naming:
-            `codemender/fix-<vuln_type>-<fingerprint>`.
-        *   **Nightly / Manual Scans**: Pushes branch and opens a top-level PR
-            targeting `main`.
-        *   **Internal PR Scans**: Pushes branch and opens a Child PR targeting
-            the developer's feature branch (`pr_head_ref`, populated from
-            `GITHUB_HEAD_REF`).
-        *   **Fork PR Scans**: Posts a Markdown review comment on the Fork PR
-            (`pr_number`) with findings, patch diff, and local `git apply`
-            instructions.
+    *   **Remediation Routing** (gated by `CODEMENDER_PR_REMEDIATION_MODE`,
+        default `review_suggestion`):
+        *   **PR Scans (internal and fork)**: The fix patch is parsed into
+            contiguous RIGHT-side line ranges and posted as one-click
+            ` ```suggestion ` blocks in a single PR review. No branch is pushed.
+            Each comment embeds a `<!-- codemender-finding:<id> -->` marker,
+            which replaces remote-branch dedup across re-runs. Routing is
+            **all-or-nothing per finding**: every hunk is pre-validated against
+            `GET /pulls/{n}/files` before posting, because the REST API rejects
+            comments anchored outside a diff hunk with HTTP 422.
+        *   **Fallback when the patch is not suggestable** (new/renamed/deleted
+            files, binary patches, or hunks outside the PR diff):
+            *   *Internal PRs*: pushes `codemender/fix-<vuln_type>-<fingerprint>`
+                and opens a Child PR targeting the developer's feature branch
+                (`pr_head_ref`, populated from `GITHUB_HEAD_REF`).
+            *   *Fork PRs*: posts a Markdown comment with the patch diff and
+                local `git apply` instructions.
+        *   **`child_pr` mode**: internal PRs skip suggestions entirely and go
+            straight to the Child PR route. Fork PRs ignore the flag, since the
+            orchestrator cannot push a branch to a fork.
+        *   **Nightly / Manual Scans**: unaffected — pushes branch and opens a
+            top-level PR targeting `main`.
     *   Saves mutated `worker_${i}_state.db` to
         `.codemender_transit/shards/worker_${i}/` and uploads as run artifact.
 
@@ -251,8 +265,8 @@ full support for **Bring-Your-Own-Image (BYOI)** custom toolchains.
             true`).
         2.  **CI Run Overview**: Renders a Markdown dashboard in
             `$GITHUB_STEP_SUMMARY` (truncated at 1000 KiB buffer limit).
-        3.  **In-PR Context**: Embedded Child PR descriptions or Fork PR review
-            comments.
+        3.  **In-PR Context**: One-click inline review suggestions, embedded
+            Child PR descriptions, or Fork PR review comments.
         4.  **Triage Artifacts**: Uploads `report.html` and `report.json` as
             `codemender-final-report` (90-day retention).
 
@@ -401,6 +415,31 @@ following major design alternatives were evaluated and explicitly rejected:
     strictly disabled on all PR scans and reserved exclusively for Nightly scans
     on `main`.
 
+### 13. Posting Partial Suggestions for Patches That Do Not Fully Fit the Diff
+
+-   **What was considered:** In `review_suggestion` mode, posting inline
+    suggestions for whichever hunks land inside the PR diff, and describing the
+    remaining hunks in prose.
+-   **Why it was ruled out:** `cm fix` is unconstrained — Stage 1 guarantees the
+    *finding* is in-diff, but the *fix* may touch out-of-diff lines or create
+    new files. A reviewer who commits a partially suggested patch gets code that
+    compiles against a fix that was never fully applied, silently leaving the
+    vulnerability open while the finding reads as remediated. Remediation is
+    therefore **all-or-nothing per finding**: every hunk is pre-validated
+    against `GET /pulls/{n}/files`, and a single unsuggestable hunk routes the
+    whole finding to the Child PR (internal) or patch comment (fork) fallback.
+
+### 14. Delivering One-Click Fixes via SARIF `result.fixes`
+
+-   **What was considered:** Populating the `fixes` property on SARIF results so
+    GitHub's code scanning UI renders a native "Apply fix" button, reusing the
+    existing SARIF upload path instead of adding review-comment plumbing.
+-   **Why it was ruled out:** GitHub ignores `result.fixes` on third-party SARIF
+    uploads; the "Apply fix" affordance is produced server-side by Copilot
+    Autofix and cannot be driven by an uploaded artifact. Inline ` ```suggestion `
+    blocks in a PR review are the only mechanism available to a third-party
+    integration that yields a real one-click commit.
+
 --------------------------------------------------------------------------------
 
 ## 4. Detailed Implementation Plan
@@ -421,7 +460,7 @@ repository to implement native GitHub Actions support.
 │   ├── storage.py                         # (MODIFIED) Modular TransitStorageAdapter for GCS and GHA artifacts
 │   ├── runners/
 │   │   ├── scan.py                        # (MODIFIED) Full scan, diff hunk filtering, and GITHUB_OUTPUT matrix
-│   │   ├── worker.py                      # (MODIFIED) Working base ref, surgical git staging, Child PR & Fork comments
+│   │   ├── worker.py                      # (MODIFIED) Working base ref, surgical git staging, PR suggestions & Child PRs
 │   │   └── aggregate.py                   # (MODIFIED) Ingest transit shards, clean UPDATE DB merge, scoped reporting
 │   └── vcs/
 │       ├── git.py                         # (MODIFIED) Global deterministic branch naming & git diff hunk parsing
@@ -708,10 +747,23 @@ repository to implement native GitHub Actions support.
         *   Checkout `working_base_ref` and configure `git safe.directory`.
     2.  In `_process_finding()`:
         *   Enforce `force_overwrite = False` if `is_pr_scan == True`.
-        *   Perform targeted live check (`git ls-remote` + `GET
-            /pulls?head=...`).
-        *   Execute `cm verify` and `cm fix`.
-        *   **Surgical Staging with 3-Tier Fallback**:
+        *   Perform targeted live check (`git ls-remote` + `GET /pulls?head=...`
+            or marker in PR review comments).
+        *   Execute `cm fix` (and `cm verify` if `skip_verify == False`).
+        *   **Remediation Routing**:
+            *   If `is_pr_scan == True` and `pr_remediation_mode ==
+                "review_suggestion"`: Generate one-click inline review
+                suggestions directly on the PR diff
+                (`create_review_with_suggestions()`). Fallback to Child PR
+                (internal) or patch comment (fork) if patch is non-suggestable.
+            *   If `is_pr_scan == True` and `pr_remediation_mode == "child_pr"`:
+                *   If `is_fork_pr == True`: Call `create_pr_comment()` on Fork
+                    PR with patch diff and `git apply` instructions.
+                *   Else: Push branch and call `create_pull_request(head=branch,
+                    base=config.pr_head_ref or default_branch)`.
+            *   If Nightly / Manual Scan: Push branch and call
+                `create_pull_request(head=branch, base=default_branch)`.
+        *   **Surgical Staging with 3-Tier Fallback** (when pushing branches):
             1.  Query `SELECT edited_files, target_file FROM patches WHERE
                 finding_id = ?`.
             2.  If `edited_files` exists and parses to valid file paths: stage
@@ -719,14 +771,6 @@ repository to implement native GitHub Actions support.
             3.  Else if `target_file` is non-empty: stage `target_file`.
             4.  Else fallback to standard tracked staging: `git add -u` and `git
                 add <finding.FilePath>`.
-        *   Push branch `codemender/fix-<vuln_type>-<fingerprint>`.
-        *   **PR Routing**:
-            *   If `is_fork_pr == True`: Call `create_pr_comment()` on Fork PR
-                (`pr_number`) with patch diff and local `git apply` block.
-            *   If `is_pr_scan == True`: Call `create_pull_request(head=branch,
-                base=config.pr_head_ref or default_branch)`.
-            *   If Nightly / Manual: Call `create_pull_request(head=branch,
-                base=default_branch)`.
     3.  In `run_worker_pipeline()`:
         *   Save mutated database to
             `.codemender_transit/shards/worker_${i}/worker_${i}_state.db`.
@@ -841,7 +885,7 @@ repository to implement native GitHub Actions support.
     *   Setting up Workload Identity Federation (WIF) in GCP and configuring
         GitHub repository permissions.
     *   Setting up the GitHub App for least-privilege token generation.
-    *   Example caller workflows for Nightly scheduled scans and labeled PR
+    *   Example caller workflows for Nightly scheduled scans and Pull Request
         scans.
     *   Creating custom BYOI Docker images for specialized language stacks.
     *   Triage guide for reviewing Child PRs, viewing `$GITHUB_STEP_SUMMARY`,
@@ -853,7 +897,7 @@ repository to implement native GitHub Actions support.
 
 | Dimension | GCP Cloud Run Mode (Existing) | GitHub Actions Mode (New) |
 | :--- | :--- | :--- |
-| **Trigger Mechanism** | Cloud Scheduler $\rightarrow$ Cloud Workflows JSON payload | GitHub Schedule (cron), `workflow_dispatch`, or `pull_request` label |
+| **Trigger Mechanism** | Cloud Scheduler $\rightarrow$ Cloud Workflows JSON payload | GitHub Schedule (cron), `workflow_dispatch`, or Dual-Trigger `pull_request` |
 | **Control Plane** | Google Cloud Workflows (`gcp_parallel_workflow.yaml`) | GHA Reusable Workflow (`.github/workflows/codemender_parallel.yml`) |
 | **Worker Scaling** | Cloud Run Job Task Array (`taskCount: N`) | GHA Dynamic Matrix (`strategy.matrix: [0..N-1]`, `fail-fast: false`) |
 | **State Transit** | Google Cloud Storage Bucket + Signed URLs | GHA Run Artifacts v4 (`.codemender_transit/shards/worker_${i}/`) |
@@ -861,8 +905,8 @@ repository to implement native GitHub Actions support.
 | **Backend Auth** | Cloud Run Service Account (built-in) | Workload Identity Federation (OIDC) or SA Key JSON |
 | **Token Lifecycle** | Secret Manager (`GITHUB_APP_TOKEN`) | `actions/create-github-app-token@v1` or `GITHUB_TOKEN` ($\le 55\text{ min}$ timeout) |
 | **Nightly Remediation** | Top-level PRs against `main` (`codemender/fix-...`) | Top-level PRs against `main` (`codemender/fix-...`) |
-| **Internal PR Remediation** | N/A | **Child PRs targeting developer's feature branch (`pr_head_ref`)** |
-| **Fork PR Remediation** | N/A | **Markdown review comments on Fork PR (`pr_number`) with diff & apply** |
+| **Internal PR Remediation** | N/A | **One-click inline review suggestions (default) or Child PRs targeting `pr_head_ref`** |
+| **Fork PR Remediation** | N/A | **One-click inline review suggestions (default) or Markdown comments on Fork PR** |
 | **PR Finding Scope** | N/A | **Differential PR Scan (Untouched findings ignored & omitted from PR reports)** |
 | **Staging Mechanism** | `git add -u` | **Surgical Staging (`patches.edited_files` with 3-tier fallback)** |
 | **Reporting Surfaces** | GCS HTML Report (Signed URL in logs) | Scoped SARIF (Security Tab) + `$GITHUB_STEP_SUMMARY` + GHA Artifact |

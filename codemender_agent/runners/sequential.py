@@ -57,6 +57,10 @@ logger = logging.getLogger("codemender-orchestrator")
 def run_sequential_pipeline() -> None:
   """Executes the single-task sequential scan, verify, fix, and PR pipeline."""
   cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
+  skip_verify = (
+      os.environ.get("CODEMENDER_SKIP_VERIFY", "true").strip().lower()
+      in ("true", "1", "yes")
+  )
   token_usage: dict[str, dict[str, int]] = {}
   repo_url, token = get_github_credentials()
   clean_repo_url = sanitize_git_url(repo_url)
@@ -332,75 +336,82 @@ def run_sequential_pipeline() -> None:
             )
         continue
 
-    max_verify_attempts = 3
-    verified = False
+    if not skip_verify:
+      max_verify_attempts = 3
+      verified = False
 
-    for attempt in range(1, max_verify_attempts + 1):
-      logger.info(
-          "Verifying finding %s (Attempt %d/%d)...",
-          finding_id,
-          attempt,
-          max_verify_attempts,
-      )
-
-      for port in get_cleanup_ports():
-        free_port(port)
-
-      run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
-      clean_workspace(repo_dir)
-
-      verify_cmd = build_cm_command(
-          cm_binary, "verify", finding_id, cli_version=cli_version
-      )
-      verify_res = run_command(
-          verify_cmd,
-          cwd=repo_dir,
-          env=scrubbed_env,
-          check=False,
-      )
-      verify_model = resolve_command_model("verify") or "default"
-      verify_tokens = getattr(verify_res, "token_usage", None)
-      if isinstance(verify_tokens, dict):
-        accumulate_model_token_usage(token_usage, verify_model, verify_tokens)
-      for port in get_cleanup_ports():
-        free_port(port)
-
-      if verify_res.returncode == 0 and is_finding_verified(
-          state_db_path, finding_id
-      ):
+      for attempt in range(1, max_verify_attempts + 1):
         logger.info(
-            "Successfully verified finding %s on attempt %d.",
+            "Verifying finding %s (Attempt %d/%d)...",
             finding_id,
-            attempt,
-        )
-        verified = True
-        break
-      else:
-        logger.warning(
-            "Attempt %d/%d failed to verify finding %s.",
             attempt,
             max_verify_attempts,
-            finding_id,
         )
-        if attempt < max_verify_attempts:
-          logger.info("Retrying verification in 5 seconds...")
-          time.sleep(5)
 
-    if not verified:
-      logger.error(
-          "Verification failed for finding %s after %d attempts. Skipping fix.",
-          finding_id,
-          max_verify_attempts,
-      )
+        for port in get_cleanup_ports():
+          free_port(port)
+
+        run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
+        clean_workspace(repo_dir)
+
+        verify_cmd = build_cm_command(
+            cm_binary, "verify", finding_id, cli_version=cli_version
+        )
+        verify_res = run_command(
+            verify_cmd,
+            cwd=repo_dir,
+            env=scrubbed_env,
+            check=False,
+        )
+        verify_model = resolve_command_model("verify") or "default"
+        verify_tokens = getattr(verify_res, "token_usage", None)
+        if isinstance(verify_tokens, dict):
+          accumulate_model_token_usage(token_usage, verify_model, verify_tokens)
+        for port in get_cleanup_ports():
+          free_port(port)
+
+        if verify_res.returncode == 0 and is_finding_verified(
+            state_db_path, finding_id
+        ):
+          logger.info(
+              "Successfully verified finding %s on attempt %d.",
+              finding_id,
+              attempt,
+          )
+          verified = True
+          break
+        else:
+          logger.warning(
+              "Attempt %d/%d failed to verify finding %s.",
+              attempt,
+              max_verify_attempts,
+              finding_id,
+          )
+          if attempt < max_verify_attempts:
+            logger.info("Retrying verification in 5 seconds...")
+            time.sleep(5)
+
+      if not verified:
+        logger.error(
+            "Verification failed for finding %s after %d attempts. Skipping fix.",
+            finding_id,
+            max_verify_attempts,
+        )
+        sanitize_exploit_and_artifacts(
+            repo_dir, codemender_home=os.path.dirname(state_db_path)
+        )
+        continue
+
+      # Sanitize any accidental package/build caches from .exploit before fix starts
       sanitize_exploit_and_artifacts(
           repo_dir, codemender_home=os.path.dirname(state_db_path)
       )
-      continue
-
-    # Sanitize any accidental package/build caches from .exploit before fix starts
-    sanitize_exploit_and_artifacts(
-        repo_dir, codemender_home=os.path.dirname(state_db_path)
-    )
+    else:
+      logger.info(
+          "Skipping 'cm verify' for finding %s (skip_verify=True). Proceeding"
+          " directly to fix.",
+          finding_id,
+      )
 
     logger.info(
         "Applying fix for finding %s on %s branch...",

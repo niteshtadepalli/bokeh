@@ -226,6 +226,39 @@ class TestConfig(unittest.TestCase):
               data = yaml.safe_load(f)
             self.assertEqual(data["build"]["command"], "npm install && npm test")
 
+  def test_orchestrator_config_skip_verify_default(self):
+    """Verify skip_verify defaults to True when CODEMENDER_SKIP_VERIFY is unset."""
+    from codemender_agent.config import OrchestratorConfig
+    with unittest.mock.patch.dict(os.environ, {}, clear=True):
+      cfg = OrchestratorConfig.from_env()
+      self.assertTrue(cfg.skip_verify)
+
+  def test_orchestrator_config_skip_verify_false(self):
+    """Verify skip_verify is False when CODEMENDER_SKIP_VERIFY is false/0/no."""
+    from codemender_agent.config import OrchestratorConfig
+    for false_val in ("false", "0", "no"):
+      with unittest.mock.patch.dict(
+          os.environ, {"CODEMENDER_SKIP_VERIFY": false_val}, clear=True
+      ):
+        cfg = OrchestratorConfig.from_env()
+        self.assertFalse(
+            cfg.skip_verify,
+            f"Expected False for CODEMENDER_SKIP_VERIFY={false_val}",
+        )
+
+  def test_orchestrator_config_skip_verify_true(self):
+    """Verify skip_verify is True when CODEMENDER_SKIP_VERIFY is true/1/yes."""
+    from codemender_agent.config import OrchestratorConfig
+    for true_val in ("true", "1", "yes"):
+      with unittest.mock.patch.dict(
+          os.environ, {"CODEMENDER_SKIP_VERIFY": true_val}, clear=True
+      ):
+        cfg = OrchestratorConfig.from_env()
+        self.assertTrue(
+            cfg.skip_verify,
+            f"Expected True for CODEMENDER_SKIP_VERIFY={true_val}",
+        )
+
 
 if __name__ == "__main__":
   unittest.main()
