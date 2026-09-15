@@ -947,9 +947,8 @@ on:
   schedule:
     - cron: '0 2 * * 0'  # Weekly on Sunday at 2:00 AM UTC
   pull_request:
-    # Pattern B: Triggers when 'codemender-scan' label is attached AND re-scans on new commits pushed to the PR
-    types: [labeled, synchronize]
-    branches: [main, master]
+    # Dual-Trigger: Auto-scan main/master PRs, allow on-demand 'codemender-scan' on any PR
+    types: [opened, reopened, labeled, synchronize]
     # paths-ignore: ['docs/**', '**.md', '.github/**']
   workflow_dispatch:
     # Interactive UI inputs shown when manually clicking "Run workflow" in GitHub UI
@@ -1016,7 +1015,11 @@ jobs:
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'codemender-scan') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (github.base_ref == 'main' || github.base_ref == 'master'))
+      ))
 
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
 
@@ -1124,8 +1127,8 @@ on:
   schedule:
     - cron: '0 2 * * 0'  # Weekly on Sunday at 2:00 AM UTC
   pull_request:
-    types: [labeled]
-    branches: [main, master]
+    # Dual-Trigger: Auto-scan main/master PRs, allow on-demand 'codemender-scan' on any PR
+    types: [opened, reopened, labeled, synchronize]
   workflow_dispatch:
 
 permissions:
@@ -1142,7 +1145,11 @@ jobs:
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'codemender-scan') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (github.base_ref == 'main' || github.base_ref == 'master'))
+      ))
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
     with:
       scan_target: 'services/backend'
@@ -1159,7 +1166,11 @@ jobs:
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'codemender-scan'))
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'codemender-scan') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (github.base_ref == 'main' || github.base_ref == 'master'))
+      ))
     uses: ilbzzz/codemender-agent/.github/workflows/codemender_parallel.yml@main
     with:
       scan_target: 'services/frontend'
@@ -1432,86 +1443,68 @@ which PR lifecycle events trigger the workflow.
 > [GitHub Actions Events: pull_request](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#pull_request)
 > documentation.
 
-### 8.1 Automating the `codemender-scan` Label (Default Trigger Flow)
+### 8.1 Trigger Architecture & Why Dual-Trigger is the Default
 
-Because CodeMender defaults to the `codemender-scan` label trigger to preserve
-AI model tokens and CI runner minutes, teams frequently automate the label
-attachment process to fit their developer workflows. Several practical
-strategies include:
+CodeMender defaults to the **Dual-Trigger Single Workflow** pattern:
+1. **Automatic Zero-Friction Scan**: Scans every newly opened or reopened Pull Request targeting `main` or `master` without requiring developers to apply labels or memorize commands.
+2. **On-Demand Flexibility**: Allows reviewers, authors, or automated tools to trigger scans on **any PR** (including `develop`, `release/*`, or feature branches) simply by adding the `codemender-scan` label.
 
-*   **Path-Based Auto-Labeling (e.g., via `actions/labeler`)**: Automatically
-    attach `codemender-scan` when a Pull Request modifies files in
-    security-sensitive paths (e.g., `src/**`, `api/**`, `backend/**`, or
-    specific file extensions). Modifying non-code files (such as documentation
-    or assets) will not trigger the label.
-*   **ChatOps / Slash Commands (e.g., `/codemender` or `/scan`)**: Allow
-    developers and reviewers to trigger scans on-demand by commenting
-    `/codemender` or `/scan` on the Pull Request. A lightweight comment-handling
-    action validates the commenter's permissions and applies the label.
-*   **Author Role & Contributor Tiering**: Automatically attach
-    `codemender-scan` for Pull Requests opened by internal team members or
-    organization collaborators, while requiring manual maintainer approval or
-    labeling for external/fork contributors.
-*   **Draft-to-Ready State Transitions**: Automatically apply `codemender-scan`
-    only when a Draft PR is transitioned to "Ready for review", preventing
-    premature scans on incomplete work-in-progress code.
-*   **Post-Scan Label Lifecycle Cleanup**: Remove the `codemender-scan` label
-    upon pipeline completion so that authors can easily re-trigger a fresh scan
-    simply by re-attaching the label.
+> [!IMPORTANT]
+> **Branch Filtering Gotcha in GitHub Actions**:
+> If `branches: [main, master]` is placed under `on.pull_request:`, GitHub Actions **drops all events** on other branches before the workflow even runs. Even if a reviewer adds `codemender-scan` to a PR targeting `develop`, the workflow will **not fire**.
+>
+> To support on-demand labeling on *any* branch while auto-scanning *only* `main`/`master`, branch matching is checked inside the job's `if:` condition:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, reopened, labeled, synchronize]
+
+jobs:
+  remediate:
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'codemender-scan') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (github.base_ref == 'main' || github.base_ref == 'master'))
+      ))
+```
+
+> [!TIP]
+> **Why Not Use an Auto-Labeler Action to Trigger the Scan?**:
+> In GitHub Actions, events triggered by the default `GITHUB_TOKEN` (such as a separate step adding a label) **do not trigger downstream workflows** (GitHub's recursion guard). A single workflow listening directly to both `opened` and `labeled` events avoids needing a dedicated GitHub App or PAT just to bridge two workflows.
 
 ### 8.2 Alternative PR Trigger Patterns & Reference
 
-If your team prefers an automated trigger model other than label-based gating,
-you can configure GitHub Actions to trigger scans using alternative activity
-types and filter rules.
+If your team has specific security or token budget requirements, you can customize the trigger behavior:
 
 #### 1. Practical Trigger Patterns for CodeMender
 
-You can choose one of the following patterns based on your team's workflow and
-token budget:
-
-*   **Pattern A: On-Demand Label-Triggered (Recommended Default)**:
-    -   `types: [labeled]`
-    -   *Behavior*: Scans run **only** when a developer or reviewer attaches the
-        `codemender-scan` label.
-    -   *Advantages*: Highest cost and token efficiency. Avoids running on
-        unfinished WIP commits and avoids generating 1-second skipped runs on
-        untagged PRs.
-*   **Pattern B: Label-Triggered + Auto Re-scan on Push**:
-    -   `types: [labeled, synchronize]`
-    -   *Behavior*: Scans run when `codemender-scan` is added, and
-        **automatically re-scans** whenever the author pushes new commits to
-        that PR.
-    -   *Advantages*: Ideal for iterative remediation. The author can see if
-        their fixes resolved the findings without having to remove and re-add
-        the label.
-*   **Pattern C: Universal CI Security Gate (Scan Every PR Automatically)**:
+*   **Pattern A: Dual-Trigger (Shipped Default)**:
+    -   `types: [opened, reopened, labeled, synchronize]` + branch guard in `if:`.
+    -   *Behavior*: Auto-scans new PRs targeting `main`/`master`, and allows on-demand `codemender-scan` labeling on any branch.
+    -   *Advantages*: Zero friction for primary development, full flexibility for long-running feature or release branches.
+*   **Pattern B: Pure On-Demand Label-Triggered (Manual Gate)**:
+    -   `types: [labeled, synchronize]` + `if: contains(github.event.pull_request.labels.*.name, 'codemender-scan')`
+    -   *Behavior*: Scans run **only** when `codemender-scan` is attached to a PR.
+    -   *Advantages*: Highest token efficiency. Useful if you only want to scan PRs after code review sign-off.
+*   **Pattern C: Universal CI Security Gate (Scan Every PR & Every Push)**:
     -   `types: [opened, synchronize, reopened]`
-    -   *Behavior*: Scans **every single PR** automatically upon creation and on
-        every commit push, without requiring any label.
-    -   *How to enable*: Update `types:` and remove the
-        `contains(github.event.pull_request.labels.*.name, 'codemender-scan')`
-        check from the job's `if:` condition.
-    -   *Advantages*: Maximum enforcement for zero-trust or highly regulated
-        repositories.
+    -   *Behavior*: Scans **every single PR and commit push** without checking for labels.
+    -   *Advantages*: Maximum enforcement for zero-trust repositories.
 *   **Pattern D: Ready-for-Review (Draft PR Optimization)**:
-    -   `types: [ready_for_review, synchronize]`
-    -   *Behavior*: Skips initial Draft PRs completely and only starts scanning
-        once the PR is marked "Ready for review", continuing to scan on
-        subsequent pushes.
+    -   Add `!github.event.pull_request.draft` to the job's `if:` condition and add `ready_for_review` to `types:`.
+    -   *Behavior*: Skips Draft PRs completely and triggers only when the PR is marked "Ready for review".
 
 #### 2. Filtering by Branches and File Paths
 
-*   **Target Branches (`branches: [...]`)**: Restrict PR scans to PRs targeting
-    specific branches (e.g. `branches: [main, master, 'release/**']`).
-*   **Path Filtering (`paths:` or `paths-ignore:`)**: Save LLM tokens and CI
-    runner minutes by ignoring PRs that only modify documentation or CI
-    configurations:
+*   **Path Filtering (`paths-ignore:`)**: Save LLM tokens and CI runner minutes by ignoring PRs that only modify documentation or CI configurations:
 
     ```yaml
     pull_request:
-      types: [labeled, synchronize]
-      branches: [main, master]
+      types: [opened, reopened, labeled, synchronize]
       paths-ignore:
         - 'docs/**'
         - '**.md'
@@ -1520,15 +1513,12 @@ token budget:
 
 #### 3. Available GitHub PR Activity Types (`types: [...]`)
 
-If `types:` is omitted under `pull_request:`, GitHub Actions defaults to
-`[opened, synchronize, reopened]`.
-
 | Activity Type | When It Triggers | Relevance to CodeMender |
 | :--- | :--- | :--- |
-| **`labeled`** *(Recommended)* | A label is added to the PR | **Primary trigger for on-demand scans**. Allows scanning only when `codemender-scan` label is attached, preventing token waste on WIP drafts. |
-| **`synchronize`** | New commits are pushed to the PR head branch | **Iterative development**. Auto-triggers a re-scan when new commits are pushed to an already-labeled PR. Stale in-flight runs are auto-canceled via concurrency. |
-| **`opened`** | A new PR is created | **Universal scan**. Used when teams want CodeMender to automatically scan *every* newly opened PR. |
-| **`reopened`** | A previously closed PR is reopened | **Universal scan**. Ensures newly revived PRs are validated against current base branch code. |
+| **`opened`** *(Default)* | A new PR is created | **Primary trigger.** Every PR targeting `main`/`master` is scanned automatically on creation. |
+| **`reopened`** *(Default)* | A previously closed PR is reopened | Ensures revived PRs are re-validated against current base branch code. |
+| **`labeled`** *(Default)* | A label is added to the PR | **On-demand trigger.** Allows running CodeMender on any PR by adding the `codemender-scan` label. |
+| **`synchronize`** *(Default)* | New commits are pushed to the PR head branch | **Iterative remediation.** Auto-triggers a re-scan when new commits are pushed to an active PR. Stale in-flight runs are auto-canceled via concurrency. |
 | **`ready_for_review`** | A Draft PR is converted to ready for review | **Draft workflow**. Prevents running scans while developers are actively drafting WIP code. |
 | `unlabeled` | A label is removed from the PR | Rarely used for CodeMender. |
 | `edited` | PR title, description, or base branch is modified | Useful if changing the target base branch requires a differential re-scan. |

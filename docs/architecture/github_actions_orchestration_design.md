@@ -155,21 +155,25 @@ full support for **Bring-Your-Own-Image (BYOI)** custom toolchains.
         `os.environ["GITHUB_TOKEN"]`, keeping runtime dependencies minimal and
         hermetic.
 
-3.  **Strict Trigger Restrictions & Security Boundaries**:
+3.  **Trigger Surface & Security Boundaries**:
 
     *   Scans are strictly triggered in three ways only:
         1.  **Manual trigger** (`workflow_dispatch`)
         2.  **Nightly scan** (`schedule` on default branch)
-        3.  **Certain PRs** (targeting `main`/`master` branch only) triggered by
-            a specific tag/label only (e.g. `codemender-scan`).
+        3.  **Pull Requests targeting `main`/`master`** — every such PR is
+            scanned automatically on open, push, and reopen
+            (`types: [opened, synchronize, reopened]`). Deployments that prefer
+            narrower coverage can gate on a `codemender-scan` label instead.
     *   **Internal PR Scans**: Run with secure access to repository secrets.
-        Propose remediation via Child PRs targeting the developer's feature
-        branch (`pr_head_ref`).
+        Propose remediation via one-click inline review suggestions, falling
+        back to Child PRs targeting the developer's feature branch
+        (`pr_head_ref`).
     *   **Fork PR Scans**: Automated Child PR branch pushes are skipped
-        (avoiding HTTP 403/422 errors on cross-repo boundaries). Instead,
-        CodeMender calls the GitHub REST API using `pr_number` to post a
-        structured Markdown review comment directly on the Fork PR with the
-        patch diff and local `git apply` instructions.
+        (avoiding HTTP 403/422 errors on cross-repo boundaries). Inline review
+        suggestions still apply, as they cross the fork boundary; when a patch
+        cannot be suggested inline, CodeMender calls the GitHub REST API using
+        `pr_number` to post a structured Markdown comment directly on the Fork
+        PR with the patch diff and local `git apply` instructions.
 
 4.  **Stage 1 Coordinator (`scan`)**:
 
@@ -877,7 +881,7 @@ repository to implement native GitHub Actions support.
     *   Setting up Workload Identity Federation (WIF) in GCP and configuring
         GitHub repository permissions.
     *   Setting up the GitHub App for least-privilege token generation.
-    *   Example caller workflows for Nightly scheduled scans and labeled PR
+    *   Example caller workflows for Nightly scheduled scans and Pull Request
         scans.
     *   Creating custom BYOI Docker images for specialized language stacks.
     *   Triage guide for reviewing Child PRs, viewing `$GITHUB_STEP_SUMMARY`,
@@ -889,7 +893,7 @@ repository to implement native GitHub Actions support.
 
 | Dimension | GCP Cloud Run Mode (Existing) | GitHub Actions Mode (New) |
 | :--- | :--- | :--- |
-| **Trigger Mechanism** | Cloud Scheduler $\rightarrow$ Cloud Workflows JSON payload | GitHub Schedule (cron), `workflow_dispatch`, or `pull_request` label |
+| **Trigger Mechanism** | Cloud Scheduler $\rightarrow$ Cloud Workflows JSON payload | GitHub Schedule (cron), `workflow_dispatch`, or any `pull_request` to `main`/`master` |
 | **Control Plane** | Google Cloud Workflows (`gcp_parallel_workflow.yaml`) | GHA Reusable Workflow (`.github/workflows/codemender_parallel.yml`) |
 | **Worker Scaling** | Cloud Run Job Task Array (`taskCount: N`) | GHA Dynamic Matrix (`strategy.matrix: [0..N-1]`, `fail-fast: false`) |
 | **State Transit** | Google Cloud Storage Bucket + Signed URLs | GHA Run Artifacts v4 (`.codemender_transit/shards/worker_${i}/`) |

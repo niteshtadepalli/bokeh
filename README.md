@@ -84,7 +84,7 @@ inside your own secure container runners across a scalable, 3-stage pipeline:
 
 ```mermaid
 graph TD
-    Trigger([Trigger: Schedule, Dispatch, or PR Label 'codemender-scan']) --> S1
+    Trigger([Trigger: Schedule, Dispatch, or Pull Request to main/master]) --> S1
 
     subgraph "Stage 1: Coordinator (Scan & Partition)"
         S1[1. Checkout Repository & Pin target_sha] --> S1Scan[2. Run Vulnerability Discovery<br/>'cm find .']
@@ -154,8 +154,8 @@ multiple environments via `codemender_agent/storage.py`:
 *   **Automated GCP WIF & GitHub Configuration**: The repository provides an
     automated Terraform module at [`terraform/gha_wif/`](terraform/gha_wif/)
     that provisions GCP Workload Identity Federation (WIF), IAM Service Accounts
-    with `roles/aiplatform.user`, repository `codemender-scan` PR trigger
-    labels, and non-sensitive GitHub Actions secrets
+    with `roles/aiplatform.user`, the optional `codemender-scan` PR trigger
+    label, and non-sensitive GitHub Actions secrets
     (`GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GH_APP_ID`).
 *   **Decoupled Secret Injection**: Sensitive credentials (such as the GitHub
     App private key `GH_APP_PRIVATE_KEY`) are injected out-of-band via GitHub
@@ -179,11 +179,11 @@ optimized for CI/CD developer feedback and ongoing repository health:
 
 | Feature | Scheduled Nightly Scan | Pull Request Scan ("Clean as You Code") |
 | :--- | :--- | :--- |
-| **Trigger** | Schedule (`schedule.cron`) or manual (`workflow_dispatch`) | Pull Request labeled (`codemender-scan`), opened, or synchronized |
+| **Trigger** | Schedule (`schedule.cron`) or manual (`workflow_dispatch`) | Any Pull Request opened, synchronized, or reopened against `main`/`master` |
 | **Scope** | Full repository audit against default branch (`main`) | **Differential scan**: Analyzes only lines changed in the PR merge-base diff |
 | **Base Ref** | Default branch head commit | Pull Request target base ref (`origin/<base_ref>`) |
-| **Remediation** | Opens PRs targeting default branch (`main`) | Opens Child PRs targeting the developer's PR feature branch (`pr_head_ref`) |
-| **Fork PRs** | N/A (runs on upstream repository) | Posts an inline PR review comment with patch diff and git apply commands |
+| **Remediation** | Opens PRs targeting default branch (`main`) | Posts one-click inline review suggestions on the PR; falls back to a Child PR targeting the developer's feature branch (`pr_head_ref`) |
+| **Fork PRs** | N/A (runs on upstream repository) | Same one-click inline suggestions; falls back to a Markdown comment with the patch diff and `git apply` commands |
 | **Alerts & SARIF** | Uploads full SARIF alert inventory with `underReview` suppressions | Scoped SARIF upload creating inline annotations on PR **Files changed** and **Checks** tabs |
 | **Quality Gate** | Non-blocking (informational audit & remediation pipeline) | **Blocking Quality Gate** via dedicated Commit Status (`CodeMender / Security Gate`) & `fail_on_findings=true` |
 | **Step Summary** | Full repository finding breakdown with LLM token metrics | Scoped PR table with Severity badges, CWE IDs, hyperlinked PRs, and `⚡ LLM Token Usage Summary` |
