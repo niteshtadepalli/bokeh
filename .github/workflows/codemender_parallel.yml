@@ -1,0 +1,659 @@
+name: CodeMender Parallel Remediation
+
+on:
+  workflow_call:
+    inputs:
+      runner_image:
+        description: 'Universal runner image or custom Bring-Your-Own-Image (BYOI)'
+        required: false
+        default: 'ghcr.io/ilbzzz/codemender-runner:latest'
+        type: string
+      runner_type:
+        description: 'Runner label for job execution'
+        required: false
+        default: 'ubuntu-latest'
+        type: string
+      scan_target:
+        description: 'Subdirectory path(s) to scan (default: diff-scoped on PR, repository root on push/nightly)'
+        required: false
+        default: '.'
+        type: string
+      diff_scoped_pr_scan:
+        description: 'On pull_request events, restrict cm find targets to modified source files in the PR diff'
+        required: false
+        default: true
+        type: boolean
+      build_command:
+        description: 'Custom build and test command for patch verification'
+        required: false
+        default: ''
+        type: string
+      max_tasks:
+        description: 'Maximum number of parallel worker tasks'
+        required: false
+        default: 10
+        type: number
+      intermediate_artifact_retention_days:
+        description: 'Retention period (days) for intermediate state artifacts'
+        required: false
+        default: 3
+        type: number
+      report_artifact_retention_days:
+        description: 'Retention period (days) for final triage reports'
+        required: false
+        default: 90
+        type: number
+      upload_sarif:
+        description: 'Upload generated SARIF findings to GitHub Security Tab'
+        required: false
+        default: true
+        type: boolean
+      model:
+        description: 'Default Gemini model across all stages'
+        required: false
+        default: ''
+        type: string
+      find_model:
+        description: 'Dedicated model for Stage 1 vulnerability discovery (cm find)'
+        required: false
+        default: ''
+        type: string
+      verify_model:
+        description: 'Dedicated model for Stage 2 exploit verification (cm verify)'
+        required: false
+        default: ''
+        type: string
+      fix_model:
+        description: 'Dedicated model for Stage 2 patch synthesis (cm fix)'
+        required: false
+        default: ''
+        type: string
+      skip_exploit_verification:
+        description: 'Skip dynamic exploit verification during verification stage (cm verify --skip-exploit-verification)'
+        required: false
+        default: false
+        type: boolean
+      sandbox_enabled:
+        description: 'Enable cm sandbox isolation with container capabilities'
+        required: false
+        default: true
+        type: boolean
+      fail_on_findings:
+        description: 'Exit with non-zero status if vulnerabilities >= min_blocking_severity are detected on PR'
+        required: false
+        default: true
+        type: boolean
+      min_blocking_severity:
+        description: 'Minimum severity threshold that blocks PR merge (CRITICAL, HIGH, MEDIUM, LOW)'
+        required: false
+        default: 'MEDIUM'
+        type: string
+    secrets:
+      gcp_workload_identity_provider:
+        description: 'GCP Workload Identity Provider resource name'
+        required: false
+      gcp_service_account:
+        description: 'GCP Service Account email'
+        required: false
+      gcp_sa_key:
+        description: 'GCP Service Account JSON private key'
+        required: false
+      github_app_id:
+        description: 'GitHub App ID for installation token generation'
+        required: false
+      github_app_private_key:
+        description: 'GitHub App private key (PEM format)'
+        required: false
+      custom_github_token:
+        description: 'Optional custom GitHub Personal Access Token (PAT)'
+        required: false
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+  security-events: write
+  statuses: write
+  actions: read
+  packages: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GH_APP_ID: ${{ secrets.github_app_id }}
+  GH_APP_KEY: ${{ secrets.github_app_private_key }}
+  WIF_PROVIDER: ${{ secrets.gcp_workload_identity_provider }}
+  GCP_SA_KEY: ${{ secrets.gcp_sa_key }}
+
+jobs:
+  scan:
+    name: Stage 1 - Scan & Partition
+    runs-on: ${{ inputs.runner_type }}
+    timeout-minutes: 55
+    container:
+      image: ${{ inputs.runner_image }}
+      options: --privileged
+    env:
+      GH_APP_ID: ${{ secrets.github_app_id }}
+      GH_APP_KEY: ${{ secrets.github_app_private_key }}
+      WIF_PROVIDER: ${{ secrets.gcp_workload_identity_provider }}
+      GCP_SA_KEY: ${{ secrets.gcp_sa_key }}
+    outputs:
+      matrix: ${{ steps.run-scan.outputs.matrix || '[0]' }}
+      findings_count: ${{ steps.run-scan.outputs.findings_count || '0' }}
+      target_sha: ${{ steps.run-scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
+      scan_id: ${{ steps.run-scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
+
+    steps:
+      - name: Configure Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          persist-credentials: false
+
+      - name: Mint GitHub App Token
+        id: app-token
+        if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
+        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-security-events: write
+          permission-statuses: write
+
+      - name: Authenticate to Google Cloud
+        if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
+          service_account: ${{ secrets.gcp_service_account }}
+          credentials_json: ${{ secrets.gcp_sa_key }}
+
+      - name: Resolve PR Diff Scan Targets
+        id: diff-targets
+        env:
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+          DIFF_SCOPED: ${{ inputs.diff_scoped_pr_scan }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          DEFAULT_SCAN_TARGET: ${{ inputs.scan_target }}
+        run: |
+          python3 - <<'EOF'
+          import os
+          import subprocess
+
+          is_pr = os.environ.get("IS_PR", "").lower() == "true"
+          diff_scoped = os.environ.get("DIFF_SCOPED", "true").lower() == "true"
+          base_ref = os.environ.get("BASE_REF", "").strip()
+          default_target = os.environ.get("DEFAULT_SCAN_TARGET", ".").strip() or "."
+          github_output = os.environ["GITHUB_OUTPUT"]
+
+          if not (is_pr and diff_scoped and base_ref):
+              with open(github_output, "a", encoding="utf-8") as f:
+                  f.write("skip_scan=false\n")
+                  f.write(f"resolved_target={default_target}\n")
+              raise SystemExit(0)
+
+          subprocess.run(
+              ["git", "fetch", "--no-tags", "origin", f"+refs/heads/{base_ref}:refs/remotes/origin/{base_ref}"],
+              check=False,
+          )
+          diff_cmd = ["git", "diff", "--name-only", "--diff-filter=ACMRT", f"origin/{base_ref}...HEAD"]
+          res = subprocess.run(diff_cmd, capture_output=True, text=True, check=False)
+          changed_files = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+
+          code_exts = {
+              ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+              ".c", ".cc", ".cpp", ".h", ".hpp", ".go", ".rs",
+              ".java", ".kt", ".rb", ".php", ".sh", ".bash", ".scala",
+          }
+          code_files = [
+              path for path in changed_files
+              if os.path.splitext(path)[1].lower() in code_exts and os.path.exists(path)
+          ]
+
+          if not code_files:
+              print(f"No modified source code files in PR diff (total changed files: {len(changed_files)}). Skipping cm find.")
+              with open(github_output, "a", encoding="utf-8") as f:
+                  f.write("skip_scan=true\n")
+                  f.write("resolved_target=\n")
+              raise SystemExit(0)
+
+          # If <= 15 source files changed, pass exact file paths; otherwise pass unique parent directories
+          if len(code_files) <= 15:
+              targets = code_files
+          else:
+              targets = sorted({os.path.dirname(p) or "." for p in code_files})
+
+          resolved = ",".join(targets)
+          print(f"Diff-scoped PR scan targets ({len(code_files)} modified code files): {resolved}")
+          with open(github_output, "a", encoding="utf-8") as f:
+              f.write("skip_scan=false\n")
+              f.write(f"resolved_target={resolved}\n")
+          EOF
+
+      - name: Execute Scan Stage
+        id: run-scan
+        if: steps.diff-targets.outputs.skip_scan != 'true'
+        env:
+          CODEMENDER_RUN_MODE: scan
+          CODEMENDER_STORAGE_MODE: github_actions
+          CODEMENDER_SCAN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          CODEMENDER_TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          CODEMENDER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
+          CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
+          CODEMENDER_SCAN_TARGET: ${{ steps.diff-targets.outputs.resolved_target || inputs.scan_target }}
+          CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
+          CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
+          CODEMENDER_MODEL: ${{ inputs.model }}
+          CODEMENDER_FIND_MODEL: ${{ inputs.find_model }}
+          CODEMENDER_SANDBOX_ENABLED: ${{ inputs.sandbox_enabled }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
+          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          WORKSPACE_DIR: ${{ github.workspace }}
+        run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
+
+      - name: Upload Base State Artifact
+        if: ${{ steps.run-scan.outputs.findings_count != '0' && steps.run-scan.outputs.findings_count != '' }}
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: codemender-base-state
+          path: .codemender_transit/base/
+          retention-days: ${{ inputs.intermediate_artifact_retention_days }}
+          overwrite: true
+          if-no-files-found: ignore
+
+      - name: Upload Clean SARIF Report
+        if: always() && inputs.upload_sarif && (steps.run-scan.outputs.findings_count == '0' || steps.diff-targets.outputs.skip_scan == 'true') && hashFiles('report.sarif') != ''
+        uses: github/codeql-action/upload-sarif@b56ba49b26e50535fa1e7f7db0f4f7b4bf65d80d # v3.28.10
+        continue-on-error: true
+        with:
+          sarif_file: report.sarif
+
+  worker:
+    name: Stage 2 - Worker ${{ matrix.worker_index }}
+    needs: scan
+    if: needs.scan.outputs.findings_count != '0' && needs.scan.outputs.findings_count != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        worker_index: ${{ fromJson(needs.scan.outputs.matrix) }}
+    runs-on: ${{ inputs.runner_type }}
+    timeout-minutes: 55
+    container:
+      image: ${{ inputs.runner_image }}
+      options: --privileged
+    env:
+      GH_APP_ID: ${{ secrets.github_app_id }}
+      GH_APP_KEY: ${{ secrets.github_app_private_key }}
+      WIF_PROVIDER: ${{ secrets.gcp_workload_identity_provider }}
+      GCP_SA_KEY: ${{ secrets.gcp_sa_key }}
+
+    steps:
+      - name: Configure Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mint GitHub App Token
+        id: app-token
+        if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
+        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-security-events: write
+          permission-statuses: write
+
+      - name: Authenticate to Google Cloud
+        if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
+          service_account: ${{ secrets.gcp_service_account }}
+          credentials_json: ${{ secrets.gcp_sa_key }}
+
+      - name: Download Base State Artifact
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        with:
+          name: codemender-base-state
+          path: .codemender_transit/base/
+
+      - name: Execute Worker Stage
+        env:
+          CODEMENDER_RUN_MODE: worker
+          CODEMENDER_STORAGE_MODE: github_actions
+          CODEMENDER_SCAN_ID: ${{ needs.scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
+          CODEMENDER_WORKER_INDEX: ${{ matrix.worker_index }}
+          CODEMENDER_TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
+          CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          CODEMENDER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
+          CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
+          CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
+          CODEMENDER_MODEL: ${{ inputs.model }}
+          CODEMENDER_VERIFY_MODEL: ${{ inputs.verify_model }}
+          CODEMENDER_FIX_MODEL: ${{ inputs.fix_model }}
+          CODEMENDER_SKIP_EXPLOIT_VERIFICATION: ${{ inputs.skip_exploit_verification }}
+          CODEMENDER_SANDBOX_ENABLED: ${{ inputs.sandbox_enabled }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
+          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          WORKSPACE_DIR: ${{ github.workspace }}
+        run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
+
+      - name: Upload Worker Shard Artifact
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: worker-shard-${{ matrix.worker_index }}
+          path: .codemender_transit/shards/worker_${{ matrix.worker_index }}/
+          retention-days: ${{ inputs.intermediate_artifact_retention_days }}
+          overwrite: true
+          if-no-files-found: ignore
+
+  aggregate:
+    name: Stage 3 - Aggregator & Reporting
+    needs: [scan, worker]
+    if: always() && needs.scan.result == 'success' && needs.scan.outputs.findings_count != '0' && needs.scan.outputs.findings_count != ''
+    runs-on: ${{ inputs.runner_type }}
+    timeout-minutes: 30
+    outputs:
+      blocking_count: ${{ steps.threshold-eval.outputs.blocking_count || '0' }}
+      advisory_count: ${{ steps.threshold-eval.outputs.advisory_count || '0' }}
+      gate_status: ${{ steps.threshold-eval.outputs.gate_status || 'success' }}
+      gate_description: ${{ steps.threshold-eval.outputs.gate_description || '' }}
+    container:
+      image: ${{ inputs.runner_image }}
+      options: --privileged
+    env:
+      GH_APP_ID: ${{ secrets.github_app_id }}
+      GH_APP_KEY: ${{ secrets.github_app_private_key }}
+      WIF_PROVIDER: ${{ secrets.gcp_workload_identity_provider }}
+      GCP_SA_KEY: ${{ secrets.gcp_sa_key }}
+
+    steps:
+      - name: Configure Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mint GitHub App Token
+        id: app-token
+        if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
+        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-security-events: write
+          permission-statuses: write
+
+      - name: Authenticate to Google Cloud
+        if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
+          service_account: ${{ secrets.gcp_service_account }}
+          credentials_json: ${{ secrets.gcp_sa_key }}
+
+      - name: Download Base State Artifact
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        with:
+          name: codemender-base-state
+          path: .codemender_transit/base/
+
+      - name: Download Worker Shards
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        with:
+          pattern: worker-shard-*
+          path: .codemender_transit/shards/
+          merge-multiple: true
+
+      - name: Execute Aggregator Stage
+        env:
+          CODEMENDER_RUN_MODE: aggregate
+          CODEMENDER_STORAGE_MODE: github_actions
+          CODEMENDER_SCAN_ID: ${{ needs.scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
+          CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          CODEMENDER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
+          CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
+          CODEMENDER_TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
+          CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
+          CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
+          # Defer status-check gating to the explicit threshold-eval step below so LOW/INFO findings do not block
+          CODEMENDER_FAIL_ON_FINDINGS: 'false'
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
+          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          WORKSPACE_DIR: ${{ github.workspace }}
+        run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
+
+      - name: Upload SARIF Report
+        if: always() && inputs.upload_sarif && hashFiles('report.sarif') != ''
+        uses: github/codeql-action/upload-sarif@b56ba49b26e50535fa1e7f7db0f4f7b4bf65d80d # v3.28.10
+        continue-on-error: true
+        with:
+          sarif_file: report.sarif
+
+      - name: Upload Final Reports
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: codemender-report-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'nightly' }}-run-${{ github.run_id }}
+          path: |
+            report.html
+            report.json
+            report.sarif
+          retention-days: ${{ inputs.report_artifact_retention_days }}
+          overwrite: true
+          if-no-files-found: ignore
+
+      - name: Evaluate Severity Threshold (>= ${{ inputs.min_blocking_severity }})
+        id: threshold-eval
+        if: always()
+        env:
+          MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+
+          rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0, "INFORMATIONAL": 0}
+          min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").strip().upper()
+          threshold = rank.get(min_sev, 2)
+          fail_enabled = os.environ.get("FAIL_ON_FINDINGS", "true").lower() == "true"
+
+          findings = []
+          if os.path.exists("report.json"):
+              try:
+                  with open("report.json", "r", encoding="utf-8") as f:
+                      data = json.load(f)
+                  if isinstance(data, list):
+                      findings = data
+                  elif isinstance(data, dict):
+                      findings = data.get("findings") or data.get("vulnerabilities") or data.get("results") or []
+              except Exception as exc:
+                  print(f"Warning: failed to parse report.json: {exc}")
+
+          blocking = []
+          advisory = []
+          for item in findings:
+              if not isinstance(item, dict):
+                  continue
+              sev = str(
+                  item.get("severity")
+                  or item.get("risk_level")
+                  or item.get("priority")
+                  or "MEDIUM"
+              ).strip().upper()
+              if rank.get(sev, 2) >= threshold:
+                  blocking.append((sev, item))
+              else:
+                  advisory.append((sev, item))
+
+          blocking_count = len(blocking)
+          advisory_count = len(advisory)
+          if blocking_count > 0 and fail_enabled:
+              gate_status = "failure"
+              gate_desc = (
+                  f"BLOCKED: {blocking_count} finding(s) >= {min_sev} detected in PR diff "
+                  f"({advisory_count} advisory < {min_sev})."
+              )
+          else:
+              gate_status = "success"
+              gate_desc = (
+                  f"PASSED: 0 findings >= {min_sev} in PR diff "
+                  f"({advisory_count} advisory < {min_sev} reported)."
+              )
+
+          print(gate_desc)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"blocking_count={blocking_count}\n")
+              out.write(f"advisory_count={advisory_count}\n")
+              out.write(f"gate_status={gate_status}\n")
+              out.write(f"gate_description={gate_desc}\n")
+          EOF
+
+  security-gate:
+    name: CodeMender Security Gate (>= MEDIUM)
+    needs: [scan, aggregate]
+    if: always()
+    runs-on: ${{ inputs.runner_type }}
+    timeout-minutes: 5
+    env:
+      GH_APP_ID: ${{ secrets.github_app_id }}
+      GH_APP_KEY: ${{ secrets.github_app_private_key }}
+    steps:
+      - name: Mint GitHub App Token
+        id: app-token
+        if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
+        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+          permission-statuses: write
+          permission-pull-requests: write
+
+      - name: Enforce Pre-Submit Security Gate & Publish Commit Status
+        env:
+          SCAN_RESULT: ${{ needs.scan.result }}
+          FINDINGS_COUNT: ${{ needs.scan.outputs.findings_count }}
+          AGGREGATE_RESULT: ${{ needs.aggregate.result }}
+          BLOCKING_COUNT: ${{ needs.aggregate.outputs.blocking_count || '0' }}
+          ADVISORY_COUNT: ${{ needs.aggregate.outputs.advisory_count || '0' }}
+          GATE_STATUS: ${{ needs.aggregate.outputs.gate_status || 'success' }}
+          GATE_DESC: ${{ needs.aggregate.outputs.gate_description || '' }}
+          MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
+          TARGET_SHA: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          scan_result = os.environ.get("SCAN_RESULT", "")
+          findings_count = os.environ.get("FINDINGS_COUNT", "0")
+          aggregate_result = os.environ.get("AGGREGATE_RESULT", "")
+          blocking_count = int(os.environ.get("BLOCKING_COUNT", "0") or "0")
+          advisory_count = int(os.environ.get("ADVISORY_COUNT", "0") or "0")
+          min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").upper()
+          fail_on_findings = os.environ.get("FAIL_ON_FINDINGS", "true").lower() == "true"
+          target_sha = os.environ.get("TARGET_SHA", "")
+          repo = os.environ.get("REPO_FULL_NAME", "")
+          run_url = os.environ.get("RUN_URL", "")
+          token = os.environ.get("GITHUB_TOKEN", "")
+
+          if scan_result != "success":
+              state = "error"
+              desc = f"CodeMender scan stage did not succeed (result: {scan_result})."
+              exit_code = 1
+          elif findings_count in ("0", ""):
+              state = "success"
+              desc = f"PASSED: 0 vulnerabilities >= {min_sev} detected in PR diff."
+              exit_code = 0
+          elif aggregate_result not in ("success", "skipped"):
+              state = "error"
+              desc = f"CodeMender aggregator stage failed (result: {aggregate_result})."
+              exit_code = 1
+          elif blocking_count > 0 and fail_on_findings:
+              state = "failure"
+              desc = (
+                  f"BLOCKED: {blocking_count} vulnerability(ies) >= {min_sev} detected in PR diff "
+                  f"({advisory_count} advisory)."
+              )
+              exit_code = 1
+          else:
+              state = "success"
+              desc = (
+                  f"PASSED: 0 vulnerabilities >= {min_sev} in PR diff "
+                  f"({advisory_count} Low/Info advisory finding(s))."
+              )
+              exit_code = 0
+
+          # Publish commit status 'CodeMender / Security Gate' so branch protection can track either the job or status context
+          if token and repo and target_sha:
+              status_url = f"https://api.github.com/repos/{repo}/statuses/{target_sha}"
+              payload = json.dumps({
+                  "state": state,
+                  "target_url": run_url,
+                  "description": desc[:140],
+                  "context": "CodeMender / Security Gate",
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                  status_url,
+                  data=payload,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "Content-Type": "application/json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      print(f"Published commit status 'CodeMender / Security Gate' ({state}): HTTP {resp.status}")
+              except Exception as exc:
+                  print(f"Warning: could not post commit status: {exc}")
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              badge = "✅ PASSED" if exit_code == 0 else "❌ BLOCKED"
+              with open(summary_path, "a", encoding="utf-8") as sf:
+                  sf.write(f"## 🛡️ CodeMender Pre-Submit Security Gate: {badge}\n\n")
+                  sf.write(f"- **Commit SHA:** `{target_sha[:12]}`\n")
+                  sf.write(f"- **Blocking Threshold:** `>= {min_sev}` (`CRITICAL`, `HIGH`, `MEDIUM`)\n")
+                  sf.write(f"- **Blocking Findings (`>= {min_sev}`):** `{blocking_count}`\n")
+                  sf.write(f"- **Advisory Findings (`< {min_sev}`):** `{advisory_count}`\n")
+                  sf.write(f"- **Verdict:** {desc}\n")
+
+          print(desc)
+          sys.exit(exit_code)
+          EOF

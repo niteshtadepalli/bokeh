@@ -1,0 +1,54 @@
+name: CodeMender Pre-Submit Security Gate
+
+on:
+  pull_request:
+    branches: [ "branch-*", "main", "master", "future" ]
+    types: [opened, reopened, synchronize, labeled]
+  workflow_dispatch:
+    inputs:
+      scan_target:
+        description: 'Subdirectory or file path(s) to scan (default: diff-scoped on PR, repo root on manual dispatch)'
+        required: false
+        default: 'src/bokeh'
+        type: string
+      min_blocking_severity:
+        description: 'Minimum vulnerability severity that blocks merging (CRITICAL, HIGH, MEDIUM, LOW)'
+        required: false
+        default: 'MEDIUM'
+        type: string
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+  security-events: write
+  statuses: write
+  actions: read
+  packages: read
+
+jobs:
+  remediate:
+    # Run automatically on every PR open, reopen, or new commit pushed (synchronize),
+    # or when explicitly labeled 'codemender-scan', or via manual workflow_dispatch.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.action == 'opened' ||
+      github.event.action == 'reopened' ||
+      github.event.action == 'synchronize' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'codemender-scan')
+    uses: ./.github/workflows/codemender_parallel.yml
+    with:
+      runner_type: 'ubuntu-latest'
+      scan_target: ${{ inputs.scan_target || 'src/bokeh,bokehjs/src' }}
+      diff_scoped_pr_scan: true
+      max_tasks: 10
+      upload_sarif: true
+      fail_on_findings: true
+      min_blocking_severity: ${{ inputs.min_blocking_severity || 'MEDIUM' }}
+    secrets:
+      gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      gcp_sa_key: ${{ secrets.GCP_SA_KEY }}
+      github_app_id: ${{ secrets.GITHUB_APP_ID }}
+      github_app_private_key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+      custom_github_token: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
