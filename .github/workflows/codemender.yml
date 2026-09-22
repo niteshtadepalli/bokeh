@@ -24,7 +24,6 @@ permissions:
   security-events: write
   statuses: write
   actions: read
-  packages: read
 
 jobs:
   remediate:

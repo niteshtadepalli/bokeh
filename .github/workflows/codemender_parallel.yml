@@ -3,11 +3,6 @@ name: CodeMender Parallel Remediation
 on:
   workflow_call:
     inputs:
-      runner_image:
-        description: 'Universal runner image or custom Bring-Your-Own-Image (BYOI)'
-        required: false
-        default: 'ghcr.io/ilbzzz/codemender-runner:latest'
-        type: string
       runner_type:
         description: 'Runner label for job execution'
         required: false
@@ -115,7 +110,6 @@ permissions:
   security-events: write
   statuses: write
   actions: read
-  packages: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -132,9 +126,6 @@ jobs:
     name: Stage 1 - Scan & Partition
     runs-on: ${{ inputs.runner_type }}
     timeout-minutes: 55
-    container:
-      image: ${{ inputs.runner_image }}
-      options: --privileged
     env:
       GH_APP_ID: ${{ secrets.github_app_id }}
       GH_APP_KEY: ${{ secrets.github_app_private_key }}
@@ -156,26 +147,6 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
-
-      - name: Mint GitHub App Token
-        id: app-token
-        if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
-        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
-        with:
-          app-id: ${{ secrets.github_app_id }}
-          private-key: ${{ secrets.github_app_private_key }}
-          permission-contents: write
-          permission-pull-requests: write
-          permission-security-events: write
-          permission-statuses: write
-
-      - name: Authenticate to Google Cloud
-        if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        with:
-          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
-          service_account: ${{ secrets.gcp_service_account }}
-          credentials_json: ${{ secrets.gcp_sa_key }}
 
       - name: Resolve PR Diff Scan Targets
         id: diff-targets
@@ -226,7 +197,6 @@ jobs:
                   f.write("resolved_target=\n")
               raise SystemExit(0)
 
-          # If <= 15 source files changed, pass exact file paths; otherwise pass unique parent directories
           if len(code_files) <= 15:
               targets = code_files
           else:
@@ -239,10 +209,53 @@ jobs:
               f.write(f"resolved_target={resolved}\n")
           EOF
 
+      - name: Mint GitHub App Token
+        id: app-token
+        if: steps.diff-targets.outputs.skip_scan != 'true' && env.GH_APP_ID != '' && env.GH_APP_KEY != ''
+        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-security-events: write
+          permission-statuses: write
+
+      - name: Authenticate to Google Cloud
+        if: steps.diff-targets.outputs.skip_scan != 'true' && (env.WIF_PROVIDER != '' || env.GCP_SA_KEY != '')
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
+          service_account: ${{ secrets.gcp_service_account }}
+          credentials_json: ${{ secrets.gcp_sa_key }}
+
+      - name: Setup CodeMender Runtime & CLI
+        if: steps.diff-targets.outputs.skip_scan != 'true'
+        run: |
+          set -euo pipefail
+          # Allow unprivileged user namespaces on Ubuntu 24.04 for CodeMender sbox sandbox
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+          # Download CodeMender CLI from Google Cloud Artifact Registry
+          curl -fsSL -o /tmp/cm-linux-amd64.zip \
+            "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
+          unzip -q -o /tmp/cm-linux-amd64.zip -d /tmp/cm-bin
+          chmod +x /tmp/cm-bin/cm
+          sudo mv /tmp/cm-bin/cm /usr/local/bin/cm
+          cm --version
+
+          # Extract bundled codemender_agent orchestrator into /opt/codemender
+          sudo mkdir -p /opt/codemender
+          sudo chown -R "$USER:$USER" /opt/codemender
+          base64 -d "$GITHUB_WORKSPACE/.github/codemender/runtime.b64" | tar -xzf - -C /opt/codemender
+          python3 -m venv /opt/codemender/venv
+          /opt/codemender/venv/bin/pip install --quiet --no-cache-dir -r /opt/codemender/requirements.txt
+
       - name: Execute Scan Stage
         id: run-scan
         if: steps.diff-targets.outputs.skip_scan != 'true'
         env:
+          PYTHONPATH: /opt/codemender
           CODEMENDER_RUN_MODE: scan
           CODEMENDER_STORAGE_MODE: github_actions
           CODEMENDER_SCAN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
@@ -289,9 +302,6 @@ jobs:
         worker_index: ${{ fromJson(needs.scan.outputs.matrix) }}
     runs-on: ${{ inputs.runner_type }}
     timeout-minutes: 55
-    container:
-      image: ${{ inputs.runner_image }}
-      options: --privileged
     env:
       GH_APP_ID: ${{ secrets.github_app_id }}
       GH_APP_KEY: ${{ secrets.github_app_private_key }}
@@ -329,6 +339,21 @@ jobs:
           service_account: ${{ secrets.gcp_service_account }}
           credentials_json: ${{ secrets.gcp_sa_key }}
 
+      - name: Setup CodeMender Runtime & CLI
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          curl -fsSL -o /tmp/cm-linux-amd64.zip \
+            "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
+          unzip -q -o /tmp/cm-linux-amd64.zip -d /tmp/cm-bin
+          chmod +x /tmp/cm-bin/cm
+          sudo mv /tmp/cm-bin/cm /usr/local/bin/cm
+          sudo mkdir -p /opt/codemender
+          sudo chown -R "$USER:$USER" /opt/codemender
+          base64 -d "$GITHUB_WORKSPACE/.github/codemender/runtime.b64" | tar -xzf - -C /opt/codemender
+          python3 -m venv /opt/codemender/venv
+          /opt/codemender/venv/bin/pip install --quiet --no-cache-dir -r /opt/codemender/requirements.txt
+
       - name: Download Base State Artifact
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
         with:
@@ -337,6 +362,7 @@ jobs:
 
       - name: Execute Worker Stage
         env:
+          PYTHONPATH: /opt/codemender
           CODEMENDER_RUN_MODE: worker
           CODEMENDER_STORAGE_MODE: github_actions
           CODEMENDER_SCAN_ID: ${{ needs.scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
@@ -377,9 +403,6 @@ jobs:
       advisory_count: ${{ steps.threshold-eval.outputs.advisory_count || '0' }}
       gate_status: ${{ steps.threshold-eval.outputs.gate_status || 'success' }}
       gate_description: ${{ steps.threshold-eval.outputs.gate_description || '' }}
-    container:
-      image: ${{ inputs.runner_image }}
-      options: --privileged
     env:
       GH_APP_ID: ${{ secrets.github_app_id }}
       GH_APP_KEY: ${{ secrets.github_app_private_key }}
@@ -417,6 +440,21 @@ jobs:
           service_account: ${{ secrets.gcp_service_account }}
           credentials_json: ${{ secrets.gcp_sa_key }}
 
+      - name: Setup CodeMender Runtime & CLI
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          curl -fsSL -o /tmp/cm-linux-amd64.zip \
+            "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
+          unzip -q -o /tmp/cm-linux-amd64.zip -d /tmp/cm-bin
+          chmod +x /tmp/cm-bin/cm
+          sudo mv /tmp/cm-bin/cm /usr/local/bin/cm
+          sudo mkdir -p /opt/codemender
+          sudo chown -R "$USER:$USER" /opt/codemender
+          base64 -d "$GITHUB_WORKSPACE/.github/codemender/runtime.b64" | tar -xzf - -C /opt/codemender
+          python3 -m venv /opt/codemender/venv
+          /opt/codemender/venv/bin/pip install --quiet --no-cache-dir -r /opt/codemender/requirements.txt
+
       - name: Download Base State Artifact
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
         with:
@@ -432,6 +470,7 @@ jobs:
 
       - name: Execute Aggregator Stage
         env:
+          PYTHONPATH: /opt/codemender
           CODEMENDER_RUN_MODE: aggregate
           CODEMENDER_STORAGE_MODE: github_actions
           CODEMENDER_SCAN_ID: ${{ needs.scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
@@ -442,7 +481,6 @@ jobs:
           CODEMENDER_TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
           CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
           CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
-          # Defer status-check gating to the explicit threshold-eval step below so LOW/INFO findings do not block
           CODEMENDER_FAIL_ON_FINDINGS: 'false'
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
           GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
@@ -617,7 +655,6 @@ jobs:
               )
               exit_code = 0
 
-          # Publish commit status 'CodeMender / Security Gate' so branch protection can track either the job or status context
           if token and repo and target_sha:
               status_url = f"https://api.github.com/repos/{repo}/statuses/{target_sha}"
               payload = json.dumps({
