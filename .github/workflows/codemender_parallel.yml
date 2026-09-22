@@ -297,16 +297,33 @@ jobs:
               )
               modified_files = {l.strip() for l in names_proc.stdout.splitlines() if l.strip()}
 
-          # 3. Run cm find across resolved targets
+          # 3. Run cm find at repository root ('.') so the entire repo is in context for cross-file analysis,
+          #    while guiding the agent via -c to check only the PR-modified files & diff
           targets = [t.strip() for part in raw_targets.split(";") for t in part.split(",") if t.strip()]
-          for target in targets:
-              cmd = ["cm", "find", target, "--yes", "--bypass-warning"]
+          if base_ref and modified_files:
+              files_bullet_list = "\n".join(f"  - {f}" for f in sorted(modified_files))
+              context_prompt = (
+                  "You are analyzing a GitHub Pull Request.\n"
+                  "1. SCOPE OF VULNERABILITY CHECKS: Check ONLY the files and code paths modified in this PR diff:\n"
+                  f"{files_bullet_list}\n"
+                  "Do NOT perform a blind full-repository crawl or report pre-existing vulnerabilities in untouched files.\n"
+                  "2. FULL REPOSITORY CONTEXT: The entire repository is mounted at `.`. You SHOULD read and grep across "
+                  "other files in the repository (callers, callees, imported helpers, sanitizers, auth middleware, type definitions) "
+                  "to trace cross-file dataflow and accurately determine whether changes in the PR introduce or expose a vulnerability.\n\n"
+                  f"--- PR GIT DIFF ---\n{diff_context}\n--- END GIT DIFF ---"
+              )
+              cmd = ["cm", "find", ".", "--yes", "--bypass-warning", "-c", context_prompt]
               if find_model:
                   cmd.extend(["--model", find_model])
-              if diff_context:
-                  cmd.extend(["-c", f"Focus on vulnerabilities introduced or exposed in this PR diff:\n{diff_context}"])
-              print(f"Running: {' '.join(cmd[:5])} ...")
+              print(f"Running full-repo-context PR scan (`cm find .`) scoped to {len(modified_files)} modified file(s)...")
               subprocess.run(cmd, cwd=workspace, check=True)
+          else:
+              for target in targets:
+                  cmd = ["cm", "find", target, "--yes", "--bypass-warning"]
+                  if find_model:
+                      cmd.extend(["--model", find_model])
+                  print(f"Running: {' '.join(cmd)} ...")
+                  subprocess.run(cmd, cwd=workspace, check=True)
 
           # 4. Export findings from cm report --format json
           rep = subprocess.run(
