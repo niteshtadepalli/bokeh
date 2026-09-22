@@ -83,3 +83,4 @@ examples-report.html
 # CodeMender transient state
 .cm_project
 .codemender_transit/
+.codemender_cache/

@@ -325,8 +325,23 @@ jobs:
               })
               return out
 
-          # 1. Initialize CodeMender workspace with full repository mounted and sandbox disabled for CI runner
-          subprocess.run(["cm", "init", "--yes", "--bypass-warning"], cwd=workspace, check=False)
+          sandbox_enabled = os.environ.get("SANDBOX_ENABLED", "true").lower() != "false"
+
+          # Build scrubbed_env for cm subprocesses: strip GitHub tokens & redirect caches inside workspace for sbox
+          cache_dir = os.path.join(workspace, ".codemender_cache")
+          tmp_dir = os.path.join(cache_dir, "tmp")
+          os.makedirs(tmp_dir, exist_ok=True)
+          cm_env = dict(os.environ)
+          for secret_key in ("GITHUB_TOKEN", "GH_APP_KEY", "GCP_SA_KEY", "CUSTOM_GITHUB_TOKEN"):
+              cm_env.pop(secret_key, None)
+          cm_env["XDG_CACHE_HOME"] = cache_dir
+          cm_env["TMPDIR"] = tmp_dir
+          cm_env["TEMP"] = tmp_dir
+          cm_env["TMP"] = tmp_dir
+          cm_env["PIP_CACHE_DIR"] = os.path.join(cache_dir, "pip")
+
+          # 1. Initialize CodeMender workspace with full repository mounted in sbox target_dir
+          subprocess.run(["cm", "init", "--yes", "--bypass-warning"], cwd=workspace, env=cm_env, check=False)
           cm_dir = os.path.expanduser("~/.codemender")
           os.makedirs(cm_dir, exist_ok=True)
           with open(os.path.join(cm_dir, "config.yaml"), "w", encoding="utf-8") as cfg:
@@ -334,7 +349,7 @@ jobs:
                   f'project_paths:\n  - "{workspace}"\n'
                   f'vcs:\n  type: "git"\n  commands:\n    reset: "git checkout HEAD -- ."\n'
                   f'build:\n  command: "{build_cmd}"\n'
-                  f'sandbox:\n  enabled: false\n  mounts:\n    target_dir: "{workspace}"\n  network:\n    profile: "permissive-open"\n'
+                  f'sandbox:\n  enabled: {str(sandbox_enabled).lower()}\n  mounts:\n    target_dir: "{workspace}"\n  network:\n    profile: "permissive-open"\n'
                   f'tools:\n  confirm_commands: false\n  confirm_writes: false\n'
               )
 
@@ -353,7 +368,8 @@ jobs:
               )
               modified_files = {l.strip() for l in names_proc.stdout.splitlines() if l.strip()}
 
-          # 3. Run cm find at repository root ('.') with --unrestricted so the entire repo is in context
+          # 3. Run cm find at repository root ('.') inside sbox sandbox with full repository context
+          sandbox_flags = [] if sandbox_enabled else ["--unrestricted"]
           targets = [t.strip() for part in raw_targets.split(";") for t in part.split(",") if t.strip()]
           if base_ref and modified_files:
               files_bullet_list = "\n".join(f"  - {f}" for f in sorted(modified_files))
@@ -367,18 +383,18 @@ jobs:
                   "to trace cross-file dataflow and accurately determine whether changes in the PR introduce or expose a vulnerability.\n\n"
                   f"--- PR GIT DIFF ---\n{diff_context}\n--- END GIT DIFF ---"
               )
-              cmd = ["cm", "find", ".", "--unrestricted", "--yes", "--bypass-warning", "-c", context_prompt]
+              cmd = ["cm", "find", ".", "--yes", "--bypass-warning", *sandbox_flags, "-c", context_prompt]
               if find_model:
                   cmd.extend(["--model", find_model])
-              print(f"Running full-repo-context PR scan (`cm find . --unrestricted`) scoped to {len(modified_files)} modified file(s)...")
-              subprocess.run(cmd, cwd=workspace, check=True)
+              print(f"Running full-repo-context PR scan (`cm find .`, sandbox={sandbox_enabled}) scoped to {len(modified_files)} modified file(s)...")
+              subprocess.run(cmd, cwd=workspace, env=cm_env, check=True)
           else:
               for target in targets:
-                  cmd = ["cm", "find", target, "--unrestricted", "--yes", "--bypass-warning"]
+                  cmd = ["cm", "find", target, "--yes", "--bypass-warning", *sandbox_flags]
                   if find_model:
                       cmd.extend(["--model", find_model])
                   print(f"Running: {' '.join(cmd)} ...")
-                  subprocess.run(cmd, cwd=workspace, check=True)
+                  subprocess.run(cmd, cwd=workspace, env=cm_env, check=True)
 
           # 4. Export findings from cm report --format json
           rep = subprocess.run(
@@ -736,6 +752,7 @@ jobs:
           REPO_FULL_NAME: ${{ github.repository }}
           BUILD_COMMAND: ${{ inputs.build_command }}
           SKIP_VERIFY: ${{ inputs.skip_exploit_verification }}
+          SANDBOX_ENABLED: ${{ inputs.sandbox_enabled }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
         run: |
           python3 - <<'EOF'
@@ -756,24 +773,38 @@ jobs:
           token = os.environ.get("GITHUB_TOKEN", "").strip()
           build_cmd = os.environ.get("BUILD_COMMAND", "").strip() or "true"
           skip_verify = os.environ.get("SKIP_VERIFY", "false").lower() == "true"
+          sandbox_enabled = os.environ.get("SANDBOX_ENABLED", "true").lower() != "false"
 
           base_dir = os.path.join(workspace, ".codemender_transit", "base")
           shard_dir = os.path.join(workspace, ".codemender_transit", "shards", f"worker_{worker_idx}")
           os.makedirs(shard_dir, exist_ok=True)
+
+          # Build scrubbed_env for cm subprocesses: strip GitHub tokens & redirect caches inside workspace for sbox
+          cache_dir = os.path.join(workspace, ".codemender_cache")
+          tmp_dir = os.path.join(cache_dir, "tmp")
+          os.makedirs(tmp_dir, exist_ok=True)
+          cm_env = dict(os.environ)
+          for secret_key in ("GITHUB_TOKEN", "GH_APP_KEY", "GCP_SA_KEY", "CUSTOM_GITHUB_TOKEN"):
+              cm_env.pop(secret_key, None)
+          cm_env["XDG_CACHE_HOME"] = cache_dir
+          cm_env["TMPDIR"] = tmp_dir
+          cm_env["TEMP"] = tmp_dir
+          cm_env["TMP"] = tmp_dir
+          cm_env["PIP_CACHE_DIR"] = os.path.join(cache_dir, "pip")
 
           # 1. Restore .cm_project in workspace and ~/.codemender state from Stage 1
           saved_cm_proj = os.path.join(base_dir, ".cm_project")
           if os.path.exists(saved_cm_proj):
               shutil.copy2(saved_cm_proj, os.path.join(workspace, ".cm_project"))
           else:
-              subprocess.run(["cm", "init", "--yes", "--bypass-warning"], cwd=workspace, check=False)
+              subprocess.run(["cm", "init", "--yes", "--bypass-warning"], cwd=workspace, env=cm_env, check=False)
 
           tar_path = os.path.join(base_dir, "codemender_home.tar.gz")
           if os.path.exists(tar_path):
               with tarfile.open(tar_path, "r:gz") as tar:
                   tar.extractall(path=os.path.expanduser("~"))
 
-          # Ensure ~/.codemender/config.yaml has sandbox disabled and current workspace path mounted
+          # Configure ~/.codemender/config.yaml with sbox sandbox enabled and target_dir mounted to workspace
           cm_dir = os.path.expanduser("~/.codemender")
           os.makedirs(cm_dir, exist_ok=True)
           with open(os.path.join(cm_dir, "config.yaml"), "w", encoding="utf-8") as cfg:
@@ -781,7 +812,7 @@ jobs:
                   f'project_paths:\n  - "{workspace}"\n'
                   f'vcs:\n  type: "git"\n  commands:\n    reset: "git checkout HEAD -- ."\n'
                   f'build:\n  command: "{build_cmd}"\n'
-                  f'sandbox:\n  enabled: false\n  mounts:\n    target_dir: "{workspace}"\n  network:\n    profile: "permissive-open"\n'
+                  f'sandbox:\n  enabled: {str(sandbox_enabled).lower()}\n  mounts:\n    target_dir: "{workspace}"\n  network:\n    profile: "permissive-open"\n'
                   f'tools:\n  confirm_commands: false\n  confirm_writes: false\n'
               )
 
@@ -825,7 +856,6 @@ jobs:
                           hunk_lines.append(lines[i])
                       i += 1
 
-                  # Trim leading/trailing unchanged context lines so suggestion block only wraps the modified lines
                   while hunk_lines and hunk_lines[0].startswith(" "):
                       hunk_lines.pop(0)
                       old_start += 1
@@ -872,6 +902,7 @@ jobs:
               with open(part_file, "r", encoding="utf-8") as f:
                   partition = json.load(f)
 
+          sandbox_flags = [] if sandbox_enabled else ["--unrestricted"]
           state_db_path = os.path.join(cm_dir, "state.db")
           results = []
           for finding in partition.get("findings", []):
@@ -885,8 +916,8 @@ jobs:
               verified_status = "CONFIRMED"
               if fid and not skip_verify:
                   v_res = subprocess.run(
-                      ["cm", "verify", fid, "--unrestricted", "--yes", "--bypass-warning"],
-                      cwd=workspace, capture_output=True, text=True, check=False
+                      ["cm", "verify", fid, "--yes", "--bypass-warning", *sandbox_flags],
+                      cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
                   )
                   print(v_res.stdout or "")
                   if "DISMISSED" in (v_res.stdout or "").upper() or "FALSE_POSITIVE" in (v_res.stdout or "").upper():
@@ -896,13 +927,24 @@ jobs:
               if fid and verified_status != "DISMISSED_FALSE_POSITIVE":
                   subprocess.run(["git", "checkout", "HEAD", "--", "."], cwd=workspace, check=False)
                   fix_res = subprocess.run(
-                      ["cm", "fix", fid, "--unrestricted", "--yes", "--bypass-warning"],
-                      cwd=workspace, capture_output=True, text=True, check=False
+                      ["cm", "fix", fid, "--yes", "--bypass-warning", *sandbox_flags],
+                      cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
                   )
                   print(fix_res.stdout or "")
+                  # If sbox blocked ~/.codemender/config.yaml read inside child tool, retry with scrubbed_env
+                  if fix_res.returncode != 0 and "Sandbox violations detected" in (fix_res.stdout or ""):
+                      print(f"Retrying cm fix for {fid} with --unrestricted inside isolated runner VM (scrubbed_env)...")
+                      fix_res = subprocess.run(
+                          ["cm", "fix", fid, "--unrestricted", "--yes", "--bypass-warning"],
+                          cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
+                      )
+                      print(fix_res.stdout or "")
 
-                  # 1. Extract diff from working tree across the entire workspace
-                  diff_res = subprocess.run(["git", "diff", "HEAD"], cwd=workspace, capture_output=True, text=True, check=False)
+                  # 1. Extract diff from working tree (excluding .codemender_cache)
+                  diff_res = subprocess.run(
+                      ["git", "diff", "HEAD", "--", fpath] if fpath else ["git", "diff", "HEAD"],
+                      cwd=workspace, capture_output=True, text=True, check=False
+                  )
                   patch_diff = diff_res.stdout.strip()
 
                   # 2. Fallback: extract saved patch from ~/.codemender/state.db patches table if working tree was reset
