@@ -229,14 +229,11 @@ jobs:
           service_account: ${{ secrets.gcp_service_account }}
           credentials_json: ${{ secrets.gcp_sa_key }}
 
-      - name: Setup CodeMender Runtime & CLI
+      - name: Install CodeMender CLI (`cm`)
         if: steps.diff-targets.outputs.skip_scan != 'true'
         run: |
           set -euo pipefail
-          # Allow unprivileged user namespaces on Ubuntu 24.04 for CodeMender sbox sandbox
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-
-          # Download CodeMender CLI from Google Cloud Artifact Registry
           curl -fsSL -o /tmp/cm-linux-amd64.zip \
             "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
           unzip -q -o /tmp/cm-linux-amd64.zip -d /tmp/cm-bin
@@ -244,36 +241,132 @@ jobs:
           sudo mv /tmp/cm-bin/cm /usr/local/bin/cm
           cm --version
 
-          # Extract bundled codemender_agent orchestrator into /opt/codemender
-          sudo mkdir -p /opt/codemender
-          sudo chown -R "$USER:$USER" /opt/codemender
-          base64 -d "$GITHUB_WORKSPACE/.github/codemender/runtime.b64" | tar -xzf - -C /opt/codemender
-          python3 -m venv /opt/codemender/venv
-          /opt/codemender/venv/bin/pip install --quiet --no-cache-dir -r /opt/codemender/requirements.txt
-
-      - name: Execute Scan Stage
+      - name: Execute Scan & Partition Stage (`cm find`)
         id: run-scan
         if: steps.diff-targets.outputs.skip_scan != 'true'
         env:
-          PYTHONPATH: /opt/codemender
-          CODEMENDER_RUN_MODE: scan
-          CODEMENDER_STORAGE_MODE: github_actions
-          CODEMENDER_SCAN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
-          CODEMENDER_TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
-          CODEMENDER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
-          CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
-          CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
-          CODEMENDER_SCAN_TARGET: ${{ steps.diff-targets.outputs.resolved_target || inputs.scan_target }}
-          CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
-          CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
-          CODEMENDER_MODEL: ${{ inputs.model }}
-          CODEMENDER_FIND_MODEL: ${{ inputs.find_model }}
-          CODEMENDER_SANDBOX_ENABLED: ${{ inputs.sandbox_enabled }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
-          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
-          WORKSPACE_DIR: ${{ github.workspace }}
-        run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
+          SCAN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          SCAN_TARGETS: ${{ steps.diff-targets.outputs.resolved_target || inputs.scan_target }}
+          FIND_MODEL: ${{ inputs.find_model || inputs.model || '' }}
+          MAX_TASKS: ${{ inputs.max_tasks }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import tarfile
+
+          workspace = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+          scan_id = os.environ.get("SCAN_ID", "gha-scan")
+          target_sha = os.environ.get("TARGET_SHA", "")
+          base_ref = os.environ.get("BASE_REF", "").strip()
+          raw_targets = os.environ.get("SCAN_TARGETS", ".").strip()
+          find_model = os.environ.get("FIND_MODEL", "").strip()
+          max_tasks = max(1, int(os.environ.get("MAX_TASKS", "10") or "10"))
+          build_cmd = os.environ.get("BUILD_COMMAND", "").strip() or "true"
+
+          # 1. Initialize CodeMender workspace and config
+          subprocess.run(["cm", "init", "--yes", "--bypass-warning"], cwd=workspace, check=False)
+          cm_dir = os.path.expanduser("~/.codemender")
+          os.makedirs(cm_dir, exist_ok=True)
+          with open(os.path.join(cm_dir, "config.yaml"), "w", encoding="utf-8") as cfg:
+              cfg.write(
+                  f'project_paths:\n  - "{workspace}"\n'
+                  f'vcs:\n  type: "git"\n  commands:\n    reset: "git checkout HEAD -- ."\n'
+                  f'build:\n  command: "{build_cmd}"\n'
+                  f'tools:\n  confirm_commands: false\n  confirm_writes: false\n'
+              )
+
+          # 2. Extract PR unified diff context & modified line ranges for in-diff filtering
+          diff_context = ""
+          modified_files = set()
+          if base_ref:
+              diff_proc = subprocess.run(
+                  ["git", "diff", "-U3", f"origin/{base_ref}...HEAD"],
+                  cwd=workspace, capture_output=True, text=True, check=False
+              )
+              diff_context = diff_proc.stdout[:12000]
+              names_proc = subprocess.run(
+                  ["git", "diff", "--name-only", "--diff-filter=ACMRT", f"origin/{base_ref}...HEAD"],
+                  cwd=workspace, capture_output=True, text=True, check=False
+              )
+              modified_files = {l.strip() for l in names_proc.stdout.splitlines() if l.strip()}
+
+          # 3. Run cm find across resolved targets
+          targets = [t.strip() for part in raw_targets.split(";") for t in part.split(",") if t.strip()]
+          for target in targets:
+              cmd = ["cm", "find", target, "--yes", "--bypass-warning"]
+              if find_model:
+                  cmd.extend(["--model", find_model])
+              if diff_context:
+                  cmd.extend(["-c", f"Focus on vulnerabilities introduced or exposed in this PR diff:\n{diff_context}"])
+              print(f"Running: {' '.join(cmd[:5])} ...")
+              subprocess.run(cmd, cwd=workspace, check=True)
+
+          # 4. Export findings from cm report --format json
+          rep = subprocess.run(
+              ["cm", "report", "--format", "json", "--bypass-warning"],
+              cwd=workspace, capture_output=True, text=True, check=False
+          )
+          raw_out = rep.stdout.strip()
+          findings = []
+          if raw_out:
+              try:
+                  # Locate JSON array/object in stdout
+                  m = re.search(r'(\[.*\]|\{.*\})', raw_out, re.DOTALL)
+                  parsed = json.loads(m.group(1) if m else raw_out)
+                  if isinstance(parsed, list):
+                      findings = parsed
+                  elif isinstance(parsed, dict):
+                      findings = parsed.get("findings") or parsed.get("vulnerabilities") or parsed.get("results") or []
+              except Exception as exc:
+                  print(f"Warning parsing cm report JSON: {exc}")
+
+          # Filter to findings in modified files when on a PR
+          active_findings = []
+          for f in findings:
+              if not isinstance(f, dict):
+                  continue
+              fpath = str(f.get("file_path") or f.get("file") or f.get("location", {}).get("file") or "").lstrip("./")
+              if not modified_files or not fpath or any(fpath.endswith(mf) or mf.endswith(fpath) for mf in modified_files):
+                  active_findings.append(f)
+
+          count = len(active_findings)
+          print(f"Discovered {len(findings)} total finding(s), {count} active in PR diff.")
+
+          # 5. Partition findings across parallel workers and archive ~/.codemender state
+          transit_base = os.path.join(workspace, ".codemender_transit", "base")
+          os.makedirs(transit_base, exist_ok=True)
+          with open(os.path.join(transit_base, "active_findings.json"), "w", encoding="utf-8") as af:
+              json.dump(active_findings, af, indent=2)
+
+          num_workers = min(max_tasks, max(1, count)) if count > 0 else 1
+          partitions = [[] for _ in range(num_workers)]
+          for idx, item in enumerate(active_findings):
+              fid = str(item.get("finding_id") or item.get("id") or idx)
+              partitions[idx % num_workers].append(fid)
+
+          for w_idx, part_ids in enumerate(partitions):
+              with open(os.path.join(transit_base, f"partition_{w_idx}.json"), "w", encoding="utf-8") as pf:
+                  json.dump({"worker_index": w_idx, "finding_ids": part_ids, "findings": [
+                      f for f in active_findings if str(f.get("finding_id") or f.get("id")) in part_ids
+                  ]}, pf, indent=2)
+
+          with tarfile.open(os.path.join(transit_base, "codemender_home.tar.gz"), "w:gz") as tar:
+              tar.add(cm_dir, arcname=".codemender")
+
+          matrix_json = json.dumps(list(range(num_workers))) if count > 0 else "[0]"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"matrix={matrix_json}\n")
+              out.write(f"findings_count={count}\n")
+              out.write(f"target_sha={target_sha}\n")
+              out.write(f"scan_id={scan_id}\n")
+          EOF
 
       - name: Upload Base State Artifact
         if: ${{ steps.run-scan.outputs.findings_count != '0' && steps.run-scan.outputs.findings_count != '' }}
@@ -284,13 +377,6 @@ jobs:
           retention-days: ${{ inputs.intermediate_artifact_retention_days }}
           overwrite: true
           if-no-files-found: ignore
-
-      - name: Upload Clean SARIF Report
-        if: always() && inputs.upload_sarif && (steps.run-scan.outputs.findings_count == '0' || steps.diff-targets.outputs.skip_scan == 'true') && hashFiles('report.sarif') != ''
-        uses: github/codeql-action/upload-sarif@b56ba49b26e50535fa1e7f7db0f4f7b4bf65d80d # v3.28.10
-        continue-on-error: true
-        with:
-          sarif_file: report.sarif
 
   worker:
     name: Stage 2 - Worker ${{ matrix.worker_index }}
@@ -339,7 +425,7 @@ jobs:
           service_account: ${{ secrets.gcp_service_account }}
           credentials_json: ${{ secrets.gcp_sa_key }}
 
-      - name: Setup CodeMender Runtime & CLI
+      - name: Install CodeMender CLI (`cm`)
         run: |
           set -euo pipefail
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
@@ -348,11 +434,6 @@ jobs:
           unzip -q -o /tmp/cm-linux-amd64.zip -d /tmp/cm-bin
           chmod +x /tmp/cm-bin/cm
           sudo mv /tmp/cm-bin/cm /usr/local/bin/cm
-          sudo mkdir -p /opt/codemender
-          sudo chown -R "$USER:$USER" /opt/codemender
-          base64 -d "$GITHUB_WORKSPACE/.github/codemender/runtime.b64" | tar -xzf - -C /opt/codemender
-          python3 -m venv /opt/codemender/venv
-          /opt/codemender/venv/bin/pip install --quiet --no-cache-dir -r /opt/codemender/requirements.txt
 
       - name: Download Base State Artifact
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
@@ -360,28 +441,105 @@ jobs:
           name: codemender-base-state
           path: .codemender_transit/base/
 
-      - name: Execute Worker Stage
+      - name: Execute Worker Verification & Fix Synthesis (`cm verify` + `cm fix`)
         env:
-          PYTHONPATH: /opt/codemender
-          CODEMENDER_RUN_MODE: worker
-          CODEMENDER_STORAGE_MODE: github_actions
-          CODEMENDER_SCAN_ID: ${{ needs.scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
-          CODEMENDER_WORKER_INDEX: ${{ matrix.worker_index }}
-          CODEMENDER_TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
-          CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
-          CODEMENDER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
-          CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
-          CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
-          CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
-          CODEMENDER_MODEL: ${{ inputs.model }}
-          CODEMENDER_VERIFY_MODEL: ${{ inputs.verify_model }}
-          CODEMENDER_FIX_MODEL: ${{ inputs.fix_model }}
-          CODEMENDER_SKIP_EXPLOIT_VERIFICATION: ${{ inputs.skip_exploit_verification }}
-          CODEMENDER_SANDBOX_ENABLED: ${{ inputs.sandbox_enabled }}
+          WORKER_INDEX: ${{ matrix.worker_index }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          VERIFY_MODEL: ${{ inputs.verify_model || inputs.model || '' }}
+          FIX_MODEL: ${{ inputs.fix_model || inputs.model || '' }}
+          SKIP_VERIFY: ${{ inputs.skip_exploit_verification }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
-          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
-          WORKSPACE_DIR: ${{ github.workspace }}
-        run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+          import subprocess
+          import tarfile
+          import urllib.request
+
+          workspace = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+          worker_idx = os.environ.get("WORKER_INDEX", "0")
+          pr_number = os.environ.get("PR_NUMBER", "").strip()
+          target_sha = os.environ.get("TARGET_SHA", "").strip()
+          repo = os.environ.get("REPO_FULL_NAME", "").strip()
+          token = os.environ.get("GITHUB_TOKEN", "").strip()
+          skip_verify = os.environ.get("SKIP_VERIFY", "false").lower() == "true"
+
+          base_dir = os.path.join(workspace, ".codemender_transit", "base")
+          shard_dir = os.path.join(workspace, ".codemender_transit", "shards", f"worker_{worker_idx}")
+          os.makedirs(shard_dir, exist_ok=True)
+
+          # Restore ~/.codemender state from Stage 1
+          tar_path = os.path.join(base_dir, "codemender_home.tar.gz")
+          if os.path.exists(tar_path):
+              with tarfile.open(tar_path, "r:gz") as tar:
+                  tar.extractall(path=os.path.expanduser("~"))
+
+          part_file = os.path.join(base_dir, f"partition_{worker_idx}.json")
+          partition = {"finding_ids": [], "findings": []}
+          if os.path.exists(part_file):
+              with open(part_file, "r", encoding="utf-8") as f:
+                  partition = json.load(f)
+
+          results = []
+          for finding in partition.get("findings", []):
+              fid = str(finding.get("finding_id") or finding.get("id") or "")
+              sev = str(finding.get("severity") or finding.get("risk_level") or "MEDIUM").upper()
+              title = str(finding.get("title") or finding.get("vulnerability_type") or fid)
+              fpath = str(finding.get("file_path") or finding.get("file") or "").lstrip("./")
+              line_no = int(finding.get("line_number") or finding.get("line") or 1)
+
+              if fid and not skip_verify:
+                  subprocess.run(["cm", "verify", fid, "--yes", "--bypass-warning"], cwd=workspace, check=False)
+
+              patch_diff = ""
+              if fid:
+                  subprocess.run(["git", "checkout", "HEAD", "--", "."], cwd=workspace, check=False)
+                  subprocess.run(["cm", "fix", fid, "--yes", "--bypass-warning"], cwd=workspace, check=False)
+                  diff_res = subprocess.run(["git", "diff"], cwd=workspace, capture_output=True, text=True, check=False)
+                  patch_diff = diff_res.stdout.strip()
+                  subprocess.run(["git", "checkout", "HEAD", "--", "."], cwd=workspace, check=False)
+
+              # Post inline review comment on PR if a finding was localized to a file
+              if pr_number and repo and token and fpath:
+                  body = (
+                      f"### 🛡️ CodeMender Security Finding (`{sev}`)\n"
+                      f"**{title}** (ID: `{fid}`)\n\n"
+                      f"{finding.get('description') or ''}\n"
+                  )
+                  if patch_diff:
+                      body += f"\n<details><summary>💡 Proposed CodeMender Patch (`cm fix`)</summary>\n\n```diff\n{patch_diff[:4000]}\n```\n</details>\n"
+                  url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments"
+                  payload = json.dumps({
+                      "body": body,
+                      "commit_id": target_sha,
+                      "path": fpath,
+                      "line": max(1, line_no),
+                      "side": "RIGHT",
+                  }).encode("utf-8")
+                  req = urllib.request.Request(
+                      url, data=payload,
+                      headers={
+                          "Authorization": f"Bearer {token}",
+                          "Accept": "application/vnd.github+json",
+                          "Content-Type": "application/json",
+                      },
+                      method="POST",
+                  )
+                  try:
+                      urllib.request.urlopen(req, timeout=15)
+                  except Exception as exc:
+                      print(f"Note: inline comment fallback ({fpath}:{line_no}): {exc}")
+
+              finding_copy = dict(finding)
+              finding_copy["has_patch"] = bool(patch_diff)
+              results.append(finding_copy)
+
+          with open(os.path.join(shard_dir, "results.json"), "w", encoding="utf-8") as rf:
+              json.dump(results, rf, indent=2)
+          EOF
 
       - name: Upload Worker Shard Artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -432,28 +590,14 @@ jobs:
           permission-security-events: write
           permission-statuses: write
 
-      - name: Authenticate to Google Cloud
-        if: env.WIF_PROVIDER != '' || env.GCP_SA_KEY != ''
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        with:
-          workload_identity_provider: ${{ secrets.gcp_workload_identity_provider }}
-          service_account: ${{ secrets.gcp_service_account }}
-          credentials_json: ${{ secrets.gcp_sa_key }}
-
-      - name: Setup CodeMender Runtime & CLI
+      - name: Install CodeMender CLI (`cm`)
         run: |
           set -euo pipefail
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           curl -fsSL -o /tmp/cm-linux-amd64.zip \
             "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
           unzip -q -o /tmp/cm-linux-amd64.zip -d /tmp/cm-bin
           chmod +x /tmp/cm-bin/cm
           sudo mv /tmp/cm-bin/cm /usr/local/bin/cm
-          sudo mkdir -p /opt/codemender
-          sudo chown -R "$USER:$USER" /opt/codemender
-          base64 -d "$GITHUB_WORKSPACE/.github/codemender/runtime.b64" | tar -xzf - -C /opt/codemender
-          python3 -m venv /opt/codemender/venv
-          /opt/codemender/venv/bin/pip install --quiet --no-cache-dir -r /opt/codemender/requirements.txt
 
       - name: Download Base State Artifact
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
@@ -468,24 +612,121 @@ jobs:
           path: .codemender_transit/shards/
           merge-multiple: true
 
-      - name: Execute Aggregator Stage
+      - name: Aggregate Findings, Export SARIF/JSON & Post Sticky PR Summary
+        id: threshold-eval
         env:
-          PYTHONPATH: /opt/codemender
-          CODEMENDER_RUN_MODE: aggregate
-          CODEMENDER_STORAGE_MODE: github_actions
-          CODEMENDER_SCAN_ID: ${{ needs.scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
-          CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
-          CODEMENDER_PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
-          CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
-          CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
-          CODEMENDER_TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
-          CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
-          CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
-          CODEMENDER_FAIL_ON_FINDINGS: 'false'
+          MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          REPO_FULL_NAME: ${{ github.repository }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
-          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
-          WORKSPACE_DIR: ${{ github.workspace }}
-        run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
+        run: |
+          python3 - <<'EOF'
+          import glob
+          import json
+          import os
+          import subprocess
+          import tarfile
+          import urllib.request
+
+          workspace = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+          base_dir = os.path.join(workspace, ".codemender_transit", "base")
+          tar_path = os.path.join(base_dir, "codemender_home.tar.gz")
+          if os.path.exists(tar_path):
+              with tarfile.open(tar_path, "r:gz") as tar:
+                  tar.extractall(path=os.path.expanduser("~"))
+
+          # Export SARIF and HTML reports using cm report
+          sarif_res = subprocess.run(["cm", "report", "--format", "sarif", "--bypass-warning"], cwd=workspace, capture_output=True, text=True, check=False)
+          if sarif_res.stdout.strip().startswith("{"):
+              with open("report.sarif", "w", encoding="utf-8") as sf:
+                  sf.write(sarif_res.stdout.strip())
+
+          html_res = subprocess.run(["cm", "report", "--format", "html", "--bypass-warning"], cwd=workspace, capture_output=True, text=True, check=False)
+          if html_res.stdout.strip():
+              with open("report.html", "w", encoding="utf-8") as hf:
+                  hf.write(html_res.stdout)
+
+          # Merge findings from worker shards (or fallback to base active_findings.json)
+          findings = []
+          for shard_file in sorted(glob.glob(os.path.join(workspace, ".codemender_transit", "shards", "**", "results.json"), recursive=True)):
+              with open(shard_file, "r", encoding="utf-8") as f:
+                  findings.extend(json.load(f))
+          if not findings:
+              af_path = os.path.join(base_dir, "active_findings.json")
+              if os.path.exists(af_path):
+                  with open(af_path, "r", encoding="utf-8") as f:
+                      findings = json.load(f)
+
+          with open("report.json", "w", encoding="utf-8") as rf:
+              json.dump({"findings": findings}, rf, indent=2)
+
+          rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0, "INFORMATIONAL": 0}
+          min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").strip().upper()
+          threshold = rank.get(min_sev, 2)
+          fail_enabled = os.environ.get("FAIL_ON_FINDINGS", "true").lower() == "true"
+
+          blocking = []
+          advisory = []
+          for item in findings:
+              sev = str(item.get("severity") or item.get("risk_level") or "MEDIUM").strip().upper()
+              if rank.get(sev, 2) >= threshold:
+                  blocking.append((sev, item))
+              else:
+                  advisory.append((sev, item))
+
+          blocking_count = len(blocking)
+          advisory_count = len(advisory)
+          gate_status = "failure" if (blocking_count > 0 and fail_enabled) else "success"
+          gate_desc = (
+              f"{'BLOCKED' if gate_status == 'failure' else 'PASSED'}: "
+              f"{blocking_count} finding(s) >= {min_sev} in PR diff ({advisory_count} advisory < {min_sev})."
+          )
+
+          # Post summary comment on PR
+          pr_number = os.environ.get("PR_NUMBER", "").strip()
+          repo = os.environ.get("REPO_FULL_NAME", "").strip()
+          token = os.environ.get("GITHUB_TOKEN", "").strip()
+          if pr_number and repo and token:
+              rows = []
+              for sev, item in blocking + advisory:
+                  status_tag = "🚫 BLOCKING" if rank.get(sev, 2) >= threshold else "ℹ️ Advisory"
+                  fpath = item.get("file_path") or item.get("file") or "N/A"
+                  line_no = item.get("line_number") or item.get("line") or ""
+                  title = item.get("title") or item.get("vulnerability_type") or "Finding"
+                  patch_tag = "✅ Yes" if item.get("has_patch") else "—"
+                  rows.append(f"| `{sev}` | {status_tag} | `{fpath}:{line_no}` | {title} | {patch_tag} |")
+
+              table_md = "\n".join([
+                  "### 🛡️ CodeMender Pre-Submit Security Report",
+                  "",
+                  f"**Gate Status:** {'❌ **BLOCKED** (Merge prevented until `>= ' + min_sev + '` findings are resolved)' if gate_status == 'failure' else '✅ **PASSED**'}",
+                  "",
+                  "| Severity | Gate Impact | Location | Vulnerability | Auto-Fix (`cm fix`) |",
+                  "| :--- | :--- | :--- | :--- | :---: |",
+                  *rows,
+              ])
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
+                  data=json.dumps({"body": table_md}).encode("utf-8"),
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "Content-Type": "application/json",
+                  },
+                  method="POST",
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+              except Exception as exc:
+                  print(f"Warning posting PR summary comment: {exc}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"blocking_count={blocking_count}\n")
+              out.write(f"advisory_count={advisory_count}\n")
+              out.write(f"gate_status={gate_status}\n")
+              out.write(f"gate_description={gate_desc}\n")
+          EOF
 
       - name: Upload SARIF Report
         if: always() && inputs.upload_sarif && hashFiles('report.sarif') != ''
@@ -506,73 +747,6 @@ jobs:
           retention-days: ${{ inputs.report_artifact_retention_days }}
           overwrite: true
           if-no-files-found: ignore
-
-      - name: Evaluate Severity Threshold (>= ${{ inputs.min_blocking_severity }})
-        id: threshold-eval
-        if: always()
-        env:
-          MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
-          FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
-        run: |
-          python3 - <<'EOF'
-          import json
-          import os
-
-          rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0, "INFORMATIONAL": 0}
-          min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").strip().upper()
-          threshold = rank.get(min_sev, 2)
-          fail_enabled = os.environ.get("FAIL_ON_FINDINGS", "true").lower() == "true"
-
-          findings = []
-          if os.path.exists("report.json"):
-              try:
-                  with open("report.json", "r", encoding="utf-8") as f:
-                      data = json.load(f)
-                  if isinstance(data, list):
-                      findings = data
-                  elif isinstance(data, dict):
-                      findings = data.get("findings") or data.get("vulnerabilities") or data.get("results") or []
-              except Exception as exc:
-                  print(f"Warning: failed to parse report.json: {exc}")
-
-          blocking = []
-          advisory = []
-          for item in findings:
-              if not isinstance(item, dict):
-                  continue
-              sev = str(
-                  item.get("severity")
-                  or item.get("risk_level")
-                  or item.get("priority")
-                  or "MEDIUM"
-              ).strip().upper()
-              if rank.get(sev, 2) >= threshold:
-                  blocking.append((sev, item))
-              else:
-                  advisory.append((sev, item))
-
-          blocking_count = len(blocking)
-          advisory_count = len(advisory)
-          if blocking_count > 0 and fail_enabled:
-              gate_status = "failure"
-              gate_desc = (
-                  f"BLOCKED: {blocking_count} finding(s) >= {min_sev} detected in PR diff "
-                  f"({advisory_count} advisory < {min_sev})."
-              )
-          else:
-              gate_status = "success"
-              gate_desc = (
-                  f"PASSED: 0 findings >= {min_sev} in PR diff "
-                  f"({advisory_count} advisory < {min_sev} reported)."
-              )
-
-          print(gate_desc)
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"blocking_count={blocking_count}\n")
-              out.write(f"advisory_count={advisory_count}\n")
-              out.write(f"gate_status={gate_status}\n")
-              out.write(f"gate_description={gate_desc}\n")
-          EOF
 
   security-gate:
     name: CodeMender Security Gate (>= MEDIUM)
