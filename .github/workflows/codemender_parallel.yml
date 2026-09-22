@@ -14,7 +14,7 @@ on:
         default: '.'
         type: string
       diff_scoped_pr_scan:
-        description: 'On pull_request events, restrict cm find targets to modified source files in the PR diff'
+        description: 'On pull_request events, restrict cm find checks to modified source files in the PR diff while keeping full repo in context'
         required: false
         default: true
         type: boolean
@@ -123,7 +123,7 @@ env:
 
 jobs:
   scan:
-    name: Stage 1 - Scan & Partition
+    name: Stage 1 - Fast Scan & Immediate PR Report (cm find)
     runs-on: ${{ inputs.runner_type }}
     timeout-minutes: 55
     env:
@@ -134,6 +134,8 @@ jobs:
     outputs:
       matrix: ${{ steps.run-scan.outputs.matrix || '[0]' }}
       findings_count: ${{ steps.run-scan.outputs.findings_count || '0' }}
+      blocking_count: ${{ steps.run-scan.outputs.blocking_count || '0' }}
+      advisory_count: ${{ steps.run-scan.outputs.advisory_count || '0' }}
       target_sha: ${{ steps.run-scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
       scan_id: ${{ steps.run-scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
 
@@ -241,36 +243,51 @@ jobs:
           sudo mv /tmp/cm-bin/cm /usr/local/bin/cm
           cm --version
 
-      - name: Execute Scan & Partition Stage (`cm find`)
+      - name: Execute `cm find` & Post Immediate PR Security Report
         id: run-scan
         if: steps.diff-targets.outputs.skip_scan != 'true'
         env:
           SCAN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
           TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SCAN_TARGETS: ${{ steps.diff-targets.outputs.resolved_target || inputs.scan_target }}
           FIND_MODEL: ${{ inputs.find_model || inputs.model || '' }}
           MAX_TASKS: ${{ inputs.max_tasks }}
           BUILD_COMMAND: ${{ inputs.build_command }}
+          MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
         run: |
           python3 - <<'EOF'
           import json
           import os
           import re
-          import shutil
           import subprocess
           import tarfile
+          import urllib.request
 
           workspace = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
           scan_id = os.environ.get("SCAN_ID", "gha-scan")
           target_sha = os.environ.get("TARGET_SHA", "")
           base_ref = os.environ.get("BASE_REF", "").strip()
+          pr_number = os.environ.get("PR_NUMBER", "").strip()
+          repo = os.environ.get("REPO_FULL_NAME", "").strip()
+          run_url = os.environ.get("RUN_URL", "").strip()
+          token = os.environ.get("GITHUB_TOKEN", "").strip()
           raw_targets = os.environ.get("SCAN_TARGETS", ".").strip()
           find_model = os.environ.get("FIND_MODEL", "").strip()
           max_tasks = max(1, int(os.environ.get("MAX_TASKS", "10") or "10"))
           build_cmd = os.environ.get("BUILD_COMMAND", "").strip() or "true"
+          min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").strip().upper()
+          fail_enabled = os.environ.get("FAIL_ON_FINDINGS", "true").lower() == "true"
 
-          # 1. Initialize CodeMender workspace and config
+          rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0, "INFORMATIONAL": 0}
+          threshold = rank.get(min_sev, 2)
+
+          # 1. Initialize CodeMender workspace with full repository mounted in project_paths
           subprocess.run(["cm", "init", "--yes", "--bypass-warning"], cwd=workspace, check=False)
           cm_dir = os.path.expanduser("~/.codemender")
           os.makedirs(cm_dir, exist_ok=True)
@@ -282,7 +299,7 @@ jobs:
                   f'tools:\n  confirm_commands: false\n  confirm_writes: false\n'
               )
 
-          # 2. Extract PR unified diff context & modified line ranges for in-diff filtering
+          # 2. Extract PR unified diff context & modified file list
           diff_context = ""
           modified_files = set()
           if base_ref:
@@ -297,8 +314,7 @@ jobs:
               )
               modified_files = {l.strip() for l in names_proc.stdout.splitlines() if l.strip()}
 
-          # 3. Run cm find at repository root ('.') so the entire repo is in context for cross-file analysis,
-          #    while guiding the agent via -c to check only the PR-modified files & diff
+          # 3. Run cm find at repository root ('.') so the entire repo is in context for cross-file analysis
           targets = [t.strip() for part in raw_targets.split(";") for t in part.split(",") if t.strip()]
           if base_ref and modified_files:
               files_bullet_list = "\n".join(f"  - {f}" for f in sorted(modified_files))
@@ -334,7 +350,6 @@ jobs:
           findings = []
           if raw_out:
               try:
-                  # Locate JSON array/object in stdout
                   m = re.search(r'(\[.*\]|\{.*\})', raw_out, re.DOTALL)
                   parsed = json.loads(m.group(1) if m else raw_out)
                   if isinstance(parsed, list):
@@ -344,7 +359,6 @@ jobs:
               except Exception as exc:
                   print(f"Warning parsing cm report JSON: {exc}")
 
-          # Filter to findings in modified files when on a PR
           active_findings = []
           for f in findings:
               if not isinstance(f, dict):
@@ -353,10 +367,109 @@ jobs:
               if not modified_files or not fpath or any(fpath.endswith(mf) or mf.endswith(fpath) for mf in modified_files):
                   active_findings.append(f)
 
-          count = len(active_findings)
-          print(f"Discovered {len(findings)} total finding(s), {count} active in PR diff.")
+          blocking = []
+          advisory = []
+          for item in active_findings:
+              sev = str(item.get("severity") or item.get("risk_level") or "MEDIUM").strip().upper()
+              fpath = str(item.get("file_path") or item.get("file") or "").lstrip("./")
+              line_no = int(item.get("line_number") or item.get("line") or 1)
+              title = str(item.get("title") or item.get("vulnerability_type") or "Security Finding")
+              desc_short = str(item.get("description") or "").replace("\n", " ")[:240]
+              if rank.get(sev, 2) >= threshold:
+                  blocking.append((sev, item))
+                  if fpath:
+                      print(f"::error file={fpath},line={line_no},title=CodeMender [{sev}] {title}::{desc_short}")
+              else:
+                  advisory.append((sev, item))
+                  if fpath:
+                      print(f"::warning file={fpath},line={line_no},title=CodeMender [{sev}] {title}::{desc_short}")
 
-          # 5. Partition findings across parallel workers and archive ~/.codemender state
+          count = len(active_findings)
+          blocking_count = len(blocking)
+          advisory_count = len(advisory)
+          print(f"Discovered {count} active PR finding(s): {blocking_count} blocking (>={min_sev}), {advisory_count} advisory.")
+
+          # 5. IMMEDIATELY post/update sticky PR comment with `cm find` results BEFORE Stage 2 (`cm verify` & `cm fix`) starts!
+          def upsert_sticky_comment(markdown_body: str) -> None:
+              if not (pr_number and repo and token):
+                  return
+              marker = "<!-- codemender-security-summary -->"
+              full_body = f"{marker}\n{markdown_body}"
+              headers = {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json",
+              }
+              existing_id = None
+              try:
+                  list_req = urllib.request.Request(
+                      f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments?per_page=100",
+                      headers=headers, method="GET"
+                  )
+                  with urllib.request.urlopen(list_req, timeout=15) as resp:
+                      for c in json.loads(resp.read().decode("utf-8")):
+                          if marker in str(c.get("body", "")):
+                              existing_id = c.get("id")
+                              break
+              except Exception as exc:
+                  print(f"Note: listing PR comments: {exc}")
+
+              target_url = (
+                  f"https://api.github.com/repos/{repo}/issues/comments/{existing_id}"
+                  if existing_id else f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+              )
+              method = "PATCH" if existing_id else "POST"
+              req = urllib.request.Request(
+                  target_url,
+                  data=json.dumps({"body": full_body}).encode("utf-8"),
+                  headers=headers,
+                  method=method,
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print(f"Immediately published Stage 1 (`cm find`) report to PR #{pr_number} ({method}).")
+              except Exception as exc:
+                  print(f"Warning posting immediate PR comment: {exc}")
+
+          if count > 0:
+              rows = []
+              details_blocks = []
+              for sev, item in blocking + advisory:
+                  fid = str(item.get("finding_id") or item.get("id") or "")
+                  status_tag = "🚫 **BLOCKING**" if rank.get(sev, 2) >= threshold else "ℹ️ Advisory"
+                  fpath = item.get("file_path") or item.get("file") or "N/A"
+                  line_no = item.get("line_number") or item.get("line") or 1
+                  title = item.get("title") or item.get("vulnerability_type") or "Vulnerability"
+                  desc = item.get("description") or ""
+                  rows.append(
+                      f"| `{sev}` | {status_tag} | `{fpath}:{line_no}` | **{title}** (`{fid}`) | ⏳ *Running `cm verify` & `cm fix` in background...* |"
+                  )
+                  if desc:
+                      details_blocks.append(f"<details><summary>🔎 <b>[{sev}] {title}</b> (<code>{fpath}:{line_no}</code>)</summary>\n\n{desc}\n</details>")
+
+              verdict_banner = (
+                  f"❌ **BLOCKED** — `{blocking_count}` vulnerability(ies) `>= {min_sev}` detected in PR diff. "
+                  f"Merging is blocked until resolved."
+                  if (blocking_count > 0 and fail_enabled)
+                  else f"✅ **PASSED** — `0` vulnerabilities `>= {min_sev}` (`{advisory_count}` advisory finding(s))."
+              )
+              initial_comment = "\n".join([
+                  "### 🛡️ CodeMender Pre-Submit Security Report *(Stage 1: Initial `cm find` Scan)*",
+                  "",
+                  f"**Gate Status:** {verdict_banner}",
+                  f"> ⚡ **Early Feedback Mode:** `cm find` has completed and posted these findings immediately. "
+                  f"**Background workers (`cm verify` & `cm fix`) are now running asynchronously** ([view live run]({run_url})) "
+                  f"to verify exploitability and post inline patch suggestions. This comment will automatically update when fixes are ready.",
+                  "",
+                  "| Severity | Gate Impact | Location | Vulnerability | Verification & Auto-Fix (`cm verify` / `cm fix`) |",
+                  "| :--- | :--- | :--- | :--- | :--- |",
+                  *rows,
+                  "",
+                  *details_blocks,
+              ])
+              upsert_sticky_comment(initial_comment)
+
+          # 6. Partition findings across parallel background workers and archive ~/.codemender state
           transit_base = os.path.join(workspace, ".codemender_transit", "base")
           os.makedirs(transit_base, exist_ok=True)
           with open(os.path.join(transit_base, "active_findings.json"), "w", encoding="utf-8") as af:
@@ -381,6 +494,8 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"matrix={matrix_json}\n")
               out.write(f"findings_count={count}\n")
+              out.write(f"blocking_count={blocking_count}\n")
+              out.write(f"advisory_count={advisory_count}\n")
               out.write(f"target_sha={target_sha}\n")
               out.write(f"scan_id={scan_id}\n")
           EOF
@@ -395,8 +510,119 @@ jobs:
           overwrite: true
           if-no-files-found: ignore
 
+  # Stage 4 (Security Gate) depends ONLY on `scan` so it blocks PR merging IMMEDIATELY after `cm find` completes (~1-2 min),
+  # while `worker` (Stage 2) and `aggregate` (Stage 3) continue running `cm verify` and `cm fix` in the background!
+  security-gate:
+    name: CodeMender Security Gate (>= MEDIUM)
+    needs: [scan]
+    if: always()
+    runs-on: ${{ inputs.runner_type }}
+    timeout-minutes: 5
+    env:
+      GH_APP_ID: ${{ secrets.github_app_id }}
+      GH_APP_KEY: ${{ secrets.github_app_private_key }}
+    steps:
+      - name: Mint GitHub App Token
+        id: app-token
+        if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
+        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+          permission-statuses: write
+          permission-pull-requests: write
+
+      - name: Enforce Immediate Pre-Submit Security Gate & Publish Commit Status
+        env:
+          SCAN_RESULT: ${{ needs.scan.result }}
+          FINDINGS_COUNT: ${{ needs.scan.outputs.findings_count }}
+          BLOCKING_COUNT: ${{ needs.scan.outputs.blocking_count || '0' }}
+          ADVISORY_COUNT: ${{ needs.scan.outputs.advisory_count || '0' }}
+          MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
+          TARGET_SHA: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          scan_result = os.environ.get("SCAN_RESULT", "")
+          findings_count = os.environ.get("FINDINGS_COUNT", "0")
+          blocking_count = int(os.environ.get("BLOCKING_COUNT", "0") or "0")
+          advisory_count = int(os.environ.get("ADVISORY_COUNT", "0") or "0")
+          min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").upper()
+          fail_on_findings = os.environ.get("FAIL_ON_FINDINGS", "true").lower() == "true"
+          target_sha = os.environ.get("TARGET_SHA", "")
+          repo = os.environ.get("REPO_FULL_NAME", "")
+          run_url = os.environ.get("RUN_URL", "")
+          token = os.environ.get("GITHUB_TOKEN", "")
+
+          if scan_result != "success":
+              state = "error"
+              desc = f"CodeMender scan stage failed (result: {scan_result})."
+              exit_code = 1
+          elif findings_count in ("0", "") or blocking_count == 0 or not fail_on_findings:
+              state = "success"
+              desc = (
+                  f"PASSED: 0 vulnerabilities >= {min_sev} in PR diff "
+                  f"({advisory_count} Low/Info advisory finding(s))."
+              )
+              exit_code = 0
+          else:
+              state = "failure"
+              desc = (
+                  f"BLOCKED: {blocking_count} vulnerability(ies) >= {min_sev} found by cm find "
+                  f"(cm verify & cm fix running in background)."
+              )
+              exit_code = 1
+
+          if token and repo and target_sha:
+              status_url = f"https://api.github.com/repos/{repo}/statuses/{target_sha}"
+              payload = json.dumps({
+                  "state": state,
+                  "target_url": run_url,
+                  "description": desc[:140],
+                  "context": "CodeMender / Security Gate",
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                  status_url,
+                  data=payload,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "Content-Type": "application/json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      print(f"Published immediate commit status 'CodeMender / Security Gate' ({state}): HTTP {resp.status}")
+              except Exception as exc:
+                  print(f"Warning: could not post commit status: {exc}")
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              badge = "✅ PASSED" if exit_code == 0 else "❌ BLOCKED"
+              with open(summary_path, "a", encoding="utf-8") as sf:
+                  sf.write(f"## 🛡️ CodeMender Pre-Submit Security Gate: {badge}\n\n")
+                  sf.write(f"- **Commit SHA:** `{target_sha[:12]}`\n")
+                  sf.write(f"- **Blocking Threshold:** `>= {min_sev}` (`CRITICAL`, `HIGH`, `MEDIUM`)\n")
+                  sf.write(f"- **Blocking Findings (`>= {min_sev}`):** `{blocking_count}`\n")
+                  sf.write(f"- **Advisory Findings (`< {min_sev}`):** `{advisory_count}`\n")
+                  sf.write(f"- **Verdict:** {desc}\n")
+
+          print(desc)
+          sys.exit(exit_code)
+          EOF
+
   worker:
-    name: Stage 2 - Worker ${{ matrix.worker_index }}
+    name: Stage 2 (Background) - Verify & Fix Worker ${{ matrix.worker_index }}
     needs: scan
     if: needs.scan.outputs.findings_count != '0' && needs.scan.outputs.findings_count != ''
     strategy:
@@ -458,20 +684,19 @@ jobs:
           name: codemender-base-state
           path: .codemender_transit/base/
 
-      - name: Execute Worker Verification & Fix Synthesis (`cm verify` + `cm fix`)
+      - name: Execute Background `cm verify` & `cm fix` + Post Inline PR Suggestions
         env:
           WORKER_INDEX: ${{ matrix.worker_index }}
           PR_NUMBER: ${{ github.event.pull_request.number || '' }}
           TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
           REPO_FULL_NAME: ${{ github.repository }}
-          VERIFY_MODEL: ${{ inputs.verify_model || inputs.model || '' }}
-          FIX_MODEL: ${{ inputs.fix_model || inputs.model || '' }}
           SKIP_VERIFY: ${{ inputs.skip_exploit_verification }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
         run: |
           python3 - <<'EOF'
           import json
           import os
+          import re
           import subprocess
           import tarfile
           import urllib.request
@@ -488,7 +713,6 @@ jobs:
           shard_dir = os.path.join(workspace, ".codemender_transit", "shards", f"worker_{worker_idx}")
           os.makedirs(shard_dir, exist_ok=True)
 
-          # Restore ~/.codemender state from Stage 1
           tar_path = os.path.join(base_dir, "codemender_home.tar.gz")
           if os.path.exists(tar_path):
               with tarfile.open(tar_path, "r:gz") as tar:
@@ -500,6 +724,23 @@ jobs:
               with open(part_file, "r", encoding="utf-8") as f:
                   partition = json.load(f)
 
+          def extract_first_hunk_suggestion(diff_text: str):
+              """Extracts (start_line, end_line, replacement_code) from unified diff for GitHub one-click suggestion block."""
+              m = re.search(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*\n((?:[ +\-].*\n?)*)", diff_text)
+              if not m:
+                  return None
+              old_start = int(m.group(1))
+              old_count = int(m.group(2) or "1")
+              body_lines = m.group(5).splitlines()
+              replacement = []
+              for line in body_lines:
+                  if line.startswith("+"):
+                      replacement.append(line[1:])
+                  elif line.startswith(" "):
+                      replacement.append(line[1:])
+              old_end = max(old_start, old_start + old_count - 1)
+              return old_start, old_end, "\n".join(replacement)
+
           results = []
           for finding in partition.get("findings", []):
               fid = str(finding.get("finding_id") or finding.get("id") or "")
@@ -508,36 +749,48 @@ jobs:
               fpath = str(finding.get("file_path") or finding.get("file") or "").lstrip("./")
               line_no = int(finding.get("line_number") or finding.get("line") or 1)
 
+              verified_status = "CONFIRMED"
               if fid and not skip_verify:
-                  subprocess.run(["cm", "verify", fid, "--yes", "--bypass-warning"], cwd=workspace, check=False)
+                  v_res = subprocess.run(["cm", "verify", fid, "--yes", "--bypass-warning"], cwd=workspace, capture_output=True, text=True, check=False)
+                  if "DISMISSED" in (v_res.stdout or "").upper() or "FALSE POSITIVE" in (v_res.stdout or "").upper():
+                      verified_status = "DISMISSED_FALSE_POSITIVE"
 
               patch_diff = ""
-              if fid:
+              if fid and verified_status != "DISMISSED_FALSE_POSITIVE":
                   subprocess.run(["git", "checkout", "HEAD", "--", "."], cwd=workspace, check=False)
                   subprocess.run(["cm", "fix", fid, "--yes", "--bypass-warning"], cwd=workspace, check=False)
-                  diff_res = subprocess.run(["git", "diff"], cwd=workspace, capture_output=True, text=True, check=False)
+                  diff_res = subprocess.run(["git", "diff", "--", fpath] if fpath else ["git", "diff"], cwd=workspace, capture_output=True, text=True, check=False)
                   patch_diff = diff_res.stdout.strip()
                   subprocess.run(["git", "checkout", "HEAD", "--", "."], cwd=workspace, check=False)
 
-              # Post inline review comment on PR if a finding was localized to a file
-              if pr_number and repo and token and fpath:
+              if pr_number and repo and token and fpath and verified_status != "DISMISSED_FALSE_POSITIVE":
                   body = (
                       f"### 🛡️ CodeMender Security Finding (`{sev}`)\n"
                       f"**{title}** (ID: `{fid}`)\n\n"
                       f"{finding.get('description') or ''}\n"
                   )
-                  if patch_diff:
-                      body += f"\n<details><summary>💡 Proposed CodeMender Patch (`cm fix`)</summary>\n\n```diff\n{patch_diff[:4000]}\n```\n</details>\n"
-                  url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments"
-                  payload = json.dumps({
-                      "body": body,
+                  comment_payload = {
                       "commit_id": target_sha,
                       "path": fpath,
-                      "line": max(1, line_no),
                       "side": "RIGHT",
-                  }).encode("utf-8")
+                      "line": max(1, line_no),
+                  }
+                  suggestion = extract_first_hunk_suggestion(patch_diff) if patch_diff else None
+                  if suggestion:
+                      s_start, s_end, s_code = suggestion
+                      body += f"\n#### 💡 One-Click CodeMender Fix (`cm fix`)\n```suggestion\n{s_code}\n```\n"
+                      if s_end >= s_start > 0:
+                          if s_start < s_end:
+                              comment_payload["start_line"] = s_start
+                              comment_payload["start_side"] = "RIGHT"
+                          comment_payload["line"] = s_end
+                  elif patch_diff:
+                      body += f"\n<details><summary>💡 Proposed CodeMender Patch (`cm fix`)</summary>\n\n```diff\n{patch_diff[:4000]}\n```\n</details>\n"
+
+                  comment_payload["body"] = body
                   req = urllib.request.Request(
-                      url, data=payload,
+                      f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments",
+                      data=json.dumps(comment_payload).encode("utf-8"),
                       headers={
                           "Authorization": f"Bearer {token}",
                           "Accept": "application/vnd.github+json",
@@ -551,7 +804,9 @@ jobs:
                       print(f"Note: inline comment fallback ({fpath}:{line_no}): {exc}")
 
               finding_copy = dict(finding)
+              finding_copy["verified_status"] = verified_status
               finding_copy["has_patch"] = bool(patch_diff)
+              finding_copy["patch_diff"] = patch_diff[:4000] if patch_diff else ""
               results.append(finding_copy)
 
           with open(os.path.join(shard_dir, "results.json"), "w", encoding="utf-8") as rf:
@@ -568,16 +823,11 @@ jobs:
           if-no-files-found: ignore
 
   aggregate:
-    name: Stage 3 - Aggregator & Reporting
+    name: Stage 3 (Background) - Update PR Report with Verified Fixes
     needs: [scan, worker]
     if: always() && needs.scan.result == 'success' && needs.scan.outputs.findings_count != '0' && needs.scan.outputs.findings_count != ''
     runs-on: ${{ inputs.runner_type }}
     timeout-minutes: 30
-    outputs:
-      blocking_count: ${{ steps.threshold-eval.outputs.blocking_count || '0' }}
-      advisory_count: ${{ steps.threshold-eval.outputs.advisory_count || '0' }}
-      gate_status: ${{ steps.threshold-eval.outputs.gate_status || 'success' }}
-      gate_description: ${{ steps.threshold-eval.outputs.gate_description || '' }}
     env:
       GH_APP_ID: ${{ secrets.github_app_id }}
       GH_APP_KEY: ${{ secrets.github_app_private_key }}
@@ -629,13 +879,14 @@ jobs:
           path: .codemender_transit/shards/
           merge-multiple: true
 
-      - name: Aggregate Findings, Export SARIF/JSON & Post Sticky PR Summary
-        id: threshold-eval
+      - name: Update Sticky PR Comment with Verified Results & Auto-Fix Patches
         env:
           MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
           FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
           PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
           REPO_FULL_NAME: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
         run: |
           python3 - <<'EOF'
@@ -653,7 +904,6 @@ jobs:
               with tarfile.open(tar_path, "r:gz") as tar:
                   tar.extractall(path=os.path.expanduser("~"))
 
-          # Export SARIF and HTML reports using cm report
           sarif_res = subprocess.run(["cm", "report", "--format", "sarif", "--bypass-warning"], cwd=workspace, capture_output=True, text=True, check=False)
           if sarif_res.stdout.strip().startswith("{"):
               with open("report.sarif", "w", encoding="utf-8") as sf:
@@ -664,7 +914,6 @@ jobs:
               with open("report.html", "w", encoding="utf-8") as hf:
                   hf.write(html_res.stdout)
 
-          # Merge findings from worker shards (or fallback to base active_findings.json)
           findings = []
           for shard_file in sorted(glob.glob(os.path.join(workspace, ".codemender_transit", "shards", "**", "results.json"), recursive=True)):
               with open(shard_file, "r", encoding="utf-8") as f:
@@ -683,49 +932,35 @@ jobs:
           threshold = rank.get(min_sev, 2)
           fail_enabled = os.environ.get("FAIL_ON_FINDINGS", "true").lower() == "true"
 
-          blocking = []
-          advisory = []
+          confirmed_blocking = []
+          advisory_or_dismissed = []
           for item in findings:
               sev = str(item.get("severity") or item.get("risk_level") or "MEDIUM").strip().upper()
-              if rank.get(sev, 2) >= threshold:
-                  blocking.append((sev, item))
+              v_status = str(item.get("verified_status", "CONFIRMED"))
+              if v_status != "DISMISSED_FALSE_POSITIVE" and rank.get(sev, 2) >= threshold:
+                  confirmed_blocking.append((sev, item))
               else:
-                  advisory.append((sev, item))
+                  advisory_or_dismissed.append((sev, item))
 
-          blocking_count = len(blocking)
-          advisory_count = len(advisory)
+          blocking_count = len(confirmed_blocking)
           gate_status = "failure" if (blocking_count > 0 and fail_enabled) else "success"
-          gate_desc = (
-              f"{'BLOCKED' if gate_status == 'failure' else 'PASSED'}: "
-              f"{blocking_count} finding(s) >= {min_sev} in PR diff ({advisory_count} advisory < {min_sev})."
-          )
 
-          # Post summary comment on PR
           pr_number = os.environ.get("PR_NUMBER", "").strip()
           repo = os.environ.get("REPO_FULL_NAME", "").strip()
+          target_sha = os.environ.get("TARGET_SHA", "").strip()
+          run_url = os.environ.get("RUN_URL", "").strip()
           token = os.environ.get("GITHUB_TOKEN", "").strip()
-          if pr_number and repo and token:
-              rows = []
-              for sev, item in blocking + advisory:
-                  status_tag = "🚫 BLOCKING" if rank.get(sev, 2) >= threshold else "ℹ️ Advisory"
-                  fpath = item.get("file_path") or item.get("file") or "N/A"
-                  line_no = item.get("line_number") or item.get("line") or ""
-                  title = item.get("title") or item.get("vulnerability_type") or "Finding"
-                  patch_tag = "✅ Yes" if item.get("has_patch") else "—"
-                  rows.append(f"| `{sev}` | {status_tag} | `{fpath}:{line_no}` | {title} | {patch_tag} |")
 
-              table_md = "\n".join([
-                  "### 🛡️ CodeMender Pre-Submit Security Report",
-                  "",
-                  f"**Gate Status:** {'❌ **BLOCKED** (Merge prevented until `>= ' + min_sev + '` findings are resolved)' if gate_status == 'failure' else '✅ **PASSED**'}",
-                  "",
-                  "| Severity | Gate Impact | Location | Vulnerability | Auto-Fix (`cm fix`) |",
-                  "| :--- | :--- | :--- | :--- | :---: |",
-                  *rows,
-              ])
+          # If cm verify dismissed all blocking findings as False Positives, automatically upgrade commit status to success!
+          if token and repo and target_sha and gate_status == "success":
               req = urllib.request.Request(
-                  f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
-                  data=json.dumps({"body": table_md}).encode("utf-8"),
+                  f"https://api.github.com/repos/{repo}/statuses/{target_sha}",
+                  data=json.dumps({
+                      "state": "success",
+                      "target_url": run_url,
+                      "description": f"PASSED: 0 confirmed >= {min_sev} findings after cm verify.",
+                      "context": "CodeMender / Security Gate",
+                  }).encode("utf-8"),
                   headers={
                       "Authorization": f"Bearer {token}",
                       "Accept": "application/vnd.github+json",
@@ -735,14 +970,77 @@ jobs:
               )
               try:
                   urllib.request.urlopen(req, timeout=15)
-              except Exception as exc:
-                  print(f"Warning posting PR summary comment: {exc}")
+              except Exception:
+                  pass
 
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"blocking_count={blocking_count}\n")
-              out.write(f"advisory_count={advisory_count}\n")
-              out.write(f"gate_status={gate_status}\n")
-              out.write(f"gate_description={gate_desc}\n")
+          if pr_number and repo and token:
+              rows = []
+              patch_sections = []
+              for sev, item in confirmed_blocking + advisory_or_dismissed:
+                  fid = str(item.get("finding_id") or item.get("id") or "")
+                  v_status = str(item.get("verified_status", "CONFIRMED"))
+                  if v_status == "DISMISSED_FALSE_POSITIVE":
+                      status_tag = "⚪ Dismissed (FP)"
+                      fix_col = "Dismissed by `cm verify`"
+                  else:
+                      status_tag = "🚫 **BLOCKING**" if rank.get(sev, 2) >= threshold else "ℹ️ Advisory"
+                      fix_col = "✅ **Patch Ready** (see inline suggestion / below)" if item.get("has_patch") else "⚠️ Manual remediation required"
+                  fpath = item.get("file_path") or item.get("file") or "N/A"
+                  line_no = item.get("line_number") or item.get("line") or 1
+                  title = item.get("title") or item.get("vulnerability_type") or "Finding"
+                  rows.append(f"| `{sev}` | {status_tag} | `{fpath}:{line_no}` | **{title}** (`{fid}`) | {fix_col} |")
+                  if item.get("patch_diff"):
+                      patch_sections.append(
+                          f"<details><summary>💡 <b>Proposed Patch for [{sev}] {title}</b> (<code>{fpath}:{line_no}</code>)</summary>\n\n"
+                          f"```diff\n{item['patch_diff']}\n```\n</details>"
+                      )
+
+              marker = "<!-- codemender-security-summary -->"
+              updated_body = "\n".join([
+                  marker,
+                  "### 🛡️ CodeMender Pre-Submit Security Report *(Stage 2 Complete: Verified & Patches Ready)*",
+                  "",
+                  f"**Gate Status:** {'❌ **BLOCKED** — `' + str(blocking_count) + '` confirmed vulnerability(ies) `>= ' + min_sev + '` must be resolved before merging.' if gate_status == 'failure' else '✅ **PASSED** — `0` confirmed vulnerabilities `>= ' + min_sev + '`.'}",
+                  "",
+                  "| Severity | Gate Impact | Location | Vulnerability | Verification & Auto-Fix (`cm verify` / `cm fix`) |",
+                  "| :--- | :--- | :--- | :--- | :--- |",
+                  *rows,
+                  "",
+                  *patch_sections,
+              ])
+
+              headers = {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json",
+              }
+              existing_id = None
+              try:
+                  list_req = urllib.request.Request(
+                      f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments?per_page=100",
+                      headers=headers, method="GET"
+                  )
+                  with urllib.request.urlopen(list_req, timeout=15) as resp:
+                      for c in json.loads(resp.read().decode("utf-8")):
+                          if marker in str(c.get("body", "")):
+                              existing_id = c.get("id")
+                              break
+              except Exception:
+                  pass
+
+              target_url = (
+                  f"https://api.github.com/repos/{repo}/issues/comments/{existing_id}"
+                  if existing_id else f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+              )
+              method = "PATCH" if existing_id else "POST"
+              req = urllib.request.Request(
+                  target_url, data=json.dumps({"body": updated_body}).encode("utf-8"),
+                  headers=headers, method=method
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+              except Exception as exc:
+                  print(f"Warning updating sticky PR summary comment: {exc}")
           EOF
 
       - name: Upload SARIF Report
@@ -764,124 +1062,3 @@ jobs:
           retention-days: ${{ inputs.report_artifact_retention_days }}
           overwrite: true
           if-no-files-found: ignore
-
-  security-gate:
-    name: CodeMender Security Gate (>= MEDIUM)
-    needs: [scan, aggregate]
-    if: always()
-    runs-on: ${{ inputs.runner_type }}
-    timeout-minutes: 5
-    env:
-      GH_APP_ID: ${{ secrets.github_app_id }}
-      GH_APP_KEY: ${{ secrets.github_app_private_key }}
-    steps:
-      - name: Mint GitHub App Token
-        id: app-token
-        if: env.GH_APP_ID != '' && env.GH_APP_KEY != ''
-        uses: actions/create-github-app-token@21cfef2b496dd8ef5b904c159339626a10ad380e # v1.11.6
-        with:
-          app-id: ${{ secrets.github_app_id }}
-          private-key: ${{ secrets.github_app_private_key }}
-          permission-statuses: write
-          permission-pull-requests: write
-
-      - name: Enforce Pre-Submit Security Gate & Publish Commit Status
-        env:
-          SCAN_RESULT: ${{ needs.scan.result }}
-          FINDINGS_COUNT: ${{ needs.scan.outputs.findings_count }}
-          AGGREGATE_RESULT: ${{ needs.aggregate.result }}
-          BLOCKING_COUNT: ${{ needs.aggregate.outputs.blocking_count || '0' }}
-          ADVISORY_COUNT: ${{ needs.aggregate.outputs.advisory_count || '0' }}
-          GATE_STATUS: ${{ needs.aggregate.outputs.gate_status || 'success' }}
-          GATE_DESC: ${{ needs.aggregate.outputs.gate_description || '' }}
-          MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
-          FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
-          TARGET_SHA: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
-          REPO_FULL_NAME: ${{ github.repository }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
-        run: |
-          python3 - <<'EOF'
-          import json
-          import os
-          import sys
-          import urllib.request
-
-          scan_result = os.environ.get("SCAN_RESULT", "")
-          findings_count = os.environ.get("FINDINGS_COUNT", "0")
-          aggregate_result = os.environ.get("AGGREGATE_RESULT", "")
-          blocking_count = int(os.environ.get("BLOCKING_COUNT", "0") or "0")
-          advisory_count = int(os.environ.get("ADVISORY_COUNT", "0") or "0")
-          min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").upper()
-          fail_on_findings = os.environ.get("FAIL_ON_FINDINGS", "true").lower() == "true"
-          target_sha = os.environ.get("TARGET_SHA", "")
-          repo = os.environ.get("REPO_FULL_NAME", "")
-          run_url = os.environ.get("RUN_URL", "")
-          token = os.environ.get("GITHUB_TOKEN", "")
-
-          if scan_result != "success":
-              state = "error"
-              desc = f"CodeMender scan stage did not succeed (result: {scan_result})."
-              exit_code = 1
-          elif findings_count in ("0", ""):
-              state = "success"
-              desc = f"PASSED: 0 vulnerabilities >= {min_sev} detected in PR diff."
-              exit_code = 0
-          elif aggregate_result not in ("success", "skipped"):
-              state = "error"
-              desc = f"CodeMender aggregator stage failed (result: {aggregate_result})."
-              exit_code = 1
-          elif blocking_count > 0 and fail_on_findings:
-              state = "failure"
-              desc = (
-                  f"BLOCKED: {blocking_count} vulnerability(ies) >= {min_sev} detected in PR diff "
-                  f"({advisory_count} advisory)."
-              )
-              exit_code = 1
-          else:
-              state = "success"
-              desc = (
-                  f"PASSED: 0 vulnerabilities >= {min_sev} in PR diff "
-                  f"({advisory_count} Low/Info advisory finding(s))."
-              )
-              exit_code = 0
-
-          if token and repo and target_sha:
-              status_url = f"https://api.github.com/repos/{repo}/statuses/{target_sha}"
-              payload = json.dumps({
-                  "state": state,
-                  "target_url": run_url,
-                  "description": desc[:140],
-                  "context": "CodeMender / Security Gate",
-              }).encode("utf-8")
-              req = urllib.request.Request(
-                  status_url,
-                  data=payload,
-                  headers={
-                      "Authorization": f"Bearer {token}",
-                      "Accept": "application/vnd.github+json",
-                      "Content-Type": "application/json",
-                      "X-GitHub-Api-Version": "2022-11-28",
-                  },
-                  method="POST",
-              )
-              try:
-                  with urllib.request.urlopen(req, timeout=15) as resp:
-                      print(f"Published commit status 'CodeMender / Security Gate' ({state}): HTTP {resp.status}")
-              except Exception as exc:
-                  print(f"Warning: could not post commit status: {exc}")
-
-          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-          if summary_path:
-              badge = "✅ PASSED" if exit_code == 0 else "❌ BLOCKED"
-              with open(summary_path, "a", encoding="utf-8") as sf:
-                  sf.write(f"## 🛡️ CodeMender Pre-Submit Security Gate: {badge}\n\n")
-                  sf.write(f"- **Commit SHA:** `{target_sha[:12]}`\n")
-                  sf.write(f"- **Blocking Threshold:** `>= {min_sev}` (`CRITICAL`, `HIGH`, `MEDIUM`)\n")
-                  sf.write(f"- **Blocking Findings (`>= {min_sev}`):** `{blocking_count}`\n")
-                  sf.write(f"- **Advisory Findings (`< {min_sev}`):** `{advisory_count}`\n")
-                  sf.write(f"- **Verdict:** {desc}\n")
-
-          print(desc)
-          sys.exit(exit_code)
-          EOF
