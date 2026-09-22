@@ -430,15 +430,15 @@ jobs:
               fpath = item["file_path"]
               line_no = item["line_number"]
               title = item["title"]
-              desc_short = item["description"].replace("\n", " ")[:240]
+              full_desc = item["description"].strip().replace("%", "%25").replace("\r", "").replace("\n", "%0A")
               if rank.get(sev, 2) >= threshold:
                   blocking.append((sev, item))
                   if fpath:
-                      print(f"::error file={fpath},line={line_no},title=CodeMender [{sev}] {title}::{desc_short}")
+                      print(f"::error file={fpath},line={line_no},title=CodeMender [{sev}] {title}::{full_desc}")
               else:
                   advisory.append((sev, item))
                   if fpath:
-                      print(f"::warning file={fpath},line={line_no},title=CodeMender [{sev}] {title}::{desc_short}")
+                      print(f"::warning file={fpath},line={line_no},title=CodeMender [{sev}] {title}::{full_desc}")
 
           count = len(active_findings)
           blocking_count = len(blocking)
