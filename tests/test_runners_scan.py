@@ -671,7 +671,168 @@ class TestScanRunner(unittest.TestCase):
     self.assertEqual(ignored, [])
     mock_delete_branch.assert_not_called()
 
+  @patch("codemender_agent.runners.scan.post_or_update_sticky_comment")
+  @patch("codemender_agent.runners.scan.post_commit_status")
+  @patch("codemender_agent.runners.scan.run_command")
+  @patch("codemender_agent.runners.scan.upload_file_to_gcs")
+  @patch("codemender_agent.runners.scan.get_default_branch")
+  @patch("shutil.which")
+  def test_scan_pipeline_pr_zero_findings_posts_security_gate_and_sticky_comment(
+      self,
+      mock_which,
+      mock_get_default_branch,
+      mock_upload_gcs,
+      mock_run_cmd,
+      mock_post_status,
+      mock_sticky_comment,
+  ):
+    """Verify PR scan with 0 raw findings posts passing Security Gate commit status and sticky summary."""
+    mock_which.return_value = "/bin/cm"
+    mock_get_default_branch.return_value = "main"
+    mock_upload_gcs.return_value = True
+
+    mock_git_rev = MagicMock()
+    mock_git_rev.stdout = "prheadsha999"
+
+    mock_cm_report = MagicMock()
+    mock_cm_report.stdout = "[]"
+
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if "rev-parse" in cmd_str:
+        return mock_git_rev
+      elif "report" in cmd_str:
+        return mock_cm_report
+      return mock_default
+
+    mock_run_cmd.side_effect = run_cmd_side_effect
+    output_file = os.path.join(self.workspace_dir, "github_output_pr_zero.txt")
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "CODEMENDER_PR_BASE_REF": "main",
+            "CODEMENDER_PR_NUMBER": "42",
+            "GITHUB_OUTPUT": output_file,
+        },
+    ):
+      with self.assertRaises(SystemExit) as cm:
+        run_scan_pipeline()
+
+    self.assertEqual(cm.exception.code, 0)
+
+    # Verify CodeMender / Security Gate commit status was posted as success
+    mock_post_status.assert_called_once()
+    status_kwargs = mock_post_status.call_args.kwargs
+    self.assertEqual(status_kwargs["state"], "success")
+    self.assertEqual(status_kwargs["context"], "CodeMender / Security Gate")
+    self.assertEqual(status_kwargs["sha"], "prheadsha999")
+    self.assertIn("Security Gate PASSED", status_kwargs["description"])
+
+    # Verify sticky PR comment was posted/updated with PASSED status
+    mock_sticky_comment.assert_called_once()
+    sticky_kwargs = mock_sticky_comment.call_args.kwargs
+    self.assertEqual(sticky_kwargs["pr_number"], 42)
+    self.assertIn("Security Gate Status: PASSED", sticky_kwargs["body"])
+
+  @patch("codemender_agent.runners.scan.post_or_update_sticky_comment")
+  @patch("codemender_agent.runners.scan.post_commit_status")
+  @patch("codemender_agent.runners.scan.get_pr_changed_lines")
+  @patch("codemender_agent.runners.scan.run_command")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.get_default_branch")
+  @patch("shutil.which")
+  def test_scan_pipeline_pr_all_findings_filtered_posts_security_gate_and_sticky_comment(
+      self,
+      mock_which,
+      mock_get_default_branch,
+      mock_is_duplicate_pr,
+      mock_check_remote_branch,
+      mock_run_cmd,
+      mock_get_pr_changed_lines,
+      mock_post_status,
+      mock_sticky_comment,
+  ):
+    """Verify PR scan where all findings are filtered out posts passing Security Gate status and updates sticky summary."""
+    mock_which.return_value = "/bin/cm"
+    mock_get_default_branch.return_value = "main"
+    mock_is_duplicate_pr.return_value = False
+    mock_check_remote_branch.return_value = False
+
+    # PR only touched app.py lines 10-15, while finding is in legacy.py lines 50-55
+    mock_get_pr_changed_lines.return_value = {"app.py": {10, 11, 12, 13, 14, 15}}
+
+    mock_git_rev = MagicMock()
+    mock_git_rev.stdout = "cleanprsha777"
+
+    mock_cm_report = MagicMock()
+    mock_cm_report.stdout = json.dumps([
+        {
+            "FindingID": "fid-untouched",
+            "Status": "DETECTED",
+            "VulnType": "XSS",
+            "FilePath": "legacy.py",
+            "StartLine": 50,
+            "EndLine": 55,
+        },
+    ])
+
+    mock_default = MagicMock()
+    mock_default.stdout = ""
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if "rev-parse" in cmd_str:
+        return mock_git_rev
+      elif "report" in cmd_str:
+        return mock_cm_report
+      return mock_default
+
+    mock_run_cmd.side_effect = run_cmd_side_effect
+    output_file = os.path.join(self.workspace_dir, "github_output_pr_filtered.txt")
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "CODEMENDER_PR_BASE_REF": "main",
+            "CODEMENDER_PR_NUMBER": "99",
+            "GITHUB_OUTPUT": output_file,
+        },
+    ):
+      with self.assertRaises(SystemExit) as cm:
+        run_scan_pipeline()
+
+    self.assertEqual(cm.exception.code, 0)
+
+    # Verify GITHUB_OUTPUT emitted findings_count=0
+    with open(output_file, "r", encoding="utf-8") as f:
+      output_content = f.read()
+    self.assertIn("findings_count=0", output_content)
+
+    # Verify CodeMender / Security Gate commit status was posted as success
+    mock_post_status.assert_called_once()
+    status_kwargs = mock_post_status.call_args.kwargs
+    self.assertEqual(status_kwargs["state"], "success")
+    self.assertEqual(status_kwargs["context"], "CodeMender / Security Gate")
+    self.assertEqual(status_kwargs["sha"], "cleanprsha777")
+    self.assertIn("Security Gate PASSED", status_kwargs["description"])
+
+    # Verify sticky PR comment was posted/updated with PASSED status
+    mock_sticky_comment.assert_called_once()
+    sticky_kwargs = mock_sticky_comment.call_args.kwargs
+    self.assertEqual(sticky_kwargs["pr_number"], 99)
+    self.assertIn("Security Gate Status: PASSED", sticky_kwargs["body"])
+
 
 if __name__ == "__main__":
   unittest.main()
+
 

@@ -54,6 +54,8 @@ from codemender_agent.vcs.github import check_remote_branch_exists
 from codemender_agent.vcs.github import delete_remote_branch
 from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import is_duplicate_pr
+from codemender_agent.vcs.github import post_commit_status
+from codemender_agent.vcs.github import post_or_update_sticky_comment
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -148,12 +150,10 @@ def _render_zero_findings_summary(
     config: Optional[OrchestratorConfig] = None,
     filtered_reasons: Optional[str] = None,
     token_totals: Optional[dict[str, dict[str, int]]] = None,
-) -> None:
+) -> str:
   """Renders a reassuring Step Summary when zero findings are detected or all are ignored."""
   cfg = config or OrchestratorConfig.from_env()
   summary_file = cfg.github_step_summary or os.environ.get("GITHUB_STEP_SUMMARY")
-  if not summary_file:
-    return
 
   mode_desc = (
       "Pull Request Scan (Clean as You Code)"
@@ -166,6 +166,15 @@ def _render_zero_findings_summary(
       if filtered_reasons and not is_pr_scan
       else ""
   )
+  gate_section = (
+      "\n- **Security Gate:** ✅ **PASSED (Clean as You Code)**\n\n"
+      "> [!NOTE]\n"
+      "> **Security Gate Status: PASSED**\n"
+      "> \n"
+      "> No new actionable security vulnerabilities detected in the pull request diff."
+      if is_pr_scan
+      else ""
+  )
 
   token_md = render_token_usage_markdown(token_totals)
   token_section = f"\n{token_md}" if token_md else ""
@@ -174,7 +183,7 @@ def _render_zero_findings_summary(
 
 - **Repository:** `{owner}/{repo_name}`
 - **Target Commit:** `{commit_desc}`
-- **Execution Mode:** `{mode_desc}`{reason_note}
+- **Execution Mode:** `{mode_desc}`{reason_note}{gate_section}
 
 ### 📊 Remediation Overview
 
@@ -184,12 +193,91 @@ def _render_zero_findings_summary(
 
 🎉 **No actionable security vulnerabilities detected.**
 {token_section}"""
-  try:
-    with open(summary_file, "a", encoding="utf-8") as f:
-      f.write(summary_md + "\n")
-    logger.info("Wrote Zero-Findings Step Summary to %s", summary_file)
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logger.warning("Failed to write to GITHUB_STEP_SUMMARY (%s): %s", summary_file, e)
+  if summary_file:
+    try:
+      with open(summary_file, "a", encoding="utf-8") as f:
+        f.write(summary_md + "\n")
+      logger.info("Wrote Zero-Findings Step Summary to %s", summary_file)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to write to GITHUB_STEP_SUMMARY (%s): %s", summary_file, e)
+  return summary_md
+
+
+def _finalize_zero_findings_exit(
+    owner: str,
+    repo_name: str,
+    repo_dir: str,
+    workspace_dir: str,
+    bucket_name: str,
+    scan_id: str,
+    target_sha: str,
+    token: str,
+    config: OrchestratorConfig,
+    scan_token_usage: Optional[dict[str, dict[str, int]]] = None,
+    filtered_reasons: Optional[str] = None,
+) -> None:
+  """Finalizes a zero-finding scan with clean SARIF, summary, PR Security Gate status, and GHA outputs."""
+  # 1. Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
+  _write_clean_sarif_file(repo_dir, workspace_dir)
+  # 2. Render clean Step Summary before exiting
+  summary_md = _render_zero_findings_summary(
+      owner,
+      repo_name,
+      target_sha,
+      config.is_pr_scan,
+      config=config,
+      filtered_reasons=filtered_reasons,
+      token_totals=scan_token_usage,
+  )
+  # 3. Enforce passing Security Gate and update sticky summary on PR scans
+  if config.is_pr_scan:
+    target_commit_sha = config.target_sha or target_sha
+    if target_commit_sha and token:
+      gate_context = "CodeMender / Security Gate"
+      gate_desc = (
+          "Security Gate PASSED: Clean as You Code (0 active vulnerabilities)."
+      )
+      logger.info(
+          "✅ CodeMender Security Gate PASSED: Clean as You Code. Emitting '%s' commit status check.",
+          gate_context,
+      )
+      post_commit_status(
+          token=token,
+          owner=owner,
+          repo=repo_name,
+          sha=target_commit_sha,
+          state="success",
+          description=gate_desc,
+          context=gate_context,
+      )
+    if config.pr_number and token and summary_md:
+      post_or_update_sticky_comment(
+          token=token,
+          owner=owner,
+          repo=repo_name,
+          pr_number=config.pr_number,
+          body=summary_md,
+      )
+  # 4. Build minimal manifest with findings_count = 0
+  manifest = {"findings_count": 0, "target_sha": target_sha}
+  manifest_path = os.path.join(workspace_dir, "manifest.json")
+  with open(manifest_path, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, indent=2)
+  # 5. Upload zero findings manifest to transit storage
+  upload_file_to_gcs(
+      manifest_path, bucket_name, f"scans/{scan_id}/manifest.json"
+  )
+  # 6. Emit zero findings output variables to GitHub Actions environment
+  _emit_github_output(
+      {
+          "matrix": "[0]",
+          "findings_count": "0",
+          "target_sha": str(target_sha),
+          "scan_id": str(scan_id),
+      },
+      config=config,
+  )
+  sys.exit(0)
 
 
 def _sync_repository(
@@ -843,37 +931,18 @@ def run_scan_pipeline() -> None:
   # 7. Handle case where repository scan returns zero findings
   if not findings:
     logger.info("Zero findings confirmed after scanning. Exiting Stage 1.")
-    # Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
-    _write_clean_sarif_file(repo_dir, workspace_dir)
-    # Render clean Step Summary before exiting
-    _render_zero_findings_summary(
-        owner,
-        repo_name,
-        target_sha,
-        config.is_pr_scan,
+    _finalize_zero_findings_exit(
+        owner=owner,
+        repo_name=repo_name,
+        repo_dir=repo_dir,
+        workspace_dir=workspace_dir,
+        bucket_name=bucket_name,
+        scan_id=scan_id,
+        target_sha=target_sha,
+        token=token,
         config=config,
-        token_totals=scan_token_usage,
+        scan_token_usage=scan_token_usage,
     )
-    # Build minimal manifest with findings_count = 0
-    manifest = {"findings_count": 0, "target_sha": target_sha}
-    manifest_path = os.path.join(workspace_dir, "manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as f:
-      json.dump(manifest, f, indent=2)
-    # Upload zero findings manifest to transit storage
-    upload_file_to_gcs(
-        manifest_path, bucket_name, f"scans/{scan_id}/manifest.json"
-    )
-    # Emit zero findings output variables to GitHub Actions environment
-    _emit_github_output(
-        {
-            "matrix": "[0]",
-            "findings_count": "0",
-            "target_sha": str(target_sha),
-            "scan_id": str(scan_id),
-        },
-        config=config,
-    )
-    sys.exit(0)
 
   # 8. Filter findings against PR differential hunks and deduplicate against open branches/PRs
   force_overwrite = config.force_overwrite
@@ -943,8 +1012,6 @@ def run_scan_pipeline() -> None:
   # 10. Handle case where all findings were filtered out
   if active_findings_count == 0:
     logger.info("Zero active findings after filtering. Exiting Stage 1.")
-    # Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
-    _write_clean_sarif_file(repo_dir, workspace_dir)
     filtered_reason = (
         None
         if config.is_pr_scan
@@ -953,36 +1020,19 @@ def run_scan_pipeline() -> None:
             f" {len(skipped_finding_ids)} duplicate branches/PRs dismissed."
         )
     )
-    # Render clean Step Summary before exiting
-    _render_zero_findings_summary(
-        owner,
-        repo_name,
-        target_sha,
-        config.is_pr_scan,
+    _finalize_zero_findings_exit(
+        owner=owner,
+        repo_name=repo_name,
+        repo_dir=repo_dir,
+        workspace_dir=workspace_dir,
+        bucket_name=bucket_name,
+        scan_id=scan_id,
+        target_sha=target_sha,
+        token=token,
         config=config,
+        scan_token_usage=scan_token_usage,
         filtered_reasons=filtered_reason,
-        token_totals=scan_token_usage,
     )
-    # Build minimal manifest with findings_count = 0
-    manifest = {"findings_count": 0, "target_sha": target_sha}
-    manifest_path = os.path.join(workspace_dir, "manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as f:
-      json.dump(manifest, f, indent=2)
-    # Upload filtered zero findings manifest to transit storage
-    upload_file_to_gcs(
-        manifest_path, bucket_name, f"scans/{scan_id}/manifest.json"
-    )
-    # Emit zero findings output variables to GitHub Actions environment
-    _emit_github_output(
-        {
-            "matrix": "[0]",
-            "findings_count": "0",
-            "target_sha": str(target_sha),
-            "scan_id": str(scan_id),
-        },
-        config=config,
-    )
-    sys.exit(0)
 
   # 11. Partition findings into balanced worker buckets
   max_tasks = config.max_tasks
