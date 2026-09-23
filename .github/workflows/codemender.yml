@@ -43,7 +43,7 @@ jobs:
       max_tasks: 10
       upload_sarif: true
       fail_on_findings: true
-      min_blocking_severity: ${{ inputs.min_blocking_severity || 'MEDIUM' }}
+      min_blocking_severity: ${{ inputs.min_blocking_severity || 'CRITICAL' }}
     secrets:
       gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
