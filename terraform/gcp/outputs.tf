@@ -68,6 +68,43 @@ output "workflow_execution_url" {
   value       = "https://workflowexecutions.googleapis.com/v1/${google_workflows_workflow.coordinator.id}/executions"
 }
 
+output "bigquery_telemetry_dataset_id" {
+  description = "BigQuery dataset ID holding CodeMender scan telemetry, or null when telemetry is disabled."
+  value       = var.enable_bigquery_telemetry ? google_bigquery_dataset.telemetry[0].dataset_id : null
+}
+
+output "bigquery_telemetry_tables" {
+  description = "Fully qualified BigQuery table IDs for scan telemetry."
+  value = var.enable_bigquery_telemetry ? {
+    scan_runs              = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}"
+    vulnerability_findings = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.vulnerability_findings[0].table_id}"
+  } : null
+}
+
+output "bigquery_console_url" {
+  description = "Console link to the telemetry dataset, the entry point for Gemini Conversational Analytics and Data Canvas."
+  value = var.enable_bigquery_telemetry ? format(
+    "https://console.cloud.google.com/bigquery?project=%s&ws=!1m4!1m3!3m2!1s%s!2s%s",
+    var.project_id,
+    var.project_id,
+    google_bigquery_dataset.telemetry[0].dataset_id,
+  ) : null
+}
+
+output "bigquery_snippet_export_notice" {
+  description = "Whether source code snippets and LLM analysis prose are being replicated into BigQuery."
+  value = var.bigquery_include_snippets ? join("", [
+    "WARNING: bigquery_include_snippets is TRUE. The `analysis` and `snippet` ",
+    "columns are being exported, which replicates verbatim application source ",
+    "code and vulnerability detail into a queryable warehouse. Confirm this is ",
+    "permitted by the data-handling policy for every scanned repository.",
+    ]) : join("", [
+    "Snippet export is DISABLED (default). BigQuery receives vulnerability ",
+    "metadata only -- no source code and no LLM analysis prose. Set ",
+    "bigquery_include_snippets = true to enable richer narratives.",
+  ])
+}
+
 output "secret_manager_notice" {
   description = "Instructions for updating the GitHub App Token secret."
   value       = <<EOT

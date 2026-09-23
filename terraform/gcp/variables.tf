@@ -125,4 +125,57 @@ variable "target_repositories" {
   default     = {}
 }
 
+# ---------------------------------------------------------------------------
+# BigQuery analytics telemetry
+# ---------------------------------------------------------------------------
+
+variable "enable_bigquery_telemetry" {
+  type        = bool
+  description = "Whether to provision the BigQuery telemetry dataset and tables, grant the runner service account write access, and enable the export at runtime. When false, no BigQuery resources are created and the orchestrator performs zero BigQuery calls."
+  default     = true
+}
+
+variable "bigquery_dataset_id" {
+  type        = string
+  description = "BigQuery dataset ID for CodeMender scan telemetry."
+  default     = "codemender_telemetry"
+
+  validation {
+    # NB: the character-class check and the length check are separate on
+    # purpose. A single `^[A-Za-z0-9_]{1,1024}$` will not compile -- Go's RE2
+    # engine caps repeat counts at 1000 -- so `can()` would return false and
+    # reject even valid dataset IDs.
+    condition = (
+      can(regex("^[A-Za-z0-9_]+$", var.bigquery_dataset_id))
+      && length(var.bigquery_dataset_id) <= 1024
+    )
+    error_message = "bigquery_dataset_id must be 1-1024 characters of letters, numbers, and underscores only."
+  }
+}
+
+variable "bigquery_location" {
+  type        = string
+  description = "Location for the BigQuery telemetry dataset (e.g. 'US', 'EU', 'us-central1'). Defaults to var.region when empty. Note that a dataset's location is immutable after creation."
+  default     = ""
+}
+
+variable "bigquery_include_snippets" {
+  type        = bool
+  description = "Whether to export the LLM-generated `analysis` prose and verbatim source `snippet` columns to BigQuery. Defaults to false: these columns replicate real application source code and vulnerability detail into a queryable warehouse, which many regulated environments must review before enabling."
+  default     = false
+}
+
+variable "bigquery_deletion_protection" {
+  type        = bool
+  description = "Whether the BigQuery telemetry tables are protected against deletion by Terraform."
+  default     = true
+}
+
+variable "bigquery_delete_contents_on_destroy" {
+  type        = bool
+  description = "Whether `terraform destroy` may delete the telemetry dataset along with all historical scan records. Defaults to false because this dataset is the only durable record of scan history: the GCS report artifacts are deleted after 90 days."
+  default     = false
+}
+
+
 

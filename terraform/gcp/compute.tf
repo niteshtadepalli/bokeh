@@ -63,6 +63,30 @@ resource "google_cloud_run_v2_job" "runner" {
           value = "false"
         }
 
+        # BigQuery analytics telemetry. Set on the base container rather than
+        # in the workflow overrides: Cloud Run merges execution-time container
+        # env overrides with the base env, so these survive into every stage
+        # without having to be repeated in the workflow YAML.
+        #
+        # An empty CODEMENDER_BQ_DATASET is the master off-switch -- the
+        # orchestrator then performs zero BigQuery calls.
+        env {
+          name  = "CODEMENDER_BQ_DATASET"
+          value = var.enable_bigquery_telemetry ? var.bigquery_dataset_id : ""
+        }
+
+        env {
+          name  = "CODEMENDER_BQ_PROJECT"
+          value = var.enable_bigquery_telemetry ? var.project_id : ""
+        }
+
+        # Off by default: gates export of LLM analysis prose and verbatim
+        # source snippets into the warehouse.
+        env {
+          name  = "CODEMENDER_BQ_INCLUDE_SNIPPETS"
+          value = var.bigquery_include_snippets ? "true" : "false"
+        }
+
         env {
           name = "GITHUB_APP_TOKEN"
           value_source {

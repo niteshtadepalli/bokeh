@@ -15,6 +15,7 @@
 """Stage 3: Aggregator runner for CodeMender Agent."""
 
 from contextlib import closing
+import datetime
 import hashlib
 import json
 import logging
@@ -41,6 +42,8 @@ from codemender_agent.storage import get_storage_adapter
 from codemender_agent.storage import list_gcs_blobs
 from codemender_agent.storage import upload_and_sign_report
 from codemender_agent.storage import upload_file_to_gcs
+# BigQuery analytics telemetry (hard no-op unless CODEMENDER_BQ_DATASET is set)
+from codemender_agent.telemetry import bigquery as bq_telemetry
 from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import extract_json_from_output
@@ -1544,10 +1547,18 @@ def _generate_and_upload_report(
     storage_mode: str = "gcs",
     config: Optional[OrchestratorConfig] = None,
     finding_prs: Optional[Dict[str, str]] = None,
-) -> None:
-  """Generates final HTML and SARIF reports using cm CLI and uploads to GCS or publishes locally."""
+) -> Optional[str]:
+  """Generates final HTML and SARIF reports using cm CLI and uploads to GCS or publishes locally.
+
+  Returns:
+    The durable `gs://` URI of the uploaded HTML report, or None when no
+    report was uploaded (non-GCS storage modes, or generation failure). The
+    signed URL is deliberately not returned: it expires within hours, whereas
+    the object itself persists until the bucket lifecycle rule removes it.
+  """
   cfg = config or OrchestratorConfig.from_env()
   cli_version = cfg.cli_version
+  report_gcs_uri: Optional[str] = None
   logger.info("Generating final consolidated HTML summary report...")
 
   # 1. Execute 'cm report -f html' to generate full HTML report
@@ -1639,6 +1650,7 @@ def _generate_and_upload_report(
           local_report_path, report_bucket, dest_blob
       )
       if signed_url:
+        report_gcs_uri = f"gs://{report_bucket}/{dest_blob}"
         # Print high-visibility banner with signed URL for CI logs
         logger.info(
             "\n"
@@ -1786,11 +1798,59 @@ def _generate_and_upload_report(
       if local_path:
         upload_file_to_gcs(local_path, report_bucket, dest_blob)
 
+  return report_gcs_uri
+
+
+def _resolve_end_to_end_duration(workspace_dir: str) -> Optional[float]:
+  """Computes total scan wall-clock seconds from the Stage 1 start timestamp.
+
+  Stage 1 records `started_at` into `scan_metadata.json`, which the aggregator
+  has already downloaded by this point. Measuring from there yields true
+  end-to-end duration across all three stages, rather than just the
+  aggregator's own runtime.
+
+  Returns None when the timestamp is absent or unparseable, so the caller can
+  fall back to a stage-local measurement instead of reporting a wrong number.
+  """
+  meta_path = os.path.join(workspace_dir, "scan_metadata.json")
+  if not os.path.exists(meta_path):
+    return None
+  try:
+    with open(meta_path, "r", encoding="utf-8") as f:
+      meta = json.load(f)
+    started_at = meta.get("started_at")
+    if not started_at:
+      return None
+    started = datetime.datetime.fromisoformat(str(started_at))
+    if started.tzinfo is None:
+      started = started.replace(tzinfo=datetime.timezone.utc)
+    elapsed = (
+        datetime.datetime.now(datetime.timezone.utc) - started
+    ).total_seconds()
+    return max(0.0, elapsed)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Could not derive end-to-end scan duration: %s", e)
+    return None
+
 
 def run_aggregate_pipeline() -> None:
-  """Executes Stage 3: Download all worker states, merge DBs, generate report, and upload."""
+  """Executes Stage 3: Download all worker states, merge DBs, generate report, and upload.
+
+  The real work lives in `_run_aggregate_pipeline`; this wrapper guarantees a
+  `scan_runs` telemetry row is written even when the stage dies at one of its
+  `sys.exit(1)` sites. It re-raises unchanged, so exit codes are unaffected,
+  and it is a hard no-op when telemetry is not configured.
+  """
+  ctx = bq_telemetry.ScanRunContext(stage="aggregate")
+  with bq_telemetry.telemetry_run_guard(ctx):
+    _run_aggregate_pipeline(ctx)
+
+
+def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
+  """Stage 3 implementation. See `run_aggregate_pipeline` for the telemetry wrapper."""
   config = OrchestratorConfig.from_env()
   workspace_dir = config.workspace_dir or os.getcwd()
+  ctx.apply_config(config)
 
   # 1. Validate required storage credentials in GCS mode
   if config.storage_mode == "gcs":
@@ -1800,6 +1860,7 @@ def run_aggregate_pipeline() -> None:
 
   scan_id = config.scan_id or "default"
   bucket_name = config.gcs_bucket or ""
+  ctx.scan_id = scan_id
 
   storage_adapter = get_storage_adapter(
       config.storage_mode,
@@ -1813,6 +1874,7 @@ def run_aggregate_pipeline() -> None:
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
   repo_dir = os.path.join(workspace_dir, repo_name)
   scrubbed_env = get_scrubbed_env()
+  ctx.repository = f"{owner}/{repo_name}"
 
   # 3. Download or discover scan manifest.json
   manifest_path = os.path.join(workspace_dir, "manifest.json")
@@ -1846,10 +1908,20 @@ def run_aggregate_pipeline() -> None:
 
   target_sha = manifest.get("target_sha")
   findings_count = manifest.get("findings_count", 0)
+  ctx.target_sha = target_sha or ctx.target_sha
 
   # If zero findings were discovered in Stage 1, exit aggregator immediately
   if findings_count == 0 and "findings_count" in manifest:
     logger.info("Manifest indicates 0 findings. Nothing to aggregate.")
+    # On the GCP path the coordinating workflow short-circuits before Stage 3
+    # ever starts, so this branch is normally unreachable there and Stage 1
+    # will already have emitted the row. It is still reachable for sequential
+    # and manually re-run aggregations, which would otherwise go unrecorded.
+    ctx.total_findings_count = 0
+    ctx.active_findings_count = 0
+    ctx.fixed_count = 0
+    ctx.failed_fix_count = 0
+    bq_telemetry.emit_scan_telemetry(ctx, status=bq_telemetry.STATUS_SUCCESS)
     sys.exit(0)
 
   # 4. Clone repository to prepare source files for report formatting
@@ -2057,6 +2129,28 @@ def run_aggregate_pipeline() -> None:
     except sqlite3.Error as e:  # pylint: disable=broad-exception-caught
       logger.warning("Failed to collect SKIPPED_DUPLICATE finding IDs: %s", e)
 
+  # 9b. Snapshot findings for BigQuery telemetry BEFORE the cleanup DELETE below.
+  #
+  # Ordering here is load-bearing. Step 10 permanently deletes DISMISSED rows
+  # (and, on PR scans, PRE_EXISTING_IGNORED and SKIPPED_DUPLICATE too), so a
+  # snapshot taken any later would silently under-report what the scan
+  # actually found. Note this necessarily reads state.db alone: report.json is
+  # not generated until step 11, so no report.json merge is possible at this
+  # point in the pipeline.
+  #
+  # Gated on telemetry_enabled() so an unconfigured deployment does not even
+  # pay the cost of opening the database.
+  #
+  # The snapshot is also stashed on the telemetry context. Steps 11-13 below
+  # (report generation, upload, GitHub publication) can still abort the stage
+  # via sys.exit(1); stashing here means the failure guard emits those findings
+  # with the FAILED row instead of discarding work the scan already completed.
+  telemetry_findings: List[Dict[str, Any]] = []
+  if bq_telemetry.telemetry_enabled():
+    telemetry_findings = bq_telemetry.snapshot_state_db_findings(base_db_path)
+    ctx.pending_findings = telemetry_findings
+    ctx.pending_finding_prs = finding_prs
+
   # 10. Scoped Reporting DB Cleanup (Purge pre-existing ignored findings on PR scans)
   try:
     if os.path.exists(base_db_path):
@@ -2079,9 +2173,9 @@ def run_aggregate_pipeline() -> None:
   inject_codemender_config(repo_dir, config=config)
   # Restore staged cm binary from workspace_base.tar.gz if present
   cm_binary = restore_staged_cm_binary(codemender_home)
-  log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
+  ctx.cm_version = log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   # Invoke report generation and upload routine with full run parameters
-  _generate_and_upload_report(
+  ctx.report_uri = _generate_and_upload_report(
       repo_dir,
       scrubbed_env,
       cm_binary,
@@ -2189,20 +2283,64 @@ def run_aggregate_pipeline() -> None:
     )
 
   # ---------------------------------------------------------------------------
-  # TODO(Item 5 — Merck Multi-Repo Telemetry & Gemini in BigQuery Analytics):
-  # Export structured JSONL rows to GCS (`gs://<bucket>/telemetry/scan_runs/`
-  # and `gs://<bucket>/telemetry/scan_findings/`) backed by BigQuery External /
-  # BigLake tables (`codemender_telemetry.scan_runs`, `scan_findings`) to enable
-  # cross-repository security posture and token-cost querying via Gemini in
-  # BigQuery (Conversational Analytics).
+  # Multi-repository telemetry & Gemini in BigQuery analytics.
   #
-  # TODO(Item 6 — Post-Cron Notification & Ticketing Adapter Hooks):
-  # Wire configurable post-aggregation notification and ticketing adapters
-  # controlled by `CODEMENDER_NOTIFY_EMAILS`, `CODEMENDER_NOTIFY_WEBHOOK_URL`
-  # (Google Chat / Slack / Teams), and `CODEMENDER_TICKETING_PROVIDER`
-  # (`github_issues` | `jira`) to alert repository owners and auto-file
-  # tracking tickets for newly remediated or unfixed CRITICAL/HIGH findings.
+  # Every scan execution is persisted to two *native* BigQuery tables in the
+  # dataset named by `CODEMENDER_BQ_DATASET`:
+  #
+  #   * `scan_runs`              — one row per scan execution
+  #   * `vulnerability_findings` — one row per finding
+  #
+  # Both are partitioned by `DATE(scan_timestamp)` and clustered for
+  # cross-repository queries, and every column carries a `description` that
+  # grounds Gemini Conversational Analytics / Data Canvas (see
+  # `terraform/gcp/bigquery.tf`).
+  #
+  # Native tables were chosen over the GCS JSONL + BigQuery External/BigLake
+  # design originally sketched here. The decisive reason is that the reports
+  # bucket carries a bucket-wide 90-day delete lifecycle rule with no prefix
+  # condition (`terraform/gcp/storage.tf`); external tables backed by objects
+  # in that bucket would silently empty themselves at 90 days with no error.
+  # Native storage also gives partitioning, clustering, and column
+  # descriptions, none of which external tables provide.
+  #
+  # The whole export is opt-in and fail-safe: with `CODEMENDER_BQ_DATASET`
+  # unset it performs zero BigQuery calls, and every entry point swallows its
+  # own exceptions so telemetry can never fail a security scan. See
+  # `codemender_agent/telemetry/bigquery.py`.
+  #
+  # TODO(post-scan notification & ticketing adapters):
+  # Wire configurable post-aggregation notification and ticketing adapters so
+  # that a completed scan can actively alert owners instead of only recording
+  # itself. Planned surface:
+  #   * `CODEMENDER_NOTIFY_EMAILS`      — comma-separated owner notifications.
+  #   * `CODEMENDER_NOTIFY_WEBHOOK_URL` — Google Chat / Slack / Teams webhook.
+  #   * `CODEMENDER_TICKETING_PROVIDER` — one of `github_issues` | `jira` |
+  #                                       `servicenow`, auto-filing tracking
+  #                                       tickets for newly remediated or
+  #                                       still-unfixed CRITICAL/HIGH findings.
+  # This belongs here, after reporting and telemetry, so notifications can
+  # cite the report URI and the ticket bodies can link the exact finding rows
+  # already written to BigQuery above.
   # ---------------------------------------------------------------------------
+  #
+  # Primary telemetry emission site for runs that produced findings. The
+  # findings snapshot was captured at step 9b, deliberately before the cleanup
+  # DELETE at step 10.
+  if bq_telemetry.telemetry_enabled():
+    ctx.token_totals = token_totals
+    ctx.active_findings_count = active_findings_count
+    ctx.skipped_duplicate_count = len(skipped_finding_ids)
+    # Prefer the true end-to-end duration measured from Stage 1's start time,
+    # falling back to this stage's own runtime when Stage 1 did not record one.
+    end_to_end_seconds = _resolve_end_to_end_duration(workspace_dir)
+    bq_telemetry.emit_scan_telemetry(
+        ctx,
+        status=bq_telemetry.STATUS_SUCCESS,
+        findings=telemetry_findings,
+        finding_prs=finding_prs,
+        duration_seconds=end_to_end_seconds,
+    )
 
   # Log final aggregator completion notice
   logger.info("Stage 3 (Aggregate) completed successfully.")

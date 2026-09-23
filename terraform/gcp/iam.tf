@@ -174,6 +174,37 @@ resource "google_project_iam_member" "worker_serviceusage_consumer" {
   member  = "serviceAccount:${google_service_account.worker_sa.email}"
 }
 
+# ---------------------------------------------------------------------------
+# BigQuery telemetry IAM (runner SA only).
+#
+# Only the runner job emits telemetry: the scan stage writes the row for clean
+# and failed runs, and the aggregate stage writes it for runs with findings.
+# Both run on runner_sa. worker_sa performs no BigQuery access whatsoever and
+# is deliberately granted nothing here.
+#
+# dataEditor is bound at the DATASET level rather than project-wide, so the
+# scanner can write its own telemetry but cannot read or modify any other
+# dataset in the project. jobUser must be project-level because that is the
+# scope at which BigQuery job creation is authorized.
+# ---------------------------------------------------------------------------
+
+resource "google_bigquery_dataset_iam_member" "runner_telemetry_editor" {
+  count = var.enable_bigquery_telemetry ? 1 : 0
+
+  project    = var.project_id
+  dataset_id = google_bigquery_dataset.telemetry[0].dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${google_service_account.runner_sa.email}"
+}
+
+resource "google_project_iam_member" "runner_bigquery_job_user" {
+  count = var.enable_bigquery_telemetry ? 1 : 0
+
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.runner_sa.email}"
+}
+
 
 
 # Grant Cloud Run Developer to Cloud Build SAs so they can update the Cloud Run Job image

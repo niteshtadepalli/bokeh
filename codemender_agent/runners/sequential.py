@@ -57,7 +57,22 @@ logger = logging.getLogger("codemender-orchestrator")
 
 
 def run_sequential_pipeline() -> None:
-  """Executes the single-task sequential scan, verify, fix, and PR pipeline."""
+  """Executes the single-task sequential scan, verify, fix, and PR pipeline.
+
+  TODO(sequential-mode BigQuery telemetry): The BigQuery analytics export
+  currently instruments only the GCP three-stage path (`scan.py` ->
+  `worker.py` -> `aggregate.py`). This sequential runner -- the path taken in
+  GitHub Actions mode and for local single-task runs -- emits no `scan_runs`
+  or `vulnerability_findings` rows at all, so runs executed this way are
+  invisible in the warehouse.
+
+  Wiring it up means: creating a `bq_telemetry.ScanRunContext(stage=
+  "sequential")`, wrapping the body in `bq_telemetry.telemetry_run_guard` so
+  the two `sys.exit(1)` paths below still record a FAILED row, snapshotting
+  `state.db` via `bq_telemetry.snapshot_state_db_findings` *before* any
+  cleanup, and calling `bq_telemetry.emit_scan_telemetry` on the terminal
+  paths. See `codemender_agent/telemetry/bigquery.py`.
+  """
   cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
   skip_verify = (
       os.environ.get("CODEMENDER_SKIP_VERIFY", "true").strip().lower()

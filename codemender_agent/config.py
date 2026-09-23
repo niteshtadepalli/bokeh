@@ -100,6 +100,19 @@ class OrchestratorConfig:
   target_branch: Optional[str] = None
   execution_url: Optional[str] = None
 
+  # BigQuery Analytics Telemetry (opt-in; unset dataset disables export
+  # entirely).
+  #
+  # NOTE: these fields mirror the environment for introspection and testing;
+  # they are not the source of truth. `codemender_agent/telemetry/bigquery.py`
+  # reads the same CODEMENDER_BQ_* variables directly, because it must stay
+  # usable from the failure guard -- which has to work even when constructing
+  # an OrchestratorConfig is itself what failed. Mutating these fields after
+  # `from_env()` therefore does not change export behaviour.
+  bq_dataset: Optional[str] = None
+  bq_project: Optional[str] = None
+  bq_include_snippets: bool = False
+
   # Sandbox & Security Settings
   sandbox_enabled: bool = True
   sandbox_network_profile: str = "permissive-open"
@@ -289,6 +302,22 @@ class OrchestratorConfig:
         os.environ.get("CODEMENDER_EXECUTION_URL") or ""
     ).strip() or None
 
+    # 8. Parse BigQuery Analytics Telemetry configuration.
+    # An empty/unset dataset is the master off-switch: the exporter performs
+    # zero BigQuery calls in that case, so telemetry is strictly opt-in.
+    bq_dataset = (os.environ.get("CODEMENDER_BQ_DATASET") or "").strip() or None
+    bq_project = (
+        (os.environ.get("CODEMENDER_BQ_PROJECT") or "").strip()
+        or (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+        or None
+    )
+    # Default OFF: `analysis` and `snippet` carry LLM prose and verbatim source
+    # code, which many regulated deployments may not replicate into a warehouse.
+    bq_include_snippets = (
+        os.environ.get("CODEMENDER_BQ_INCLUDE_SNIPPETS", "false").strip().lower()
+        in ("true", "1", "yes")
+    )
+
     # Return immutable configuration dataclass instance populated from parsed environment
     return cls(
         # AI models and CLI versions
@@ -334,6 +363,10 @@ class OrchestratorConfig:
         # Scheduled / branch scan parameters
         target_branch=target_branch,
         execution_url=execution_url,
+        # BigQuery analytics telemetry (opt-in)
+        bq_dataset=bq_dataset,
+        bq_project=bq_project,
+        bq_include_snippets=bq_include_snippets,
         # Sandbox execution flags and network isolation profiles
         sandbox_enabled=sandbox_enabled,
         sandbox_network_profile=sandbox_network_profile,

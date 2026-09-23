@@ -40,6 +40,8 @@ from codemender_agent.config import inject_codemender_config
 # Storage signed URL and upload utilities
 from codemender_agent.storage import generate_signed_url
 from codemender_agent.storage import upload_file_to_gcs
+# BigQuery analytics telemetry (hard no-op unless CODEMENDER_BQ_DATASET is set)
+from codemender_agent.telemetry import bigquery as bq_telemetry
 from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import render_token_usage_markdown
@@ -701,6 +703,7 @@ def _save_and_upload_state(
     config: Optional[OrchestratorConfig] = None,
     cm_binary: Optional[str] = None,
     finding_prs: Optional[dict[str, str]] = None,
+    started_at: Optional[str] = None,
 ) -> None:
   """Saves partitions and manifest, generates signed URLs, and uploads to GCS."""
   # Resolve active configuration instance
@@ -716,6 +719,10 @@ def _save_and_upload_state(
       "skipped_duplicate_count": skipped_duplicate_count,
       "finding_prs": finding_prs or {},
   }
+  # Stage 1 start time, so the aggregator can report true end-to-end duration
+  # rather than just its own stage runtime.
+  if started_at:
+    scan_metadata["started_at"] = started_at
   scan_meta_path = os.path.join(workspace_dir, "scan_metadata.json")
   with open(scan_meta_path, "w", encoding="utf-8") as f:
     json.dump(scan_metadata, f, indent=2)
@@ -842,10 +849,32 @@ def _save_and_upload_state(
 
 
 def run_scan_pipeline() -> None:
-  """Executes Stage 1: Scan repository, filter, partition, and upload state."""
+  """Executes Stage 1: Scan repository, filter, partition, and upload state.
+
+  The real work lives in `_run_scan_pipeline`; this wrapper exists purely so
+  that every terminal path -- including the ten `sys.exit(1)` failure sites
+  inside the body -- still produces exactly one `scan_runs` telemetry row.
+  Placing the guard here rather than at each exit site keeps the failure
+  accounting complete without scattering hooks through the pipeline.
+
+  The guard re-raises whatever it caught, so exit codes are unchanged, and it
+  is a hard no-op when telemetry is not configured.
+  """
+  ctx = bq_telemetry.ScanRunContext(stage="scan")
+  with bq_telemetry.telemetry_run_guard(ctx):
+    _run_scan_pipeline(ctx)
+
+
+def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
+  """Stage 1 implementation. See `run_scan_pipeline` for the telemetry wrapper."""
   config = OrchestratorConfig.from_env()
   scan_id = config.scan_id or f"scan_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
   bucket_name = config.gcs_bucket
+
+  # Seed telemetry context as early as possible so even an immediate
+  # configuration failure below still produces an attributable FAILED row.
+  ctx.apply_config(config)
+  ctx.scan_id = scan_id
 
   # 1. Validate storage configuration when running in GCS mode
   if config.storage_mode == "gcs" and (not config.scan_id or not bucket_name):
@@ -863,6 +892,7 @@ def run_scan_pipeline() -> None:
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
   repo_dir = os.path.join(workspace_dir, repo_name)
+  ctx.repository = f"{owner}/{repo_name}"
 
   # 3. Synchronize repository and record the target commit SHA
   target_sha = _sync_repository(
@@ -874,6 +904,7 @@ def run_scan_pipeline() -> None:
       is_pr_scan=config.is_pr_scan,
       pr_base_ref=config.pr_base_ref,
   )
+  ctx.target_sha = target_sha or ctx.target_sha
 
   if not config.is_pr_scan and target_sha and token:
     post_commit_status(
@@ -892,7 +923,9 @@ def run_scan_pipeline() -> None:
   cm_binary = ensure_cm_updated(
       shutil.which("cm") or "cm", env=scrubbed_env, cwd=repo_dir
   )
-  log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
+  # Capture the resolved version so analytics can correlate finding rates
+  # against scanner upgrades.
+  ctx.cm_version = log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   _init_codemender(repo_dir, scrubbed_env, cm_binary, config=config)
 
   # 5. Parse scan targets (normalized to absolute paths to prevent sandbox mount errors)
@@ -993,6 +1026,17 @@ def run_scan_pipeline() -> None:
             commit_sha=target_sha,
             ref=scan_ref,
         )
+    # Clean-repo terminal path. On the GCP path the coordinating workflow
+    # short-circuits to completion when findings_count == 0, so Stage 3 never
+    # runs -- this is the only opportunity to record that the scan happened.
+    # report_uri stays NULL here because no HTML report is produced.
+    ctx.total_findings_count = 0
+    ctx.active_findings_count = 0
+    ctx.skipped_duplicate_count = 0
+    ctx.fixed_count = 0
+    ctx.failed_fix_count = 0
+    ctx.token_totals = scan_token_usage
+    bq_telemetry.emit_scan_telemetry(ctx, status=bq_telemetry.STATUS_SUCCESS)
     sys.exit(0)
 
   # 8. Filter findings against PR differential hunks and deduplicate against open branches/PRs
@@ -1174,6 +1218,17 @@ def run_scan_pipeline() -> None:
             commit_sha=target_sha,
             ref=scan_ref,
         )
+    # All-findings-filtered terminal path (duplicates / pre-existing). Stage 3
+    # is likewise skipped here, so record the run now. Keeping the raw and
+    # active counts distinct is what lets analytics separate "genuinely clean"
+    # from "everything was already tracked elsewhere".
+    ctx.total_findings_count = len(findings)
+    ctx.active_findings_count = 0
+    ctx.skipped_duplicate_count = len(skipped_finding_ids) + len(ignored_finding_ids)
+    ctx.fixed_count = 0
+    ctx.failed_fix_count = 0
+    ctx.token_totals = scan_token_usage
+    bq_telemetry.emit_scan_telemetry(ctx, status=bq_telemetry.STATUS_SUCCESS)
     sys.exit(0)
 
   # 11. Partition findings into balanced worker buckets
@@ -1193,6 +1248,7 @@ def run_scan_pipeline() -> None:
       config=config,
       cm_binary=cm_binary,
       finding_prs=skipped_finding_prs,
+      started_at=ctx.started_at,
   )
 
   logger.info("Stage 1 (Scan) completed successfully.")

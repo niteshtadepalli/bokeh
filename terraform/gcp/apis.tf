@@ -13,7 +13,7 @@
 # limitations under the License.
 
 locals {
-  required_apis = [
+  base_required_apis = [
     "cloudresourcemanager.googleapis.com",
     "run.googleapis.com",
     "workflows.googleapis.com",
@@ -26,6 +26,14 @@ locals {
     "cloudbuild.googleapis.com",
     "aiplatform.googleapis.com",
   ]
+
+  # BigQuery is only required when analytics telemetry is enabled. Folding it
+  # into the same for_each map (rather than declaring a separate resource)
+  # means bigquery.tf can depend on it by key, exactly like every other API.
+  required_apis = concat(
+    local.base_required_apis,
+    var.enable_bigquery_telemetry ? ["bigquery.googleapis.com"] : [],
+  )
 }
 
 resource "google_project_service" "enabled_services" {
