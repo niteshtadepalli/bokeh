@@ -550,7 +550,7 @@ def inject_codemender_config(
           config_data["vcs"][k] = v
 
     # Copy standard configured sections directly
-    for key in ["scan", "project_paths", "output", "tools", "sandbox", "security"]:
+    for key in ["scan", "project_paths", "output", "tools", "sandbox", "security", "model"]:
       if key in project_config:
         config_data[key] = project_config[key]
 
@@ -579,8 +579,15 @@ def inject_codemender_config(
   if effective_build_cmd:
     config_data["build"]["command"] = effective_build_cmd
 
+  has_repo_model = bool(
+      project_config
+      and isinstance(project_config, dict)
+      and str(project_config.get("model") or "").strip()
+  )
   if cfg.model:
     config_data["model"] = cfg.model.strip()
+  elif not has_repo_model:
+    config_data.pop("model", None)
 
   # 5. Sandbox Configuration (Enabled by default with absolute target mounts)
   if "sandbox" not in config_data or config_data["sandbox"] is None:

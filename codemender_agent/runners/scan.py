@@ -562,6 +562,8 @@ def _filter_findings(
             start_line,
             end_line,
         )
+        finding["Status"] = "PRE_EXISTING_IGNORED"
+        finding["status"] = "PRE_EXISTING_IGNORED"
         ignored_finding_ids.append(finding_id)
         continue
       else:
@@ -595,6 +597,10 @@ def _filter_findings(
             finding_id,
             branch_name,
         )
+        finding["Status"] = "SKIPPED_DUPLICATE"
+        finding["status"] = "SKIPPED_DUPLICATE"
+        if isinstance(has_active_pr, str) and has_active_pr.startswith("http"):
+          finding["pr_url"] = has_active_pr
         skipped_finding_ids.append(finding_id)
         continue
       else:
@@ -605,24 +611,30 @@ def _filter_findings(
         )
         delete_remote_branch(clean_repo_url, token, branch_name, cwd=repo_dir)
 
-    elif not force_overwrite and is_duplicate_pr(
-        clean_repo_url,
-        token,
-        file_path,
-        vuln_type,
-        start_line,
-        head_branch=branch_name,
-    ):
-      logger.info(
-          "An open PR covering %s in %s near line %d already exists. Skipping"
-          " finding %s.",
-          vuln_type,
+    elif not force_overwrite:
+      dup_pr = is_duplicate_pr(
+          clean_repo_url,
+          token,
           file_path,
+          vuln_type,
           start_line,
-          finding_id,
+          head_branch=branch_name,
       )
-      skipped_finding_ids.append(finding_id)
-      continue
+      if dup_pr:
+        logger.info(
+            "An open PR covering %s in %s near line %d already exists. Skipping"
+            " finding %s.",
+            vuln_type,
+            file_path,
+            start_line,
+            finding_id,
+        )
+        finding["Status"] = "SKIPPED_DUPLICATE"
+        finding["status"] = "SKIPPED_DUPLICATE"
+        if isinstance(dup_pr, str) and dup_pr.startswith("http"):
+          finding["pr_url"] = dup_pr
+        skipped_finding_ids.append(finding_id)
+        continue
 
     # Log active finding retained for Stage 2 remediation
     logger.info(
@@ -687,6 +699,8 @@ def _save_and_upload_state(
     scan_token_usage: dict[str, dict[str, int]],
     skipped_duplicate_count: int,
     config: Optional[OrchestratorConfig] = None,
+    cm_binary: Optional[str] = None,
+    finding_prs: Optional[dict[str, str]] = None,
 ) -> None:
   """Saves partitions and manifest, generates signed URLs, and uploads to GCS."""
   # Resolve active configuration instance
@@ -700,6 +714,7 @@ def _save_and_upload_state(
       "total_findings_count": active_findings_count + skipped_duplicate_count,
       "active_findings_count": active_findings_count,
       "skipped_duplicate_count": skipped_duplicate_count,
+      "finding_prs": finding_prs or {},
   }
   scan_meta_path = os.path.join(workspace_dir, "scan_metadata.json")
   with open(scan_meta_path, "w", encoding="utf-8") as f:
@@ -714,7 +729,7 @@ def _save_and_upload_state(
 
   # 3. Stage active cm binary into ~/.codemender/bin/cm and archive ~/.codemender state directory
   codemender_home = os.path.expanduser("~/.codemender")
-  stage_cm_binary_for_archive(codemender_home)
+  stage_cm_binary_for_archive(codemender_home, cm_binary=cm_binary)
   tarball_path = os.path.join(workspace_dir, "workspace_base.tar.gz")
   logger.info("Archiving ~/.codemender to %s", tarball_path)
   make_tarfile(tarball_path, codemender_home)
@@ -1045,6 +1060,14 @@ def run_scan_pipeline() -> None:
         len(findings),
     )
 
+  skipped_finding_prs = {
+      str(f.get("FindingID") or f.get("finding_id")): str(f.get("pr_url"))
+      for f in findings
+      if isinstance(f, dict)
+      and (f.get("FindingID") or f.get("finding_id")) in skipped_finding_ids
+      and f.get("pr_url")
+  }
+
   # 10. Handle case where all findings were filtered out
   if active_findings_count == 0:
     logger.info("Zero active findings after filtering. Exiting Stage 1.")
@@ -1054,6 +1077,7 @@ def run_scan_pipeline() -> None:
           findings=findings,
           repo_dir=repo_dir,
           skipped_finding_ids=set(skipped_finding_ids),
+          finding_prs=skipped_finding_prs,
           is_pr_scan=False,
       )
       sarif_path = os.path.join(workspace_dir, "report.sarif")
@@ -1167,6 +1191,8 @@ def run_scan_pipeline() -> None:
       scan_token_usage,
       len(skipped_finding_ids) + len(ignored_finding_ids),
       config=config,
+      cm_binary=cm_binary,
+      finding_prs=skipped_finding_prs,
   )
 
   logger.info("Stage 1 (Scan) completed successfully.")

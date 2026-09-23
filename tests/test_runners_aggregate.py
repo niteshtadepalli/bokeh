@@ -1164,6 +1164,81 @@ class TestAggregateRunner(unittest.TestCase):
       html_out = f.read()
     self.assertIn("Models: <code>gemini-3.1-pro-preview</code>, <code>gemini-3.8-flash</code>", html_out)
 
+    # 4. Verify rules: null with results: [] is rejected by is_sarif_complete and enriched when report.json has findings
+    null_rules_sarif = {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {"driver": {"name": "CodeMender", "rules": None}},
+                "results": [],
+            }
+        ],
+    }
+    self.assertFalse(is_sarif_complete(null_rules_sarif))
+    with open(sarif_path, "w", encoding="utf-8") as f:
+      json.dump(null_rules_sarif, f)
+
+    # Even with finding_prs={}, validate_and_enrich_sarif must synthesize all findings and mark skipped_finding_ids as SKIPPED_DUPLICATE
+    open_dup_findings = [
+        {
+            "finding_id": "fid-dup-open",
+            "title": "Reflected XSS in AutoloadJsHandler",
+            "file_path": "src/bokeh/server/views/autoload_js_handler.py",
+            "severity": "HIGH",
+            "vuln_type": "Cross-Site Scripting (XSS)",
+            "vuln_id": "CWE-79",
+            "status": "OPEN",
+            "pr_url": "https://github.com/carloschulo/cm-test/pull/9",
+            "start_line": 97,
+            "end_line": 121,
+            "snippet": "js = AUTOLOAD_JS.render(bundle=bundle, elementid=element_id)",
+            "analysis": (
+                "The `AutoloadJsHandler` in `autoload_js_handler.py` takes multiple user-controlled query parameters, including `bokeh-autoload-element`, `bokeh-app-path`, and `bokeh-absolute-url`, and reflects them directly into a generated JavaScript response."
+            ),
+        },
+        {
+            "finding_id": "fid-xss-second",
+            "title": "DOM XSS in SessionHandler",
+            "file_path": "src/bokeh/server/views/session_handler.py",
+            "severity": "LOW",
+            "vuln_type": "Cross-Site Scripting (XSS)",
+            "vuln_id": "CWE-79",
+            "status": "OPEN",
+            "start_line": 30,
+            "end_line": 32,
+            "snippet": "return session_id",
+            "analysis": "Low severity XSS test.",
+        },
+    ]
+    with open(json_path, "w", encoding="utf-8") as f:
+      json.dump(open_dup_findings, f)
+
+    self.assertTrue(
+        validate_and_enrich_sarif(
+            sarif_path=sarif_path,
+            json_path=json_path,
+            repo_dir=repo_dir,
+            skipped_finding_ids={"fid-dup-open"},
+            finding_prs={},
+            is_pr_scan=False,
+        )
+    )
+    with open(sarif_path, "r", encoding="utf-8") as f:
+      enriched2 = json.load(f)
+    rules2 = enriched2["runs"][0]["tool"]["driver"]["rules"]
+    results2 = enriched2["runs"][0]["results"]
+    self.assertEqual(len(results2), 2)
+    # Verify unique rule names across same vuln_type
+    self.assertNotEqual(rules2[0]["name"], rules2[1]["name"])
+    # Verify LOW severity maps to CVSS "2.5" per spec
+    self.assertEqual(rules2[1]["properties"]["security-severity"], "2.5")
+    # Verify 242-char sentence is NOT truncated mid-word ("into a generated JavaScript response.")
+    self.assertIn("into a generated JavaScript response.", rules2[0]["fullDescription"]["text"])
+    # Verify fid-dup-open in skipped_finding_ids has status normalized to SKIPPED_DUPLICATE and links Fix PR #9 from finding.pr_url
+    self.assertEqual(results2[0]["properties"]["status"], "SKIPPED_DUPLICATE")
+    self.assertEqual(results2[0]["properties"]["pr_url"], "https://github.com/carloschulo/cm-test/pull/9")
+    self.assertIn("Fix PR #9", rules2[0]["help"]["markdown"])
+
 
 if __name__ == "__main__":
   unittest.main()

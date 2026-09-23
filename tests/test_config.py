@@ -307,6 +307,28 @@ class TestConfig(unittest.TestCase):
             data = yaml.safe_load(f)
           self.assertEqual(data["project_paths"], [])
 
+  def test_inject_codemender_config_removes_stale_model_when_unset(self):
+    """Verify inject_codemender_config strips stale model from ~/.codemender/config.yaml when CODEMENDER_MODEL is empty."""
+    from codemender_agent.config import OrchestratorConfig
+    with tempfile.TemporaryDirectory() as temp_home:
+      with tempfile.TemporaryDirectory() as repo_dir:
+        cm_dir = os.path.join(temp_home, ".codemender")
+        os.makedirs(cm_dir, exist_ok=True)
+        with open(os.path.join(cm_dir, "config.yaml"), "w") as f:
+          yaml.dump({"model": "gemini-3.7-flash"}, f)
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CODEMENDER_MODEL": "", "CODEMENDER_BUILD_COMMAND": "pytest"},
+            clear=True,
+        ):
+          cfg = OrchestratorConfig.from_env()
+          with unittest.mock.patch("os.path.expanduser", return_value=temp_home):
+            inject_codemender_config(repo_dir, config=cfg)
+            with open(os.path.join(cm_dir, "config.yaml"), "r") as f:
+              data = yaml.safe_load(f)
+            self.assertNotIn("model", data)
+
 
 if __name__ == "__main__":
   unittest.main()

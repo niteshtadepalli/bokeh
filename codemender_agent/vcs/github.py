@@ -233,8 +233,13 @@ def _check_duplicate_pr_api(
     vuln_type: str,
     start_line: int,
     head_branch: Optional[str] = None,
-) -> bool:
-  """Checks GitHub API for existing duplicate PRs traversing pagination headers."""
+) -> Any:
+  """Checks GitHub API for existing duplicate PRs traversing pagination headers.
+
+  Returns:
+    The existing PR's html_url string (or True if html_url is absent) when a
+    duplicate open PR is found, or False otherwise.
+  """
   if token == "fake-token":
     return False
   sanitized_url = sanitize_git_url(repo_url)
@@ -257,12 +262,13 @@ def _check_duplicate_pr_api(
     if resp.status_code == 200:
       prs = resp.json()
       if isinstance(prs, list) and len(prs) > 0:
+        pr_html_url = prs[0].get("html_url")
         logger.info(
             "Found existing open PR targeting head branch %s: %s",
             head_branch,
-            prs[0].get("html_url"),
+            pr_html_url,
         )
-        return True
+        return pr_html_url or True
 
   # 2. Paginate over open pull requests to check finding descriptions
   url: Optional[str] = (
@@ -286,7 +292,7 @@ def _check_duplicate_pr_api(
       # 3. Check each open PR for matching vulnerability signatures
       for pr in prs:
         if head_branch and pr.get("head", {}).get("ref") == head_branch:
-          return True
+          return pr.get("html_url") or True
         body = pr.get("body") or ""
         # Match PR body against vulnerability metadata and target file path
         if "CodeMender Security Fix" in body and file_path in body and vuln_type in body:
@@ -295,14 +301,15 @@ def _check_duplicate_pr_api(
             existing_line = int(match.group(1))
             # Match within 15 lines of original vulnerability location
             if abs(existing_line - start_line) <= 15:
+              pr_html_url = pr.get("html_url")
               logger.info(
                   "Found existing PR (%s) covering %s in %s near line %d.",
-                  pr.get("html_url"),
+                  pr_html_url,
                   vuln_type,
                   file_path,
                   start_line,
               )
-              return True
+              return pr_html_url or True
 
       # 4. Traverse next page link if present in Link header
       url = resp.links.get("next", {}).get("url")
@@ -317,7 +324,7 @@ def is_duplicate_pr(
     vuln_type: str,
     start_line: int,
     head_branch: Optional[str] = None,
-) -> bool:
+) -> Any:
   """Checks if an open PR already exists for the same vulnerability near the same line."""
   try:
     return _check_duplicate_pr_api(

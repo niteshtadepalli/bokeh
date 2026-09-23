@@ -1158,8 +1158,7 @@ def run_worker_pipeline() -> None:
 
   # 8. Inject project configurations, restore staged cm binary from workspace_base.tar.gz, and verify CLI binary
   inject_codemender_config(repo_dir, config=config)
-  restored_cm = restore_staged_cm_binary(codemender_home)
-  cm_binary = shutil.which("cm") or restored_cm or "cm"
+  cm_binary = restore_staged_cm_binary(codemender_home)
   log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   cli_version = config.cli_version
 

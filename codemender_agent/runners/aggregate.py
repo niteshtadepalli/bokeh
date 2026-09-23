@@ -359,6 +359,8 @@ def _aggregate_worker_metadata(
         with open(scan_meta_p, "r", encoding="utf-8") as f:
           scan_meta = json.load(f)
         _ingest_token_usage(scan_meta.get("token_usage"))
+        if isinstance(scan_meta.get("finding_prs"), dict):
+          finding_prs.update(scan_meta["finding_prs"])
         break
       except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning("Failed to parse scan_metadata.json: %s", e)
@@ -752,7 +754,7 @@ def _render_step_summary(
 
       # Format Status with remediation hyperlinking if available
       pr_url = (finding_prs or {}).get(fid)
-      if status in ("FIXED", "REMEDIATED") and pr_url:
+      if status in ("FIXED", "REMEDIATED", "SKIPPED_DUPLICATE") and pr_url:
         # Review and comment anchors live on the scanned pull request itself,
         # so their "/pull/<n>" segment is the parent PR number, not a Child PR.
         if "#discussion_r" in pr_url or "#pullrequestreview-" in pr_url:
@@ -943,7 +945,10 @@ _SEVERITY_TO_CVSS_SCORE = {
 }
 
 
-def is_sarif_complete(sarif_data: Any) -> bool:
+def is_sarif_complete(
+    sarif_data: Any,
+    expected_results_count: Optional[int] = None,
+) -> bool:
   """Validates whether a SARIF 2.1.0 object has complete rules, help markdown, CVSS severity, and line regions."""
   if not isinstance(sarif_data, dict):
     return False
@@ -957,14 +962,19 @@ def is_sarif_complete(sarif_data: Any) -> bool:
   if not driver.get("name"):
     return False
 
+  rules = driver.get("rules")
+  if not isinstance(rules, list):
+    return False
+
   results = run.get("results")
   if not isinstance(results, list):
+    return False
+  if expected_results_count is not None and len(results) != expected_results_count:
     return False
   if not results:
     return True
 
-  rules = driver.get("rules")
-  if not isinstance(rules, list) or not rules:
+  if not rules:
     return False
   rules_by_id = {
       r.get("id"): r for r in rules if isinstance(r, dict) and r.get("id")
@@ -979,9 +989,20 @@ def is_sarif_complete(sarif_data: Any) -> bool:
     rule_obj = rules_by_id.get(rule_id) if rule_id else None
     if not rule_obj:
       return False
+    short_desc = (rule_obj.get("shortDescription") or {}).get("text") or ""
+    full_desc = (rule_obj.get("fullDescription") or {}).get("text") or ""
     help_md = (rule_obj.get("help") or {}).get("markdown") or ""
-    sec_sev = (rule_obj.get("properties") or {}).get("security-severity") or ""
-    if not help_md.strip() or not sec_sev.strip():
+    props = rule_obj.get("properties") or {}
+    sec_sev = str(props.get("security-severity") or "").strip()
+    tags = props.get("tags")
+    if (
+        not short_desc.strip()
+        or not full_desc.strip()
+        or not help_md.strip()
+        or not sec_sev
+        or not isinstance(tags, list)
+        or not tags
+    ):
       return False
     locs = res.get("locations")
     if not isinstance(locs, list) or not locs:
@@ -1109,8 +1130,12 @@ def _extract_first_sentence(text: str, fallback: str) -> str:
     # Split at first sentence boundary followed by whitespace
     parts = re.split(r"(?<=[.!?])\s+", cleaned, maxsplit=1)
     first = parts[0].strip()
-    if len(first) > 240:
-      first = first[:237].rstrip() + "..."
+    if len(first) > 400:
+      cutoff = first.rfind(" ", 0, 397)
+      first = (first[:cutoff] if cutoff > 200 else first[:397]).rstrip()
+      if first.count("`") % 2 == 1:
+        first += "`"
+      first += "..."
     return first
   return fallback
 
@@ -1126,6 +1151,7 @@ def transform_json_to_sarif(
   """Synthesizes a complete GitHub Code Scanning SARIF 2.1.0 document from CodeMender JSON findings."""
   rules: List[Dict[str, Any]] = []
   rules_index_by_id: Dict[str, int] = {}
+  used_rule_names: Set[str] = set()
   results: List[Dict[str, Any]] = []
   skipped_set = set(skipped_finding_ids or set())
   prs_map = dict(finding_prs or {})
@@ -1135,6 +1161,8 @@ def transform_json_to_sarif(
       continue
     finding_id = str(f.get("FindingID") or f.get("finding_id") or "").strip()
     status = str(f.get("Status") or f.get("status") or "OPEN").strip().upper()
+    if finding_id and finding_id in skipped_set and status not in ("FIXED", "REMEDIATED"):
+      status = "SKIPPED_DUPLICATE"
     if status == "DISMISSED":
       continue
     if is_pr_scan and status in ("PRE_EXISTING_IGNORED", "SKIPPED_DUPLICATE"):
@@ -1198,7 +1226,7 @@ def transform_json_to_sarif(
     ).hexdigest()[:8]
     rule_id = f"{vuln_id}/{rule_hash}"
 
-    pr_url = prs_map.get(finding_id, "")
+    pr_url = prs_map.get(finding_id) or str(f.get("pr_url") or "").strip()
     pr_label = ""
     pr_markdown_cell = "—"
     if pr_url:
@@ -1245,7 +1273,13 @@ def transform_json_to_sarif(
     )
 
     if rule_id not in rules_index_by_id:
-      rule_name_clean = re.sub(r"[^A-Za-z0-9]", "", vuln_type.title()) or "CodeMenderSecurityFinding"
+      base_rule_name = re.sub(r"[^A-Za-z0-9]", "", vuln_type.title()) or "CodeMenderSecurityFinding"
+      rule_name_clean = (
+          f"{base_rule_name}{rule_hash.capitalize()}"
+          if base_rule_name in used_rule_names
+          else base_rule_name
+      )
+      used_rule_names.add(rule_name_clean)
       rules_index_by_id[rule_id] = len(rules)
       rules.append({
           "id": rule_id,
@@ -1422,14 +1456,46 @@ def validate_and_enrich_sarif(
     except Exception:  # pylint: disable=broad-exception-caught
       existing_sarif = None
 
-  if existing_sarif is not None and is_sarif_complete(existing_sarif):
-    # Even if complete, ensure finding_prs links are present if provided
-    if not finding_prs:
-      logger.info("SARIF report at %s passed completeness validation.", sarif_path)
-      return True
-
   findings = _load_findings_for_sarif(json_path, state_db_path)
+  skipped_set = set(skipped_finding_ids or set())
+  expected_count = 0
+  for f in findings:
+    if not isinstance(f, dict):
+      continue
+    fid = str(f.get("FindingID") or f.get("finding_id") or "").strip()
+    status = str(f.get("Status") or f.get("status") or "OPEN").strip().upper()
+    if fid and fid in skipped_set and status not in ("FIXED", "REMEDIATED"):
+      status = "SKIPPED_DUPLICATE"
+    if status == "DISMISSED":
+      continue
+    if is_pr_scan and status in ("PRE_EXISTING_IGNORED", "SKIPPED_DUPLICATE"):
+      continue
+    expected_count += 1
+
+  if (
+      existing_sarif is not None
+      and is_sarif_complete(
+          existing_sarif,
+          expected_results_count=expected_count if findings else None,
+      )
+      and not finding_prs
+  ):
+    logger.info("SARIF report at %s passed completeness validation.", sarif_path)
+    return True
+
   if not findings:
+    if isinstance(existing_sarif, dict):
+      # Ensure tool.driver.rules is an array (not null) even when 0 findings exist
+      for run in existing_sarif.get("runs") or []:
+        if isinstance(run, dict):
+          driver = (run.get("tool") or {}).get("driver")
+          if isinstance(driver, dict) and driver.get("rules") is None:
+            driver["rules"] = []
+      try:
+        with open(sarif_path, "w", encoding="utf-8") as f:
+          json.dump(existing_sarif, f, indent=2)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
     logger.info(
         "No findings available in report.json or state.db to enrich %s; keeping existing SARIF.",
         sarif_path,
@@ -2011,9 +2077,8 @@ def run_aggregate_pipeline() -> None:
 
   # 11. Generate final HTML and SARIF reports and upload
   inject_codemender_config(repo_dir, config=config)
-  # Restore staged cm binary from workspace_base.tar.gz if present, then resolve path
-  restored_cm = restore_staged_cm_binary(codemender_home)
-  cm_binary = shutil.which("cm") or restored_cm or "cm"
+  # Restore staged cm binary from workspace_base.tar.gz if present
+  cm_binary = restore_staged_cm_binary(codemender_home)
   log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   # Invoke report generation and upload routine with full run parameters
   _generate_and_upload_report(
@@ -2122,6 +2187,22 @@ def run_aggregate_pipeline() -> None:
         pr_number=config.pr_number,
         body=summary_md.replace("[Artifacts section](#artifacts) below", run_link),
     )
+
+  # ---------------------------------------------------------------------------
+  # TODO(Item 5 — Merck Multi-Repo Telemetry & Gemini in BigQuery Analytics):
+  # Export structured JSONL rows to GCS (`gs://<bucket>/telemetry/scan_runs/`
+  # and `gs://<bucket>/telemetry/scan_findings/`) backed by BigQuery External /
+  # BigLake tables (`codemender_telemetry.scan_runs`, `scan_findings`) to enable
+  # cross-repository security posture and token-cost querying via Gemini in
+  # BigQuery (Conversational Analytics).
+  #
+  # TODO(Item 6 — Post-Cron Notification & Ticketing Adapter Hooks):
+  # Wire configurable post-aggregation notification and ticketing adapters
+  # controlled by `CODEMENDER_NOTIFY_EMAILS`, `CODEMENDER_NOTIFY_WEBHOOK_URL`
+  # (Google Chat / Slack / Teams), and `CODEMENDER_TICKETING_PROVIDER`
+  # (`github_issues` | `jira`) to alert repository owners and auto-file
+  # tracking tickets for newly remediated or unfixed CRITICAL/HIGH findings.
+  # ---------------------------------------------------------------------------
 
   # Log final aggregator completion notice
   logger.info("Stage 3 (Aggregate) completed successfully.")
