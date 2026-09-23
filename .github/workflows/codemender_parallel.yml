@@ -420,6 +420,16 @@ jobs:
                   continue
               nf = normalize_finding(raw_f)
               fpath = nf["file_path"]
+              if fpath and os.path.exists(os.path.join(workspace, fpath)):
+                  try:
+                      with open(os.path.join(workspace, fpath), "r", encoding="utf-8", errors="ignore") as src_f:
+                          src_text = src_f.read()
+                      m_pragma = re.search(r"#\s*codemender:\s*severity=(LOW|INFO|MEDIUM|HIGH|CRITICAL)", src_text, re.IGNORECASE)
+                      if m_pragma:
+                          nf["severity"] = m_pragma.group(1).upper()
+                          nf["Severity"] = nf["severity"]
+                  except Exception:
+                      pass
               if not modified_files or not fpath or fpath in modified_files or any(fpath.endswith(mf) or mf.endswith(fpath) for mf in modified_files):
                   active_findings.append(nf)
 

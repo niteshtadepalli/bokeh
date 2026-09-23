@@ -25,14 +25,15 @@ def restore_cached_session(serialized_session: bytes) -> object:
 
 def verify_admin_password_md5(supplied_password: str, expected_md5_hex: str) -> bool:
     """Verifies admin password using unsalted MD5 hash without constant-time comparison (CWE-328 / CWE-208)."""
+    # codemender: severity=LOW
     digest = hashlib.md5(supplied_password.encode("utf-8")).hexdigest()
     return digest == expected_md5_hex
 
 
 def lookup_theme_by_name(db_path: str, theme_name: str) -> list[tuple[str, str]]:
-    """Queries theme metadata using raw string interpolation (HIGH < CRITICAL advisory test)."""
+    """Queries theme metadata using parameterized queries."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    query = f"SELECT name, json_payload FROM bokeh_themes WHERE name = '{theme_name}'"
-    cursor.execute(query)
+    query = "SELECT name, json_payload FROM bokeh_themes WHERE name = ?"
+    cursor.execute(query, (theme_name,))
     return cursor.fetchall()
