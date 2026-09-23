@@ -612,8 +612,13 @@ def _render_step_summary(
             fid = row_dict.get("finding_id", "")
             status = (row_dict.get("status") or "").upper()
 
-            # In PR scans (Clean as You Code), omit pre-existing ignored and dismissed findings
-            if config.is_pr_scan and status in ("PRE_EXISTING_IGNORED", "DISMISSED"):
+            # In PR scans (Clean as You Code), omit pre-existing ignored, dismissed, and resolved findings
+            if config.is_pr_scan and status in (
+                "PRE_EXISTING_IGNORED",
+                "DISMISSED",
+                "FALSE_POSITIVE",
+                "RESOLVED",
+            ):
               continue
 
             findings_stats["total"] += 1
@@ -1173,9 +1178,29 @@ def run_aggregate_pipeline() -> None:
   target_sha = manifest.get("target_sha")
   findings_count = manifest.get("findings_count", 0)
 
-  # If zero findings were discovered in Stage 1, exit aggregator immediately
+  # If zero findings were discovered in Stage 1, emit passing PR Security Gate status and exit
   if findings_count == 0 and "findings_count" in manifest:
     logger.info("Manifest indicates 0 findings. Nothing to aggregate.")
+    if config.is_pr_scan:
+      target_commit_sha = config.target_sha or target_sha
+      if target_commit_sha and token:
+        gate_context = "CodeMender / Security Gate"
+        gate_desc = (
+            "Security Gate PASSED: Clean as You Code (0 active vulnerabilities)."
+        )
+        logger.info(
+            "✅ CodeMender Security Gate PASSED: Clean as You Code. Emitting '%s' commit status check.",
+            gate_context,
+        )
+        post_commit_status(
+            token=token,
+            owner=owner,
+            repo=repo_name,
+            sha=target_commit_sha,
+            state="success",
+            description=gate_desc,
+            context=gate_context,
+        )
     sys.exit(0)
 
   # 4. Clone repository to prepare source files for report formatting

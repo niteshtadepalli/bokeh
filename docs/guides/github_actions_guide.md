@@ -227,18 +227,196 @@ pull requests.
 Before running CodeMender across target repositories, complete this one-time
 setup for your organization or user account:
 
-1.  **GitHub App Creation**: Creates the dedicated bot identity for minting
+1.  **Build & Publish the `codemender-runner` Image**: Builds the universal
+    runner container image (`ghcr.io/<your-org>/codemender-runner:latest`) and
+    publishes it to your GitHub Container Registry (GHCR) Packages.
+2.  **GitHub App Creation**: Creates the dedicated bot identity for minting
     ephemeral 60-minute installation tokens with least-privilege permissions.
-2.  **GCP Workload Identity Federation (WIF) & PR Trigger Label Setup**:
+3.  **GCP Workload Identity Federation (WIF) & PR Trigger Label Setup**:
     Configures keyless OIDC authentication for Vertex AI Gemini LLM access and
     creates the `codemender-scan` PR trigger label (**Path A: Automated
     Terraform** or **Path B: Manual CLI**).
-3.  **Secret Injection**: Sets the GitHub Actions secrets across target
+4.  **Secret Injection**: Sets the GitHub Actions secrets across target
     repositories.
 
 --------------------------------------------------------------------------------
 
-### Step 1.1: GitHub App Creation & Permissions
+### Step 1.1: Build & Publish the `codemender-runner` Container Image (GHCR)
+
+> [!IMPORTANT]
+> **Start Here on Initial Customer Onboarding**:
+> When you fork, clone, or import `codemender-agent` into your own GitHub
+> organization or personal account (`<your-org>/codemender-agent`), **GitHub does
+> not copy container packages from upstream repositories**, and GitHub Actions
+> `on.push` workflows do not fire until a new commit or manual dispatch is
+> triggered.
+>
+> Building `ghcr.io/<your-org>/codemender-runner:latest` has **zero external
+> authentication dependencies** (it uses GitHub's built-in `GITHUB_TOKEN`), so
+> you can trigger the image build first and let it complete in the background
+> (~3–5 minutes) while you configure your GitHub App and GCP WIF in Steps
+> 1.2–1.4.
+
+The `codemender-runner` image packages:
+*   Standard LTS language toolchains (Python 3.11, Node.js 22 LTS, Go 1.22+, OpenJDK 17, Maven, Gradle, C/C++ `build-essential`).
+*   The CodeMender CLI binary (`cm`) at `/usr/local/bin/cm`.
+*   The isolated Python orchestrator runtime at `/opt/codemender/venv`.
+
+Choose between **Option A (Automated GitHub Actions Workflow — Recommended)** or
+**Option B (Local Docker CLI Build & Push)**:
+
+```
+                  ┌──────────────────────────────────────────────┐
+                  │  How to Build & Publish codemender-runner    │
+                  └──────────────────────┬───────────────────────┘
+                                         │
+                 ┌───────────────────────┴───────────────────────┐
+                 ▼                                               ▼
+    ┌───────────────────────────┐                 ┌───────────────────────────┐
+    │ Option A: GitHub Actions  │                 │ Option B: Local Docker    │
+    │ build_runner_image.yml    │                 │ CLI Build & Push          │
+    │ (Recommended / Zero Local │                 │ (For Custom Local `cm`    │
+    │  Docker Setup Required)   │                 │  Binaries or Air-Gapped)  │
+    └───────────────────────────┘                 └───────────────────────────┘
+```
+
+#### Option A: Build via GitHub Actions Workflow (`.github/workflows/build_runner_image.yml`) — Recommended
+
+This repository ships with an automated image builder workflow at
+[`.github/workflows/build_runner_image.yml`](../../.github/workflows/build_runner_image.yml)
+that builds the multi-toolchain image and pushes it directly to
+`ghcr.io/<your-org-or-username>/codemender-runner:latest` using the built-in
+`${{ secrets.GITHUB_TOKEN }}` (`packages: write`).
+
+##### 1. Choose How the `cm` CLI Binary is Supplied
+
+The workflow resolves the `cm` binary (`COPY cm /usr/local/bin/cm` in
+[`Dockerfile`](../../Dockerfile)) using a **3-tier priority ladder**:
+
+1.  **Custom URL Input (`cm_custom_url`)**: If you were provided a direct HTTPS
+    download URL or a signed Google Cloud Storage URL for a specific `cm` binary
+    (raw binary or `.zip` archive), pass it via the `cm_custom_url` workflow
+    input.
+2.  **Staged Binary in Repository Root (`./cm`)**: If you received a `cm` binary
+    file directly during your onboarding engagement, copy it to the root of your
+    `codemender-agent` repository as `./cm`, mark it executable (`chmod +x cm`),
+    and commit/push it to `main`:
+    ```bash
+    cp /path/to/downloaded/cm ./cm
+    chmod +x ./cm
+    git add cm Dockerfile
+    git commit -m "chore: stage cm CLI binary for runner image build"
+    git push origin main
+    ```
+    *(Pushing to `main` will also automatically trigger `build_runner_image.yml`!)*
+3.  **Artifact Registry Version (`cm_version`, default `stable`)**: If neither
+    `cm_custom_url` nor `./cm` is present, the workflow downloads the specified
+    `cm_version` (default `stable`) from the release Artifact Registry.
+
+> [!NOTE]
+> **How to Download a Different Version of the `cm` Binary**:
+> In [`.github/workflows/build_runner_image.yml`](../../.github/workflows/build_runner_image.yml#L63-L66),
+> the Artifact Registry download URL is parameterized by `CM_VERSION` (`inputs.cm_version`, default `stable`):
+> ```text
+> https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3A${VERSION}%3Acm-linux-amd64.zip:download?alt=media
+> ```
+> To build with a different `cm` CLI release version (e.g. `preview` or a pinned version tag), either pass `-f cm_version="<version>"` when triggering the workflow, or pass a direct download link via `-f cm_custom_url="<url>"`.
+
+##### 2. Trigger the Build Workflow
+
+*   **Via GitHub Web UI**:
+    1.  In your `<your-org>/codemender-agent` repository on GitHub, click the
+        **Actions** tab.
+    2.  *(If prompted on a freshly forked repository, click **"I understand my
+        workflows, go ahead and enable them"**).*
+    3.  In the left sidebar, select **Build & Publish CodeMender Runner Image**.
+    4.  Click **Run workflow** (top right) $\rightarrow$ optionally supply
+        `cm_version` or `cm_custom_url` $\rightarrow$ click **Run workflow**.
+*   **Via GitHub CLI (`gh`)**:
+    ```bash
+    # Standard build (uses ./cm if committed, or downloads cm_version='stable')
+    gh workflow run build_runner_image.yml --repo "your-org/codemender-agent"
+
+    # Build with a specific cm CLI version from Artifact Registry
+    gh workflow run build_runner_image.yml \
+        --repo "your-org/codemender-agent" \
+        -f cm_version="preview"
+
+    # Or build using a custom binary URL / signed GCS link
+    gh workflow run build_runner_image.yml \
+        --repo "your-org/codemender-agent" \
+        -f cm_custom_url="https://storage.googleapis.com/your-signed-url/cm-linux-amd64.zip"
+
+    # Watch the build progress (~3-5 minutes)
+    gh run watch --repo "your-org/codemender-agent"
+    ```
+
+##### 3. Verify the Published Package in GHCR
+
+Once the workflow completes with a green checkmark:
+1.  Navigate to your GitHub Organization or User **Packages** tab
+    (`https://github.com/orgs/<your-org>/packages` or
+    `https://github.com/<your-username>?tab=packages`).
+2.  Confirm that **`codemender-runner`** appears with tag `latest`:
+    ```text
+    ghcr.io/<your-org-or-username>/codemender-runner:latest
+    ```
+
+---
+
+#### Option B: Local Build & Push via Docker CLI
+
+Use this method if you have the `cm` binary on your local machine or Cloudtop
+and prefer to build and push the Docker image directly from your terminal.
+
+##### 1. Stage the `cm` Binary in the Repository Root
+
+`Dockerfile` copies `./cm` from the repository root into `/usr/local/bin/cm`.
+Place the `cm` binary in the root of your cloned `codemender-agent` directory:
+
+```bash
+cd /path/to/codemender-agent
+
+# Option 1: Copy from a local binary provided during customer onboarding
+cp /path/to/cm-linux-amd64 ./cm
+chmod +x ./cm
+
+# Option 2: Or download from Artifact Registry
+# NOTE: Change VERSION="stable" below (e.g., to "preview" or a specific release tag)
+# if you need to download a different version of the cm binary:
+VERSION="stable"
+URL="https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3A${VERSION}%3Acm-linux-amd64.zip:download?alt=media"
+curl -fsSL -o cm-linux-amd64.zip "$URL" && unzip -q -o cm-linux-amd64.zip cm && chmod +x ./cm
+```
+
+##### 2. Authenticate Docker to GitHub Container Registry (`ghcr.io`)
+
+Authenticate using your active GitHub CLI session (or a Personal Access Token
+with `write:packages` and `read:packages` scopes):
+
+```bash
+# Using GitHub CLI (ensure token has write:packages scope: gh auth refresh -s write:packages)
+gh auth token | docker login ghcr.io -u "your-github-username" --password-stdin
+
+# Or using a Personal Access Token (PAT)
+echo "$GITHUB_PAT" | docker login ghcr.io -u "your-github-username" --password-stdin
+```
+
+##### 3. Build and Push to GHCR
+
+```bash
+IMAGE_NAME="ghcr.io/your-org-or-username/codemender-runner:latest"
+
+# Build the multi-toolchain runner image
+docker build -t "$IMAGE_NAME" .
+
+# Push the image to GitHub Container Registry
+docker push "$IMAGE_NAME"
+```
+
+--------------------------------------------------------------------------------
+
+### Step 1.2: GitHub App Creation & Permissions
 
 Creating a dedicated GitHub App provides a secure bot identity for CodeMender.
 Using a GitHub App offers major advantages over Personal Access Tokens (PATs):
@@ -319,7 +497,7 @@ Once created, you will be redirected to the App's **General Settings** page:
     *   Your browser will automatically download an RSA private key file in
         `.pem` format (e.g. `codemender-bot.2026-08-31.private-key.pem`).
     *   Keep this file secure! It will be used as `GH_APP_PRIVATE_KEY` in
-        [Step 1.3](#step-13-secret-injection).
+        [Step 1.4](#step-14-secret-injection).
 
 #### 6. Install the App on Repositories
 
@@ -336,7 +514,7 @@ Before the App can mint tokens for a repository, it must be installed:
 
 --------------------------------------------------------------------------------
 
-### Step 1.2: GCP Workload Identity Federation (WIF) & PR Trigger Label Setup
+### Step 1.3: GCP Workload Identity Federation (WIF) & PR Trigger Label Setup
 
 Choose between **Path A (Automated Terraform)** or **Path B (Manual CLI)** to
 provision the GCP WIF infrastructure, set up the `codemender-scan` PR trigger
@@ -395,7 +573,7 @@ gcp_region     = "global"
 # GitHub organization name (e.g. "my-org") or username (e.g. "octocat").
 github_owner = "your-github-org-or-username"
 
-# Numeric App ID from Step 1.1 (from GitHub App settings page, e.g. "123456").
+# Numeric App ID from Step 1.2 (from GitHub App settings page, e.g. "123456").
 # Configured automatically as the GH_APP_ID secret in target repositories.
 github_app_id = "123456"
 
@@ -506,7 +684,7 @@ Authenticate with GCP and GitHub, then apply:
 > Terraform automatically populates `GCP_WORKLOAD_IDENTITY_PROVIDER`,
 > `GCP_SERVICE_ACCOUNT`, `GH_APP_ID`, and creates the `codemender-scan` label on
 > all specified `target_github_repositories`. Proceed to
-> [Step 1.3](#step-13-secret-injection) for the single decoupled step to inject
+> [Step 1.4](#step-14-secret-injection) for the single decoupled step to inject
 > `GH_APP_PRIVATE_KEY`.
 
 --------------------------------------------------------------------------------
@@ -625,7 +803,7 @@ gh label create "codemender-scan" \
 
 --------------------------------------------------------------------------------
 
-### Step 1.3: Secret Injection
+### Step 1.4: Secret Injection
 
 To keep your private key strictly out of version control, plaintext `.tfvars`
 files, and Terraform state files, secrets are configured as follows:
@@ -673,7 +851,7 @@ gh secret set GH_APP_PRIVATE_KEY --repo "$TARGET_REPO" < path/to/your-app-privat
 
 ## 4. Phase 2: Target Repository Onboarding
 
-Once Phase 1 is complete for your organization or user account, onboarding any
+Once Phase 1 (including building `codemender-runner` in [Step 1.1](#step-11-build--publish-the-codemender-runner-container-image-ghcr)) is complete for your organization or user account, onboarding any
 new target repository requires only a 3-step checklist:
 
 ```
@@ -690,7 +868,7 @@ new target repository requires only a 3-step checklist:
 
 > [!TIP]
 > **Skip this step if:** You selected **"All repositories"** during
-> [Step 1.1](#6-install-the-app-on-repositories). The App is already active on
+> [Step 1.2](#6-install-the-app-on-repositories). The App is already active on
 > this repository.
 >
 > **Perform this step only if:** Your organization restricts the GitHub App to
@@ -709,11 +887,21 @@ new target repository requires only a 3-step checklist:
 
 ### Step 2.2: Grant GHCR Package Access (for Private Images)
 
-GitHub Actions runners need permission to pull the runner container image.
+GitHub Actions runners need permission to pull the `codemender-runner` container
+image you published in [Step 1.1](#step-11-build--publish-the-codemender-runner-container-image-ghcr).
+By default, newly pushed packages on GitHub Container Registry (GHCR) are created
+as **Private**.
 
-*   **Public Package (`ghcr.io/ilbzzz/codemender-runner:latest`)**: No action
-    needed. Any repository can pull the public image immediately.
-*   **Private Package**:
+*   **If You Make the Package Public / Internal**:
+    1.  Go to your GitHub profile or organization $\rightarrow$ **Packages** tab
+        $\rightarrow$ select **`codemender-runner`** *(if `codemender-runner` is
+        not listed yet, complete [Step 1.1](#step-11-build--publish-the-codemender-runner-container-image-ghcr) first)*.
+    2.  Click **Package settings** (bottom right sidebar) $\rightarrow$ scroll to
+        **Danger Zone** $\rightarrow$ **Change visibility** $\rightarrow$ select
+        **Public** (or **Internal** for GitHub Enterprise Cloud organizations).
+    3.  Once Public/Internal, any repository in your organization can pull the
+        image with zero per-repo configuration.
+*   **If You Keep the Package Private (Recommended for Restricted Orgs)**:
     1.  Go to your GitHub profile or organization $\rightarrow$ **Packages** tab
         $\rightarrow$ select **`codemender-runner`**.
     2.  Click **Package settings** (sidebar) $\rightarrow$ scroll to **Manage
@@ -1275,42 +1463,14 @@ run overview, showing:
 
 ## 7. Operational Reference & Advanced Configurations
 
-### Building & Publishing the Standard Runner Base Image
+### Rebuilding & Updating the Standard Runner Base Image
 
-The CodeMender runner base image (`ghcr.io/<org>/codemender-runner:latest`)
-contains the pre-baked standard LTS language runtimes (Python 3.11, Node.js 22
-LTS, Go 1.22+, OpenJDK 17), build essentials (`gcc`, `g++`, `make`, `git`,
-`curl`, `fuser`, `unzip`), the `cm` Go binary in `/usr/local/bin/cm`, and the
-isolated orchestrator Python virtual environment in `/opt/codemender/venv`.
-
-#### Method A: Automated CI Workflow (Recommended)
-
-The repository includes a ready-to-use GitHub Actions workflow at
-`.github/workflows/build_runner_image.yml` that builds and publishes the image
-automatically:
-
-1.  **Automatic Build**: Runs automatically whenever `Dockerfile`,
-    `codemender_agent/**`, or `requirements.txt` are pushed to `main`.
-2.  **Manual Dispatch**: Run manually via **Actions $\rightarrow$ Build &
-    Publish CodeMender Runner Image $\rightarrow$ Run workflow**.
-
-#### Method B: Manual Local Build & Push via Docker CLI
-
-```bash
-# 1. Download the CodeMender Go CLI binary into the repository root
-URL="https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
-curl -fsSL -o cm-linux-amd64.zip "$URL"
-unzip -q -o cm-linux-amd64.zip cm
-chmod +x cm
-
-# 2. Log in to GitHub Container Registry (GHCR) with 'write:packages' PAT
-echo "$GITHUB_PAT" | docker login ghcr.io -u "your-github-username" --password-stdin
-
-# 3. Build and push the base image
-IMAGE_NAME="ghcr.io/your-org-or-username/codemender-runner:latest"
-docker build -t "$IMAGE_NAME" .
-docker push "$IMAGE_NAME"
-```
+Whenever `Dockerfile`, `codemender_agent/**`, or `requirements.txt` are updated on
+`main` (or when upgrading the `cm` CLI binary version), `.github/workflows/build_runner_image.yml`
+automatically rebuilds and publishes `ghcr.io/<your-org>/codemender-runner:latest`.
+For initial one-time customer image building and CLI binary staging (`cm_custom_url`,
+staged `./cm`, or `cm_version`), see
+**[Step 1.1: Build & Publish the `codemender-runner` Container Image (GHCR)](#step-11-build--publish-the-codemender-runner-container-image-ghcr)**.
 
 ---
 
@@ -1447,6 +1607,21 @@ Build and push your image to GitHub Container Registry
     2.  Ensure that the test suite does not require external network databases
         that are blocked by the sandbox (or set
         `CODEMENDER_SANDBOX_NETWORK_PROFILE: permissive-open`).
+
+#### 4. Container Initialize Error: `pull access denied` or `manifest unknown` for `codemender-runner:latest`
+
+*   **Cause**: Either the `codemender-runner` container image has not yet been
+    built and published to your organization's GitHub Container Registry (GHCR),
+    or the package is **Private** and the target repository has not been granted
+    **Manage Actions access**.
+*   **Fix**:
+    1.  Verify that `codemender-runner` has been built and published by
+        completing [Step 1.1: Build & Publish the `codemender-runner` Container Image](#step-11-build--publish-the-codemender-runner-container-image-ghcr).
+    2.  In your GitHub Organization or User **Packages** tab, open
+        `codemender-runner` $\rightarrow$ **Package settings**, and either set
+        visibility to **Public** / **Internal** or add the target repository
+        under **Manage Actions access** with **Read** permission (see
+        [Step 2.2](#step-22-grant-ghcr-package-access-for-private-images)).
 
 --------------------------------------------------------------------------------
 

@@ -1032,6 +1032,67 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertNotIn("`fid-3`", summary_md)
     self.assertNotIn("Pre-existing XSS", summary_md)
 
+  @patch("codemender_agent.runners.aggregate.post_commit_status")
+  def test_aggregate_pipeline_pr_scan_zero_findings_manifest_posts_success_status(
+      self, mock_post_status
+  ):
+    """Verify aggregate early-exit on findings_count=0 still posts passing Security Gate status on PR scans."""
+    transit_base = os.path.join(self.workspace_dir, ".codemender_transit", "base")
+    os.makedirs(transit_base, exist_ok=True)
+    with open(os.path.join(transit_base, "manifest.json"), "w", encoding="utf-8") as f:
+      json.dump({"findings_count": 0, "target_sha": "zero000sha"}, f)
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "github_actions",
+            "CODEMENDER_IS_PR_SCAN": "true",
+            "GITHUB_TOKEN": "valid-token",
+        },
+    ):
+      with self.assertRaises(SystemExit) as cm:
+        run_aggregate_pipeline()
+
+    self.assertEqual(cm.exception.code, 0)
+    mock_post_status.assert_called_once()
+    status_kwargs = mock_post_status.call_args.kwargs
+    self.assertEqual(status_kwargs["state"], "success")
+    self.assertEqual(status_kwargs["context"], "CodeMender / Security Gate")
+    self.assertEqual(status_kwargs["sha"], "zero000sha")
+    self.assertIn("Security Gate PASSED", status_kwargs["description"])
+
+  def test_render_step_summary_pr_scan_all_ignored_or_resolved_passes_security_gate(self):
+    """Verify _render_step_summary returns 0 active findings and PASSED gate when all findings are ignored/resolved."""
+    from codemender_agent.config import OrchestratorConfig
+
+    db_dir = os.path.join(self.workspace_dir, "test_pr_clean_summary")
+    os.makedirs(db_dir, exist_ok=True)
+    base_db = os.path.join(db_dir, "state.db")
+    self.create_test_db(
+        base_db,
+        [
+            {"finding_id": "fid-1", "title": "Pre-existing XSS", "status": "PRE_EXISTING_IGNORED", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-2", "title": "Dismissed Finding", "status": "DISMISSED", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-3", "title": "False Positive", "status": "FALSE_POSITIVE", "updated_at": "2026-08-01"},
+            {"finding_id": "fid-4", "title": "Resolved Finding", "status": "RESOLVED", "updated_at": "2026-08-01"},
+        ],
+    )
+
+    summary_file = os.path.join(self.workspace_dir, "pr_clean_step_summary.md")
+    cfg = OrchestratorConfig(is_pr_scan=True, github_step_summary=summary_file)
+    summary_md, count = _render_step_summary(
+        base_db,
+        cfg,
+        owner="ilbzzz",
+        repo_name="juice-shop-local",
+        target_sha="1e677199",
+    )
+
+    self.assertEqual(count, 0)
+    self.assertIn("Security Gate Status: PASSED", summary_md)
+    self.assertIn("| 0 | 0 | 0 | 0 | 0 | 0 |", summary_md)
+
 
 if __name__ == "__main__":
   unittest.main()
+
