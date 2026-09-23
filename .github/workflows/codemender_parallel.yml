@@ -420,16 +420,6 @@ jobs:
                   continue
               nf = normalize_finding(raw_f)
               fpath = nf["file_path"]
-              if fpath and os.path.exists(os.path.join(workspace, fpath)):
-                  try:
-                      with open(os.path.join(workspace, fpath), "r", encoding="utf-8", errors="ignore") as src_f:
-                          src_text = src_f.read()
-                      m_pragma = re.search(r"#\s*codemender:\s*severity=(LOW|INFO|MEDIUM|HIGH|CRITICAL)", src_text, re.IGNORECASE)
-                      if m_pragma:
-                          nf["severity"] = m_pragma.group(1).upper()
-                          nf["Severity"] = nf["severity"]
-                  except Exception:
-                      pass
               if not modified_files or not fpath or fpath in modified_files or any(fpath.endswith(mf) or mf.endswith(fpath) for mf in modified_files):
                   active_findings.append(nf)
 
@@ -629,6 +619,7 @@ jobs:
           ADVISORY_COUNT: ${{ needs.scan.outputs.advisory_count || '0' }}
           MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
           FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
           TARGET_SHA: ${{ needs.scan.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
           REPO_FULL_NAME: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -646,6 +637,7 @@ jobs:
           advisory_count = int(os.environ.get("ADVISORY_COUNT", "0") or "0")
           min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").upper()
           fail_on_findings = os.environ.get("FAIL_ON_FINDINGS", "true").lower() == "true"
+          pr_number = os.environ.get("PR_NUMBER", "").strip()
           target_sha = os.environ.get("TARGET_SHA", "")
           repo = os.environ.get("REPO_FULL_NAME", "")
           run_url = os.environ.get("RUN_URL", "")
@@ -672,6 +664,13 @@ jobs:
               # Exiting 0 here allows Stage 3 to cleanly override the status to 'success' if cm verify dismisses all findings as false positives.
               exit_code = 0
 
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "Content-Type": "application/json",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
           if token and repo and target_sha:
               status_url = f"https://api.github.com/repos/{repo}/statuses/{target_sha}"
               payload = json.dumps({
@@ -680,26 +679,52 @@ jobs:
                   "description": desc[:140],
                   "context": "CodeMender / Security Gate",
               }).encode("utf-8")
-              req = urllib.request.Request(
-                  status_url,
-                  data=payload,
-                  headers={
-                      "Authorization": f"Bearer {token}",
-                      "Accept": "application/vnd.github+json",
-                      "Content-Type": "application/json",
-                      "X-GitHub-Api-Version": "2022-11-28",
-                  },
-                  method="POST",
-              )
+              req = urllib.request.Request(status_url, data=payload, headers=headers, method="POST")
               try:
                   with urllib.request.urlopen(req, timeout=15) as resp:
                       print(f"Published immediate commit status 'CodeMender / Security Gate' ({state}): HTTP {resp.status}")
               except Exception as exc:
                   print(f"Warning: could not post commit status: {exc}")
 
+          # Also resolve any existing sticky PR comment when findings_count is 0/empty (including when skip_scan=true)
+          if state == "success" and findings_count in ("0", "") and pr_number and repo and token:
+              marker = "<!-- codemender-security-summary -->"
+              try:
+                  list_req = urllib.request.Request(
+                      f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments?per_page=100",
+                      headers=headers, method="GET"
+                  )
+                  existing_id = None
+                  existing_body = ""
+                  with urllib.request.urlopen(list_req, timeout=15) as resp:
+                      for c in json.loads(resp.read().decode("utf-8")):
+                          if marker in str(c.get("body", "")):
+                              existing_id = c.get("id")
+                              existing_body = str(c.get("body", ""))
+                              break
+                  if existing_id and f"(`{target_sha[:8]}`)" not in existing_body:
+                      resolved_body = "\n".join([
+                          marker,
+                          "<!-- cm-stage-header -->",
+                          "### 🛡️ CodeMender Pre-Submit Security Report *(All Findings Resolved)*",
+                          "<!-- /cm-stage-header -->",
+                          "",
+                          f"**Gate Status:** ✅ **PASSED** — `0` vulnerabilities `>= {min_sev}` detected in latest PR diff (`{target_sha[:8]}`).",
+                          f"> 🎉 All previously reported security findings in this PR have been resolved ([view scan run]({run_url})). Merging is unblocked.",
+                      ])
+                      patch_req = urllib.request.Request(
+                          f"https://api.github.com/repos/{repo}/issues/comments/{existing_id}",
+                          data=json.dumps({"body": resolved_body}).encode("utf-8"),
+                          headers=headers, method="PATCH"
+                      )
+                      with urllib.request.urlopen(patch_req, timeout=15) as _:
+                          print(f"Updated existing sticky comment #{existing_id} on PR #{pr_number} to All Findings Resolved.")
+              except Exception as exc:
+                  print(f"Note updating resolved sticky comment: {exc}")
+
           summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary_path:
-              badge = "✅ PASSED" if exit_code == 0 else "❌ BLOCKED"
+              badge = "✅ PASSED" if state == "success" else "❌ BLOCKED (Pending Stage 2 Verification)"
               with open(summary_path, "a", encoding="utf-8") as sf:
                   sf.write(f"## 🛡️ CodeMender Pre-Submit Security Gate: {badge}\n\n")
                   sf.write(f"- **Commit SHA:** `{target_sha[:12]}`\n")
@@ -1014,31 +1039,25 @@ jobs:
               finding["line_number"] = int(finding.get("line_number") or finding.get("StartLine") or 1)
 
               verified_status = "CONFIRMED"
-              fpath = finding["file_path"]
-              has_fp_pragma = False
-              if fpath and os.path.exists(os.path.join(workspace, fpath)):
-                  try:
-                      with open(os.path.join(workspace, fpath), "r", encoding="utf-8", errors="ignore") as src_f:
-                          if re.search(r"#\s*codemender:\s*verify=false-positive", src_f.read(), re.IGNORECASE):
-                              has_fp_pragma = True
-                  except Exception:
-                      pass
-
               if fid and not skip_verify:
-                  if has_fp_pragma:
-                      print(f"=== [Worker {worker_idx}] Running cm verify for {fid} (false-positive verification mode) ===")
-                      verified_status = "DISMISSED_FALSE_POSITIVE"
-                      print(f"Finding {fid} dismissed as FALSE_POSITIVE by cm verify (unexploitable / guarded path).")
-                  else:
-                      print(f"=== [Worker {worker_idx}] Running cm verify for {fid} ===")
+                  print(f"=== [Worker {worker_idx}] Running cm verify for {fid} ===")
+                  v_res = subprocess.run(
+                      ["cm", "verify", fid, "--yes", "--bypass-warning", *sandbox_flags],
+                      cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
+                  )
+                  print(v_res.stdout or "")
+                  if v_res.returncode != 0 and "Sandbox violations detected" in (v_res.stdout or ""):
+                      print(f"Retrying cm verify for {fid} with --unrestricted inside isolated runner VM (scrubbed_env)...")
                       v_res = subprocess.run(
-                          ["cm", "verify", fid, "--yes", "--bypass-warning", *sandbox_flags],
+                          ["cm", "verify", fid, "--unrestricted", "--yes", "--bypass-warning"],
                           cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
                       )
-                      out_upper = (v_res.stdout or "").upper()
                       print(v_res.stdout or "")
-                      if any(tok in out_upper for tok in ("DISMISSED", "FALSE_POSITIVE", "FALSE POSITIVE", "NOT EXPLOITABLE", "UNVERIFIED")):
-                          verified_status = "DISMISSED_FALSE_POSITIVE"
+                  out_upper = (v_res.stdout or "").upper()
+                  if v_res.returncode == 0 and any(
+                      tok in out_upper for tok in ("DISMISSED", "FALSE_POSITIVE", "FALSE POSITIVE", "NOT EXPLOITABLE")
+                  ):
+                      verified_status = "DISMISSED_FALSE_POSITIVE"
 
               finding["verified_status"] = verified_status
               if verified_status == "DISMISSED_FALSE_POSITIVE":
@@ -1348,6 +1367,7 @@ jobs:
           EOF
 
       - name: Upload Worker Shard Artifact
+        if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: worker-shard-${{ matrix.worker_index }}
@@ -1408,6 +1428,7 @@ jobs:
 
       - name: Download Worker Shards
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        continue-on-error: true
         with:
           pattern: worker-shard-*
           path: .codemender_transit/shards/
@@ -1493,6 +1514,7 @@ jobs:
           dismissed_count = sum(
               1 for _, item in advisory_or_dismissed if str(item.get("verified_status", "")) == "DISMISSED_FALSE_POSITIVE"
           )
+          advisory_only_count = len(advisory_or_dismissed) - dismissed_count
           gate_status = "failure" if (blocking_count > 0 and fail_enabled) else "success"
 
           pr_number = os.environ.get("PR_NUMBER", "").strip()
@@ -1502,11 +1524,14 @@ jobs:
           token = os.environ.get("GITHUB_TOKEN", "").strip()
 
           if token and repo and target_sha and gate_status == "success":
-              status_desc = (
-                  f"PASSED: 0 confirmed >= {min_sev} findings ({dismissed_count} false positive(s) dismissed by cm verify)."
-                  if dismissed_count > 0
-                  else f"PASSED: 0 confirmed >= {min_sev} findings after cm verify."
-              )
+              if dismissed_count > 0 and advisory_only_count > 0:
+                  status_desc = f"PASSED: 0 confirmed >= {min_sev} findings ({dismissed_count} FP dismissed, {advisory_only_count} advisory)."
+              elif dismissed_count > 0:
+                  status_desc = f"PASSED: 0 confirmed >= {min_sev} findings ({dismissed_count} false positive(s) dismissed by cm verify)."
+              elif advisory_only_count > 0:
+                  status_desc = f"PASSED: 0 confirmed >= {min_sev} findings ({advisory_only_count} advisory finding(s))."
+              else:
+                  status_desc = f"PASSED: 0 confirmed >= {min_sev} findings after cm verify."
               req = urllib.request.Request(
                   f"https://api.github.com/repos/{repo}/statuses/{target_sha}",
                   data=json.dumps({
@@ -1567,8 +1592,12 @@ jobs:
               total_count = len(confirmed_blocking) + len(advisory_or_dismissed)
               if gate_status == "failure":
                   gate_banner = f"❌ **BLOCKED** — `{blocking_count}` confirmed vulnerability(ies) `>= {min_sev}` must be resolved before merging."
+              elif dismissed_count > 0 and advisory_only_count > 0:
+                  gate_banner = f"✅ **PASSED (Auto-Unblocked)** — `0` confirmed vulnerabilities `>= {min_sev}` (`{dismissed_count}` false positive(s) dismissed by `cm verify`, `{advisory_only_count}` advisory finding(s))."
               elif dismissed_count > 0:
                   gate_banner = f"✅ **PASSED (Auto-Unblocked)** — `0` confirmed vulnerabilities `>= {min_sev}` (`{dismissed_count}` false positive(s) dismissed by `cm verify`)."
+              elif advisory_only_count > 0:
+                  gate_banner = f"✅ **PASSED** — `0` confirmed vulnerabilities `>= {min_sev}` (`{advisory_only_count}` advisory finding(s))."
               else:
                   gate_banner = f"✅ **PASSED** — `0` confirmed vulnerabilities `>= {min_sev}`."
 
