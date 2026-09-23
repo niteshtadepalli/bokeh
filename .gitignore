@@ -79,3 +79,8 @@ examples-report.html
 
 # OS junk
 .DS_Store
+
+# CodeMender transient state
+.cm_project
+.codemender_transit/
+.codemender_cache/
