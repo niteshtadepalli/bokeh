@@ -96,6 +96,10 @@ class OrchestratorConfig:
   fail_on_findings: bool = False
   pr_remediation_mode: str = PR_MODE_REVIEW_SUGGESTION
 
+  # Scheduled / Branch Scan Parameters
+  target_branch: Optional[str] = None
+  execution_url: Optional[str] = None
+
   # Sandbox & Security Settings
   sandbox_enabled: bool = True
   sandbox_network_profile: str = "permissive-open"
@@ -273,6 +277,18 @@ class OrchestratorConfig:
     else:
       cleanup_ports = [3000, 3001, 5000, 8000, 8080, 8081, 9000]
 
+    raw_target_branch = (
+        os.environ.get("CODEMENDER_TARGET_BRANCH")
+        or os.environ.get("CODEMENDER_SCAN_REF")
+        or ""
+    ).strip()
+    if raw_target_branch.startswith("refs/heads/"):
+      raw_target_branch = raw_target_branch[len("refs/heads/") :]
+    target_branch = raw_target_branch or None
+    execution_url = (
+        os.environ.get("CODEMENDER_EXECUTION_URL") or ""
+    ).strip() or None
+
     # Return immutable configuration dataclass instance populated from parsed environment
     return cls(
         # AI models and CLI versions
@@ -315,6 +331,9 @@ class OrchestratorConfig:
         pr_number=pr_number,
         fail_on_findings=fail_on_findings,
         pr_remediation_mode=pr_remediation_mode,
+        # Scheduled / branch scan parameters
+        target_branch=target_branch,
+        execution_url=execution_url,
         # Sandbox execution flags and network isolation profiles
         sandbox_enabled=sandbox_enabled,
         sandbox_network_profile=sandbox_network_profile,
@@ -344,6 +363,14 @@ def get_scrubbed_env(repo_dir: Optional[str] = None) -> Dict[str, str]:
   for var in SENSITIVE_ENV_VARS:
     if var in env:
       del env[var]
+
+  if env.get("CODEMENDER_SANDBOX_ENABLED", "true").strip().lower() in (
+      "false",
+      "0",
+      "no",
+      "off",
+  ):
+    env["CM_DISABLE_SANDBOX"] = "true"
 
   if repo_dir:
     cache_dir = os.path.join(repo_dir, ".codemender_cache")
@@ -484,14 +511,9 @@ def inject_codemender_config(
   if "reset" not in config_data["vcs"]["commands"]:
     config_data["vcs"]["commands"]["reset"] = "git checkout HEAD -- . && git clean -fd"
 
-  # Set default project path to the repository directory to restrict agent scope
-  if not config_data.get("project_paths"):
-    config_data["project_paths"] = [os.path.abspath(repo_dir)]
-  else:
-    config_data["project_paths"] = [
-        p if os.path.isabs(p) else os.path.abspath(os.path.join(repo_dir, p))
-        for p in config_data["project_paths"]
-    ]
+  # Leave project_paths empty by default so 'cm find <scanTarget>' scopes allowedRoots
+  # strictly to [scanTarget] rather than the entire repository root written by 'cm init'.
+  config_data["project_paths"] = []
 
   # 3. Read Repository-Level config (Config-as-Code - takes precedence over defaults)
   project_config = None

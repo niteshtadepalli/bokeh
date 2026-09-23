@@ -148,6 +148,28 @@ class TestCommandBuilder(unittest.TestCase):
     cmd = build_cm_command("cm", "fix", "id-123")
     self.assertEqual(cmd, ["cm", "fix", "id-123", "--yes"])
 
+  @patch.dict(
+      os.environ,
+      {"CODEMENDER_CLI_VERSION": "preview", "CODEMENDER_SANDBOX_ENABLED": "false"},
+      clear=True,
+  )
+  def test_build_cm_command_sandbox_disabled(self):
+    # find omits --unrestricted so allowedRoots stays scoped to target_or_id
+    cmd_find = build_cm_command("cm", "find", "src/bokeh/server/views")
+    self.assertEqual(cmd_find, ["cm", "find", "-y", "src/bokeh/server/views"])
+
+    # verify and fix include --unrestricted
+    cmd_verify = build_cm_command("cm", "verify", "id-123")
+    self.assertEqual(
+        cmd_verify,
+        ["cm", "verify", "-y", "--bypass-warning", "--unrestricted", "id-123"],
+    )
+    cmd_fix = build_cm_command("cm", "fix", "id-123")
+    self.assertEqual(
+        cmd_fix,
+        ["cm", "fix", "-y", "--bypass-warning", "--unrestricted", "id-123"],
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

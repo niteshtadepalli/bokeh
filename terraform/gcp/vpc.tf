@@ -114,7 +114,7 @@ locals {
   # - When create_vpc_and_nat is false: uses trimmed existing_vpc_connector_id or falls back to null
   vpc_connector_id = var.create_vpc_and_nat ? (
     length(google_vpc_access_connector.connector) > 0 ? google_vpc_access_connector.connector[0].id : null
-  ) : (
+    ) : (
     local.has_existing_connector ? trimspace(var.existing_vpc_connector_id) : null
   )
 }

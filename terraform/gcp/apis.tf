@@ -50,8 +50,8 @@ resource "google_project_service" "compute_api" {
 }
 
 resource "google_project_service_identity" "workflows_sa" {
-  provider = google-beta
-  project  = var.project_id
-  service  = "workflows.googleapis.com"
+  provider   = google-beta
+  project    = var.project_id
+  service    = "workflows.googleapis.com"
   depends_on = [google_project_service.enabled_services["workflows.googleapis.com"]]
 }

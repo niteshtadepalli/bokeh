@@ -160,10 +160,21 @@ def build_cm_command(
   if cli_version == "preview":
     model = resolve_command_model(action)
     model_flags = ["--model", model] if model else []
+    unrestricted_flag = (
+        ["--unrestricted"]
+        if os.environ.get("CODEMENDER_SANDBOX_ENABLED", "true").strip().lower()
+        in ("false", "0", "no", "off")
+        else []
+    )
 
-    # Handle 'find' command
+    # Handle 'find' command (rely on CM_DISABLE_SANDBOX=true rather than --unrestricted
+    # so cm find still enforces application-level allowedRoots = [target_or_id])
     if action == "find":
-      cmd = [cm_binary, "find", "-y"] + model_flags + [target_or_id]
+      cmd = (
+          [cm_binary, "find", "-y"]
+          + model_flags
+          + [target_or_id]
+      )
     # Handle 'verify' command with optional exploit verification skip
     elif action == "verify":
       skip_flag = (
@@ -173,6 +184,7 @@ def build_cm_command(
       )
       cmd = (
           [cm_binary, "verify", "-y", "--bypass-warning"]
+          + unrestricted_flag
           + model_flags
           + skip_flag
           + [target_or_id]
@@ -181,6 +193,7 @@ def build_cm_command(
     elif action == "fix":
       cmd = (
           [cm_binary, "fix", "-y", "--bypass-warning"]
+          + unrestricted_flag
           + model_flags
           + [target_or_id]
       )

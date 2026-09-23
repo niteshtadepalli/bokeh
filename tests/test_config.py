@@ -259,6 +259,54 @@ class TestConfig(unittest.TestCase):
             f"Expected True for CODEMENDER_SKIP_VERIFY={true_val}",
         )
 
+  def test_orchestrator_config_target_branch_and_execution_url(self):
+    """Verify CODEMENDER_TARGET_BRANCH and CODEMENDER_EXECUTION_URL parsing."""
+    from codemender_agent.config import OrchestratorConfig
+    with unittest.mock.patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_TARGET_BRANCH": "refs/heads/branch-4.0",
+            "CODEMENDER_EXECUTION_URL": "https://console.cloud.google.com/workflows",
+        },
+        clear=True,
+    ):
+      cfg = OrchestratorConfig.from_env()
+      self.assertEqual(cfg.target_branch, "branch-4.0")
+      self.assertEqual(
+          cfg.execution_url, "https://console.cloud.google.com/workflows"
+      )
+
+  def test_get_scrubbed_env_cm_disable_sandbox(self):
+    """Verify CM_DISABLE_SANDBOX is set when CODEMENDER_SANDBOX_ENABLED=false."""
+    with unittest.mock.patch.dict(
+        os.environ, {"CODEMENDER_SANDBOX_ENABLED": "false"}, clear=True
+    ):
+      scrubbed = get_scrubbed_env()
+      self.assertEqual(scrubbed.get("CM_DISABLE_SANDBOX"), "true")
+
+    with unittest.mock.patch.dict(
+        os.environ, {"CODEMENDER_SANDBOX_ENABLED": "true"}, clear=True
+    ):
+      scrubbed = get_scrubbed_env()
+      self.assertNotIn("CM_DISABLE_SANDBOX", scrubbed)
+
+  def test_inject_codemender_config_default_empty_project_paths(self):
+    """Verify inject_codemender_config clears project_paths written by cm init unless .codemender.yaml specifies them."""
+    with tempfile.TemporaryDirectory() as temp_home:
+      with tempfile.TemporaryDirectory() as repo_dir:
+        with open(os.path.join(repo_dir, "pyproject.toml"), "w") as f:
+          f.write("[tool.pytest]")
+        cm_dir = os.path.join(temp_home, ".codemender")
+        os.makedirs(cm_dir, exist_ok=True)
+        with open(os.path.join(cm_dir, "config.yaml"), "w") as f:
+          yaml.dump({"project_paths": [repo_dir]}, f)
+
+        with unittest.mock.patch("os.path.expanduser", return_value=temp_home):
+          inject_codemender_config(repo_dir)
+          with open(os.path.join(cm_dir, "config.yaml"), "r") as f:
+            data = yaml.safe_load(f)
+          self.assertEqual(data["project_paths"], [])
+
 
 if __name__ == "__main__":
   unittest.main()

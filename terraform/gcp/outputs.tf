@@ -44,8 +44,13 @@ output "workflow_name" {
 }
 
 output "scheduler_job_name" {
-  description = "Cloud Scheduler job name."
-  value       = google_cloud_scheduler_job.nightly_scan.name
+  description = "Primary Cloud Scheduler job name."
+  value       = try(values(google_cloud_scheduler_job.repo_scans)[0].name, "")
+}
+
+output "scheduler_job_names" {
+  description = "Map of repository keys to Cloud Scheduler job names."
+  value       = { for k, v in google_cloud_scheduler_job.repo_scans : k => v.name }
 }
 
 output "artifact_registry_repository" {

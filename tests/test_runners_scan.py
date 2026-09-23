@@ -235,6 +235,8 @@ class TestScanRunner(unittest.TestCase):
       self.assertEqual(sarif_data["runs"][0]["results"], [])
 
     manifest_uploaded = False
+    sarif_uploaded = False
+    token_usage_uploaded = False
     for call in mock_upload_gcs.call_args_list:
       local_path, _, dest_blob = call[0]
       if "manifest.json" in dest_blob:
@@ -243,8 +245,20 @@ class TestScanRunner(unittest.TestCase):
           manifest_data = json.load(f)
           self.assertEqual(manifest_data["findings_count"], 0)
           self.assertEqual(manifest_data["target_sha"], "abc123commitsha")
+      elif dest_blob.endswith("/report.sarif"):
+        sarif_uploaded = True
+      elif dest_blob.endswith("/token_usage.json"):
+        token_usage_uploaded = True
 
     self.assertTrue(manifest_uploaded)
+    self.assertTrue(sarif_uploaded)
+    self.assertTrue(token_usage_uploaded)
+
+    find_calls = [
+        call for call in mock_run_cmd.call_args_list
+        if len(call[0][0]) >= 2 and call[0][0][1] == "find"
+    ]
+    self.assertEqual(len(find_calls), 1)
 
   @patch("codemender_agent.runners.scan.generate_signed_url")
   @patch("codemender_agent.runners.scan.run_command")

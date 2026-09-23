@@ -37,6 +37,7 @@ from codemender_agent.storage import download_file_from_gcs
 from codemender_agent.storage import get_storage_adapter
 from codemender_agent.storage import list_gcs_blobs
 from codemender_agent.storage import upload_and_sign_report
+from codemender_agent.storage import upload_file_to_gcs
 from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import extract_json_from_output
@@ -47,9 +48,12 @@ from codemender_agent.vcs.git import normalize_repo_relative_path
 from codemender_agent.vcs.git import parse_repo_owner_and_name
 from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
+from codemender_agent.vcs.github import STATUS_CONTEXT_PR
+from codemender_agent.vcs.github import STATUS_CONTEXT_SCHEDULED
 from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import post_commit_status
 from codemender_agent.vcs.github import post_or_update_sticky_comment
+from codemender_agent.vcs.github import upload_sarif_to_code_scanning
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -1093,6 +1097,7 @@ def _generate_and_upload_report(
         logger.warning("Failed to write SARIF stdout fallback to disk: %s", e)
 
   # 7. Sanitize SARIF paths and copy to standard upload locations
+  workspace_dir = cfg.workspace_dir or os.getcwd()
   if found_sarif:
     _sanitize_sarif_file(
         found_sarif,
@@ -1111,6 +1116,57 @@ def _generate_and_upload_report(
           shutil.copy2(found_sarif, target_dest)
         except Exception:  # pylint: disable=broad-exception-caught
           pass
+
+  # 8. Persist machine-readable artifacts (report.json, report.sarif, token_usage.json) to GCS
+  if storage_mode in ("gcs", "local") and bucket_name and scan_id:
+    report_bucket = cfg.report_bucket or bucket_name
+    prefix = f"scans/{scan_id}"
+    token_usage_path = os.path.join(codemender_home, "reports/token_usage.json")
+    try:
+      os.makedirs(os.path.dirname(token_usage_path), exist_ok=True)
+      with open(token_usage_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "scan_id": scan_id,
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "token_totals": token_totals or {},
+            },
+            f,
+            indent=2,
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Could not write token usage summary: %s", e)
+
+    for candidates, dest_blob in [
+        (
+            [
+                os.path.join(codemender_home, "reports/report.html"),
+                os.path.join(workspace_dir, "report.html"),
+                os.path.join(repo_dir, "report.html"),
+            ],
+            f"{prefix}/report.html",
+        ),
+        (
+            [
+                os.path.join(codemender_home, "reports/report.json"),
+                os.path.join(workspace_dir, "report.json"),
+                os.path.join(repo_dir, "report.json"),
+            ],
+            f"{prefix}/report.json",
+        ),
+        (
+            [
+                os.path.join(codemender_home, "reports/report.sarif"),
+                os.path.join(workspace_dir, "report.sarif"),
+                os.path.join(repo_dir, "report.sarif"),
+            ],
+            f"{prefix}/report.sarif",
+        ),
+        ([token_usage_path], f"{prefix}/token_usage.json"),
+    ]:
+      local_path = next((c for c in candidates if os.path.exists(c)), None)
+      if local_path:
+        upload_file_to_gcs(local_path, report_bucket, dest_blob)
 
 
 def run_aggregate_pipeline() -> None:
@@ -1183,16 +1239,34 @@ def run_aggregate_pipeline() -> None:
   if os.path.exists(repo_dir):
     shutil.rmtree(repo_dir)
 
-  # Execute authenticated git clone into repo_dir
-  clone_cmd = [
+  # Execute authenticated git clone into repo_dir (blobless partial clone with fallback)
+  base_clone_cmd = [
       "git",
       "-c",
       get_git_auth_header(token),
       "clone",
-      clean_repo_url,
-      repo_dir,
   ]
-  run_command(clone_cmd, cwd=workspace_dir)
+  use_partial_clone = (
+      os.environ.get("CODEMENDER_GIT_PARTIAL_CLONE", "true").strip().lower()
+      in ("true", "1", "yes")
+  )
+  cloned = False
+  if use_partial_clone:
+    try:
+      run_command(
+          base_clone_cmd + ["--filter=blob:none", clean_repo_url, repo_dir],
+          cwd=workspace_dir,
+      )
+      cloned = True
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning(
+          "Blobless partial clone failed in aggregator (%s); retrying with full clone.",
+          e,
+      )
+      if os.path.exists(repo_dir):
+        shutil.rmtree(repo_dir, ignore_errors=True)
+  if not cloned:
+    run_command(base_clone_cmd + [clean_repo_url, repo_dir], cwd=workspace_dir)
 
   # Checkout target commit SHA or resolve default branch
   if target_sha:
@@ -1406,11 +1480,11 @@ def run_aggregate_pipeline() -> None:
       config=config,
   )
 
-  # 12. Enforce Security Gate for Pull Request Scans via GitHub Commit Status Check
-  if config.is_pr_scan:
-    target_commit_sha = config.target_sha or target_sha
-    if target_commit_sha and token:
-      gate_context = "CodeMender / Security Gate"
+  # 12. Publish Commit Status Check and SARIF to GitHub (both PR Security Gate and Scheduled Nightly Scan)
+  target_commit_sha = config.target_sha or target_sha
+  if target_commit_sha and token:
+    if config.is_pr_scan:
+      gate_context = STATUS_CONTEXT_PR
       if active_findings_count > 0 and config.fail_on_findings:
         gate_state = "failure"
         gate_desc = (
@@ -1429,15 +1503,48 @@ def run_aggregate_pipeline() -> None:
             "✅ CodeMender Security Gate PASSED: Clean as You Code. Emitting '%s' commit status check.",
             gate_context,
         )
+    else:
+      gate_context = STATUS_CONTEXT_SCHEDULED
+      gate_state = "success"
+      gate_desc = (
+          f"Scan complete: {active_findings_count} active finding(s)."
+          if active_findings_count
+          else "Scan complete: no active findings."
+      )
+      logger.info(
+          "Emitting '%s' commit status on %s (%d active finding(s)).",
+          gate_context,
+          target_commit_sha[:8],
+          active_findings_count,
+      )
 
-      post_commit_status(
+    post_commit_status(
+        token=token,
+        owner=owner,
+        repo=repo_name,
+        sha=target_commit_sha,
+        state=gate_state,
+        description=gate_desc,
+        context=gate_context,
+        target_url=config.execution_url or None,
+    )
+
+    sarif_path = os.path.join(repo_dir, "report.sarif")
+    if os.path.exists(sarif_path):
+      if config.is_pr_scan and config.pr_number:
+        scan_ref = f"refs/pull/{config.pr_number}/head"
+      elif config.target_branch:
+        scan_ref = f"refs/heads/{config.target_branch}"
+      else:
+        default_br = get_default_branch(token, owner, repo_name)
+        scan_ref = f"refs/heads/{default_br}"
+      upload_sarif_to_code_scanning(
           token=token,
           owner=owner,
           repo=repo_name,
-          sha=target_commit_sha,
-          state=gate_state,
-          description=gate_desc,
-          context=gate_context,
+          sarif_path=sarif_path,
+          commit_sha=target_commit_sha,
+          ref=scan_ref,
       )
 
   # 13. Mirror the run summary into a single sticky comment on the Pull Request

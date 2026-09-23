@@ -33,16 +33,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dirmngr \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
-# Install Python 3.11 and venv
+# Install Python 3.11 + 3.12 and venv support
 RUN add-apt-repository ppa:deadsnakes/ppa -y && \
     apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-venv \
     python3.11-dev \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
     python3-pip \
     python-is-python3 \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
+    && update-alternatives --set python3 /usr/bin/python3.12 \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
+# Provision pip and common test runners for Python 3.12
+RUN rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED && \
+    python3.12 -m ensurepip --upgrade && \
+    python3.12 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    python3.12 -m pip install --no-cache-dir pytest pytest-timeout tox virtualenv
 
 # Install Node.js 22 LTS, npm, yarn, pnpm
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
@@ -68,7 +79,7 @@ RUN chmod +x /usr/local/bin/cm
 # Set up isolated /opt/codemender runtime environment
 WORKDIR /opt/codemender
 COPY requirements.txt .
-RUN python3.11 -m venv /opt/codemender/venv && \
+RUN python3.12 -m venv /opt/codemender/venv && \
     /opt/codemender/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # Copy orchestrator package and entrypoint script
@@ -76,6 +87,8 @@ COPY codemender_agent ./codemender_agent
 COPY orchestrator.py .
 
 ENV PYTHONPATH=/opt/codemender
+
+RUN mkdir -p /workspace
 
 # Set entrypoint to isolated virtual environment python
 ENTRYPOINT ["/opt/codemender/venv/bin/python3", "/opt/codemender/orchestrator.py"]

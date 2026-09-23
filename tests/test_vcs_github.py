@@ -253,6 +253,50 @@ class TestVcsGithub(unittest.TestCase):
     self.assertIn("--delete", cmd)
     self.assertIn("codemender/fix-sqli-abc12345", cmd)
 
+  @patch("requests.post")
+  def test_upload_sarif_to_code_scanning_success(self, mock_post):
+    """Verify upload_sarif_to_code_scanning compresses and base64 encodes SARIF payload."""
+    import tempfile
+    from codemender_agent.vcs.github import upload_sarif_to_code_scanning
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 202
+    mock_resp.json.return_value = {"id": "sarif-12345"}
+    mock_post.return_value = mock_resp
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sarif") as tmp:
+      tmp.write('{"version": "2.1.0", "runs": []}')
+      tmp.flush()
+      sarif_id = upload_sarif_to_code_scanning(
+          token="valid-token",
+          owner="carloschulo",
+          repo="cm-test",
+          sarif_path=tmp.name,
+          commit_sha="abcdef1234567890",
+          ref="refs/heads/branch-4.0",
+      )
+    self.assertEqual(sarif_id, "sarif-12345")
+    mock_post.assert_called_once()
+    payload = mock_post.call_args.kwargs["json"]
+    self.assertEqual(payload["commit_sha"], "abcdef1234567890")
+    self.assertEqual(payload["ref"], "refs/heads/branch-4.0")
+    self.assertEqual(payload["tool_name"], "CodeMender")
+    self.assertTrue(payload["sarif"])
+
+  def test_upload_sarif_to_code_scanning_missing_file(self):
+    """Verify upload_sarif_to_code_scanning returns None gracefully on missing file."""
+    from codemender_agent.vcs.github import upload_sarif_to_code_scanning
+
+    res = upload_sarif_to_code_scanning(
+        token="valid-token",
+        owner="carloschulo",
+        repo="cm-test",
+        sarif_path="/nonexistent/path/report.sarif",
+        commit_sha="abcdef1234567890",
+        ref="refs/heads/branch-4.0",
+    )
+    self.assertIsNone(res)
+
 
 if __name__ == "__main__":
   unittest.main()

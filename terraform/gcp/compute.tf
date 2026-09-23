@@ -33,6 +33,8 @@ resource "google_cloud_run_v2_job" "runner" {
   template {
     template {
       service_account = google_service_account.runner_sa.email
+      timeout         = "86400s"
+      max_retries     = 0
 
       containers {
         # Use a placeholder image initially so Terraform can provision the job before Cloud Build runs.
@@ -44,6 +46,21 @@ resource "google_cloud_run_v2_job" "runner" {
             cpu    = var.runner_cpu
             memory = var.runner_memory
           }
+        }
+
+        env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.project_id
+        }
+
+        env {
+          name  = "WORKSPACE_DIR"
+          value = "/workspace"
+        }
+
+        env {
+          name  = "CODEMENDER_SANDBOX_ENABLED"
+          value = "false"
         }
 
         env {
@@ -87,6 +104,8 @@ resource "google_cloud_run_v2_job" "worker" {
   template {
     template {
       service_account = google_service_account.worker_sa.email
+      timeout         = "86400s"
+      max_retries     = 0
 
       containers {
         # Use a placeholder image initially so Terraform can provision the job before Cloud Build runs.
@@ -98,6 +117,21 @@ resource "google_cloud_run_v2_job" "worker" {
             cpu    = var.runner_cpu
             memory = var.runner_memory
           }
+        }
+
+        env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.project_id
+        }
+
+        env {
+          name  = "WORKSPACE_DIR"
+          value = "/workspace"
+        }
+
+        env {
+          name  = "CODEMENDER_SANDBOX_ENABLED"
+          value = "false"
         }
 
         env {

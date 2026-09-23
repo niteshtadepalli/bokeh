@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-resource "google_cloud_scheduler_job" "nightly_scan" {
-  name        = "${var.resource_prefix}-nightly-scan"
-  description = "Triggers nightly CodeMender parallel scan workflow"
-  schedule    = var.scheduler_cron
-  time_zone   = "Etc/UTC"
-  paused      = true
+resource "google_cloud_scheduler_job" "repo_scans" {
+  for_each    = var.target_repositories
+  name        = "${var.resource_prefix}-scan-${each.key}"
+  description = "Scheduled CodeMender scan for ${each.value.repo_url}"
+  schedule    = coalesce(each.value.schedule, var.scheduler_cron)
+  time_zone   = var.scheduler_timezone
+  paused      = var.scheduler_paused
   region      = var.region
   project     = var.project_id
 
@@ -31,9 +32,12 @@ resource "google_cloud_scheduler_job" "nightly_scan" {
         worker_job_name = google_cloud_run_v2_job.worker.name
         gcs_bucket      = google_storage_bucket.reports.name
         region          = var.region
-        repo_url        = ""   # Update manually before running
-        build_command   = ""   # Update manually before running
-        scan_target     = "."  # Update manually before running
+        repo_url        = each.value.repo_url
+        scan_target     = coalesce(each.value.scan_target, ".")
+        target_branch   = coalesce(each.value.target_branch, "")
+        build_command   = coalesce(each.value.build_command, "")
+        max_tasks       = coalesce(each.value.max_tasks, 8)
+        skip_verify     = coalesce(each.value.skip_verify, true)
       })
     }))
 

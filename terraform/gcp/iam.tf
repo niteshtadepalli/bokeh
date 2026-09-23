@@ -161,6 +161,19 @@ resource "google_project_iam_member" "worker_aiplatform_user" {
   member  = "serviceAccount:${google_service_account.worker_sa.email}"
 }
 
+# Service Usage Consumer IAM for Runner & Worker SAs (required by cm v0.8.0 x-goog-user-project quota check)
+resource "google_project_iam_member" "runner_serviceusage_consumer" {
+  project = var.project_id
+  role    = "roles/serviceusage.serviceUsageConsumer"
+  member  = "serviceAccount:${google_service_account.runner_sa.email}"
+}
+
+resource "google_project_iam_member" "worker_serviceusage_consumer" {
+  project = var.project_id
+  role    = "roles/serviceusage.serviceUsageConsumer"
+  member  = "serviceAccount:${google_service_account.worker_sa.email}"
+}
+
 
 
 # Grant Cloud Run Developer to Cloud Build SAs so they can update the Cloud Run Job image

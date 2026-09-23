@@ -39,13 +39,13 @@ variable "reports_bucket_name" {
 variable "runner_cpu" {
   type        = string
   description = "CPU limit for Cloud Run Job worker tasks (e.g. '1', '2', '4', '8')."
-  default     = "2"
+  default     = "4"
 }
 
 variable "runner_memory" {
   type        = string
   description = "Memory limit for Cloud Run Job worker tasks (e.g. '2Gi', '4Gi', '8Gi', '16Gi')."
-  default     = "4Gi"
+  default     = "16Gi"
 }
 
 variable "create_vpc_and_nat" {
@@ -93,6 +93,32 @@ variable "scheduler_cron" {
   type        = string
   description = "Cron expression for the nightly trigger."
   default     = "0 2 * * *"
+}
+
+variable "scheduler_timezone" {
+  type        = string
+  description = "Time zone for Cloud Scheduler jobs."
+  default     = "Etc/UTC"
+}
+
+variable "scheduler_paused" {
+  type        = bool
+  description = "Whether Cloud Scheduler jobs should be created in a paused state."
+  default     = false
+}
+
+variable "target_repositories" {
+  type = map(object({
+    repo_url      = string
+    scan_target   = optional(string, ".")
+    target_branch = optional(string, "")
+    build_command = optional(string, "")
+    schedule      = optional(string)
+    max_tasks     = optional(number, 8)
+    skip_verify   = optional(bool, true)
+  }))
+  description = "Map of repositories to schedule for automated CodeMender security scans."
+  default     = {}
 }
 
 

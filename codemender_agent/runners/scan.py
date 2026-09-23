@@ -50,10 +50,13 @@ from codemender_agent.vcs.git import parse_repo_owner_and_name
 from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
 # GitHub REST API check and deduplication helpers
+from codemender_agent.vcs.github import STATUS_CONTEXT_SCHEDULED
 from codemender_agent.vcs.github import check_remote_branch_exists
 from codemender_agent.vcs.github import delete_remote_branch
 from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import is_duplicate_pr
+from codemender_agent.vcs.github import post_commit_status
+from codemender_agent.vcs.github import upload_sarif_to_code_scanning
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -218,6 +221,7 @@ def _sync_repository(
       shutil.rmtree(repo_dir)
 
     # Configure git clone command with authorization header
+    target_branch = (os.environ.get("CODEMENDER_TARGET_BRANCH") or "").strip()
     clone_cmd = [
         "git",
         "-c",
@@ -227,6 +231,8 @@ def _sync_repository(
     # In Nightly scans without target SHA use shallow clone depth=1; otherwise preserve full history
     if not is_pr_scan and not target_sha:
       clone_cmd.extend(["--depth", "1"])
+      if target_branch:
+        clone_cmd.extend(["--branch", target_branch])
     clone_cmd.extend([clean_repo_url, repo_dir])
     run_command(clone_cmd, cwd=workspace_dir)
 
@@ -244,8 +250,9 @@ def _sync_repository(
   else:
     # 2. Existing workspace: fetch latest branch state and reset working tree
     logger.info("Repository directory exists, fetching latest state...")
+    target_branch = (os.environ.get("CODEMENDER_TARGET_BRANCH") or "").strip()
     try:
-      curr_branch = run_command(
+      curr_branch = target_branch or run_command(
           ["git", "branch", "--show-current"], cwd=repo_dir
       ).stdout.strip()
     except Exception:  # pylint: disable=broad-exception-caught
@@ -297,8 +304,9 @@ def _sync_repository(
     run_command(fetch_target_cmd, cwd=repo_dir, check=False)
     run_command(["git", "checkout", "-f", target_sha], cwd=repo_dir)
   elif not is_pr_scan:
+    target_branch = (os.environ.get("CODEMENDER_TARGET_BRANCH") or "").strip()
     try:
-      default_branch = run_command(
+      default_branch = target_branch or run_command(
           ["git", "branch", "--show-current"], cwd=repo_dir
       ).stdout.strip()
     except Exception:  # pylint: disable=broad-exception-caught
@@ -306,7 +314,7 @@ def _sync_repository(
     if not default_branch:
       default_branch = get_default_branch(token, owner, repo_name)
 
-    logger.info("Using default branch: %s", default_branch)
+    logger.info("Using target/default branch: %s", default_branch)
     run_command(["git", "checkout", "-f", default_branch], cwd=repo_dir)
 
   # 4. Record and return the immutable target Git commit SHA
@@ -359,6 +367,9 @@ def _init_codemender(
         env=scrubbed_env,
         check=True,
     )
+
+    # 4. Re-apply config injection so cm init --verify does not overwrite project_paths or sandbox settings
+    inject_codemender_config(repo_dir, config=cfg)
   except Exception as e:  # pylint: disable=broad-exception-caught
     logger.critical("CodeMender initialization failed: %s", e)
     sys.exit(1)
@@ -374,14 +385,15 @@ def _scan_repository(
   """Runs scan on targets with retries if no findings are found."""
   cfg = config or OrchestratorConfig.from_env()
   cli_version = cfg.cli_version
-  max_scan_attempts = 3
+  max_scan_attempts = int(os.environ.get("CODEMENDER_MAX_SCAN_ATTEMPTS", "1"))
   findings = []
   scan_token_usage: dict[str, dict[str, int]] = {}
   find_model = cfg.find_model or resolve_command_model("find") or "default"
 
-  # Retry loop to account for transient cold-start or API rate-limit delays
+  # Retry loop to account for transient cold-start, gRPC stream cancellation, or API rate-limit delays
   for attempt in range(1, max_scan_attempts + 1):
     logger.info("Running scan attempt %d/%d...", attempt, max_scan_attempts)
+    had_find_error = False
     # 1. Execute 'cm find' across each configured target directory
     for target in targets:
       try:
@@ -392,7 +404,7 @@ def _scan_repository(
             find_cmd,
             cwd=repo_dir,
             env=scrubbed_env,
-            check=True,
+            check=False,
         )
         # Capture and aggregate token usage telemetry
         token_usage = getattr(res, "token_usage", None)
@@ -400,11 +412,25 @@ def _scan_repository(
           accumulate_model_token_usage(
               scan_token_usage, find_model, token_usage
           )
+        rc = getattr(res, "returncode", 0)
+        if isinstance(rc, int) and rc != 0:
+          had_find_error = True
+          logger.warning(
+              "cm find returned non-zero exit code (%d) for target %s on attempt %d; checking state.db via cm report for incrementally saved findings...",
+              rc,
+              target,
+              attempt,
+          )
       except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Scan failed for target %s: %s", target, e)
-        sys.exit(1)
+        had_find_error = True
+        logger.warning(
+            "Scan subprocess raised exception for target %s on attempt %d (%s); checking state.db via cm report...",
+            target,
+            attempt,
+            e,
+        )
 
-    # 2. Retrieve structured vulnerability findings report in JSON format
+    # 2. Retrieve structured vulnerability findings report in JSON format (cm find saves findings incrementally to state.db)
     try:
       # Construct 'cm report' command to export discovered findings as JSON
       report_cmd = build_cm_command(
@@ -426,15 +452,25 @@ def _scan_repository(
       logger.error("Failed to get report: %s", e)
       findings = []
 
-    # 3. Exit retry loop early if findings were discovered
+    # 3. Exit retry loop early if findings were discovered or if scan completed cleanly with 0 findings
     if findings:
       logger.info("Found %d findings on attempt %d.", len(findings), attempt)
       break
+    elif not had_find_error:
+      logger.info("Scan completed cleanly with 0 findings on attempt %d.", attempt)
+      break
     else:
       # Log retry status and delay before next attempt
-      logger.warning("No findings found on attempt %d.", attempt)
+      logger.warning(
+          "No findings recovered after non-zero cm find exit on attempt %d/%d.",
+          attempt,
+          max_scan_attempts,
+      )
       if attempt < max_scan_attempts:
         time.sleep(5)
+      else:
+        logger.error("All %d scan attempts failed with errors and 0 recovered findings.", max_scan_attempts)
+        sys.exit(1)
 
   return findings, scan_token_usage
 
@@ -815,6 +851,18 @@ def run_scan_pipeline() -> None:
       pr_base_ref=config.pr_base_ref,
   )
 
+  if not config.is_pr_scan and target_sha and token:
+    post_commit_status(
+        token=token,
+        owner=owner,
+        repo=repo_name,
+        sha=target_sha,
+        state="pending",
+        description="CodeMender scan in progress...",
+        context=STATUS_CONTEXT_SCHEDULED,
+        target_url=config.execution_url or None,
+    )
+
   # 4. Initialize CodeMender CLI environment and local cache paths
   scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
   cm_binary = shutil.which("cm") or "cm"
@@ -844,7 +892,7 @@ def run_scan_pipeline() -> None:
   if not findings:
     logger.info("Zero findings confirmed after scanning. Exiting Stage 1.")
     # Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
-    _write_clean_sarif_file(repo_dir, workspace_dir)
+    sarif_path = _write_clean_sarif_file(repo_dir, workspace_dir)
     # Render clean Step Summary before exiting
     _render_zero_findings_summary(
         owner,
@@ -859,10 +907,31 @@ def run_scan_pipeline() -> None:
     manifest_path = os.path.join(workspace_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:
       json.dump(manifest, f, indent=2)
-    # Upload zero findings manifest to transit storage
+    # Upload zero findings manifest and clean SARIF / token usage to transit storage
     upload_file_to_gcs(
         manifest_path, bucket_name, f"scans/{scan_id}/manifest.json"
     )
+    if sarif_path and os.path.exists(sarif_path):
+      upload_file_to_gcs(
+          sarif_path, bucket_name, f"scans/{scan_id}/report.sarif"
+      )
+    token_usage_path = os.path.join(workspace_dir, "token_usage.json")
+    try:
+      with open(token_usage_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "scan_id": scan_id,
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "token_totals": scan_token_usage or {},
+            },
+            f,
+            indent=2,
+        )
+      upload_file_to_gcs(
+          token_usage_path, bucket_name, f"scans/{scan_id}/token_usage.json"
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to upload zero-findings token_usage.json: %s", e)
     # Emit zero findings output variables to GitHub Actions environment
     _emit_github_output(
         {
@@ -873,6 +942,31 @@ def run_scan_pipeline() -> None:
         },
         config=config,
     )
+    if not config.is_pr_scan and target_sha and token:
+      post_commit_status(
+          token=token,
+          owner=owner,
+          repo=repo_name,
+          sha=target_sha,
+          state="success",
+          description="Scan complete: no active findings.",
+          context=STATUS_CONTEXT_SCHEDULED,
+          target_url=config.execution_url or None,
+      )
+      if sarif_path and os.path.exists(sarif_path):
+        scan_ref = (
+            f"refs/heads/{config.target_branch}"
+            if config.target_branch
+            else f"refs/heads/{get_default_branch(token, owner, repo_name)}"
+        )
+        upload_sarif_to_code_scanning(
+            token=token,
+            owner=owner,
+            repo=repo_name,
+            sarif_path=sarif_path,
+            commit_sha=target_sha,
+            ref=scan_ref,
+        )
     sys.exit(0)
 
   # 8. Filter findings against PR differential hunks and deduplicate against open branches/PRs
@@ -944,7 +1038,7 @@ def run_scan_pipeline() -> None:
   if active_findings_count == 0:
     logger.info("Zero active findings after filtering. Exiting Stage 1.")
     # Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
-    _write_clean_sarif_file(repo_dir, workspace_dir)
+    sarif_path = _write_clean_sarif_file(repo_dir, workspace_dir)
     filtered_reason = (
         None
         if config.is_pr_scan
@@ -968,10 +1062,31 @@ def run_scan_pipeline() -> None:
     manifest_path = os.path.join(workspace_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:
       json.dump(manifest, f, indent=2)
-    # Upload filtered zero findings manifest to transit storage
+    # Upload filtered zero findings manifest and reports to transit storage
     upload_file_to_gcs(
         manifest_path, bucket_name, f"scans/{scan_id}/manifest.json"
     )
+    if sarif_path and os.path.exists(sarif_path):
+      upload_file_to_gcs(
+          sarif_path, bucket_name, f"scans/{scan_id}/report.sarif"
+      )
+    token_usage_path = os.path.join(workspace_dir, "token_usage.json")
+    try:
+      with open(token_usage_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "scan_id": scan_id,
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "token_totals": scan_token_usage or {},
+            },
+            f,
+            indent=2,
+        )
+      upload_file_to_gcs(
+          token_usage_path, bucket_name, f"scans/{scan_id}/token_usage.json"
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to upload filtered zero-findings token_usage.json: %s", e)
     # Emit zero findings output variables to GitHub Actions environment
     _emit_github_output(
         {
@@ -982,6 +1097,17 @@ def run_scan_pipeline() -> None:
         },
         config=config,
     )
+    if not config.is_pr_scan and target_sha and token:
+      post_commit_status(
+          token=token,
+          owner=owner,
+          repo=repo_name,
+          sha=target_sha,
+          state="success",
+          description="Scan complete: no active findings.",
+          context=STATUS_CONTEXT_SCHEDULED,
+          target_url=config.execution_url or None,
+      )
     sys.exit(0)
 
   # 11. Partition findings into balanced worker buckets

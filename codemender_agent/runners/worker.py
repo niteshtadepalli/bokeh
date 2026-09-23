@@ -94,20 +94,38 @@ def _setup_git_and_checkout(
   if os.path.exists(repo_dir):
     shutil.rmtree(repo_dir)
 
-  # 2. Clone repository from GitHub using authentication header
-  clone_cmd = [
+  # 2. Clone repository from GitHub using authentication header (blobless partial clone with fallback)
+  base_clone_cmd = [
       "git",
       "-c",
       get_git_auth_header(token),
       "clone",
-      clean_repo_url,
-      repo_dir,
   ]
-  run_command(clone_cmd, cwd=workspace_dir)
+  use_partial_clone = (
+      os.environ.get("CODEMENDER_GIT_PARTIAL_CLONE", "true").strip().lower()
+      in ("true", "1", "yes")
+  )
+  cloned = False
+  if use_partial_clone:
+    try:
+      run_command(
+          base_clone_cmd + ["--filter=blob:none", clean_repo_url, repo_dir],
+          cwd=workspace_dir,
+      )
+      cloned = True
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning(
+          "Blobless partial clone failed (%s); retrying with full clone.", e
+      )
+      if os.path.exists(repo_dir):
+        shutil.rmtree(repo_dir, ignore_errors=True)
+  if not cloned:
+    run_command(base_clone_cmd + [clean_repo_url, repo_dir], cwd=workspace_dir)
 
-  # 3. Determine the repository's default branch (e.g. main/master)
+  # 3. Determine the repository's target or default branch (e.g. main/master/branch-4.0)
+  target_branch = (os.environ.get("CODEMENDER_TARGET_BRANCH") or "").strip()
   try:
-    default_branch = run_command(
+    default_branch = target_branch or run_command(
         ["git", "branch", "--show-current"], cwd=repo_dir
     ).stdout.strip()
   except Exception:  # pylint: disable=broad-exception-caught
@@ -472,8 +490,15 @@ def _process_finding(
       return
 
   # 2. Verification Retry Loop (Executes 'cm verify' with port cleanup)
-  if not config.skip_verify:
-    max_verify_attempts = 3
+  effective_skip_verify = config.skip_verify or (
+      bool(config.execution_url)
+      and os.environ.get("CODEMENDER_FORCE_VERIFY", "false").strip().lower()
+      != "true"
+  )
+  if not effective_skip_verify:
+    max_verify_attempts = int(
+        os.environ.get("CODEMENDER_MAX_VERIFY_ATTEMPTS", "3")
+    )
     verified = False
 
     for attempt in range(1, max_verify_attempts + 1):

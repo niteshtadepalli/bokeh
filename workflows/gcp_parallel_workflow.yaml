@@ -20,17 +20,20 @@ main:
           - default_empty_map: {}
           - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
           - region: ${default(map.get(args, "region"), "us-central1")}
-          - job_name: ${args.job_name}
-          - worker_job_name: ${default(map.get(args, "worker_job_name"), text.replace_all(args.job_name, "-runner", "") + "-worker")}
-          - gcs_bucket: ${args.gcs_bucket}
+          - job_name: ${default(map.get(args, "job_name"), "cm-poc-runner")}
+          - worker_job_name: ${default(map.get(args, "worker_job_name"), text.replace_all(job_name, "-runner", "") + "-worker")}
+          - gcs_bucket: ${default(map.get(args, "gcs_bucket"), "cm-poc-reports-" + project_id)}
           - repo_url: ${args.repo_url}
-          - build_command: ${args.build_command}
+          - build_command: ${default(map.get(args, "build_command"), "")}
+          - target_branch: ${default(map.get(args, "target_branch"), "")}
           - scan_target: ${default(map.get(args, "scan_target"), ".")}
           - max_tasks: ${int(default(map.get(args, "max_tasks"), 20))}
           - timeout_seconds: ${int(default(map.get(args, "timeout_seconds"), 86400))}
           - scan_id: ${"scan-" + sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+          - execution_url: ${"https://console.cloud.google.com/workflows/workflow/" + region + "/" + text.replace_all(job_name, "-runner", "-coordinator") + "/execution/" + sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID") + "?project=" + project_id}
           - cli_version: ${default(map.get(args, "cli_version"), "preview")}
-          - model: ${default(map.get(args, "model"), "")}
+          - raw_model: ${default(map.get(args, "model"), "")}
+          - model: ${if(raw_model == "", "gemini-3.7-flash", raw_model)}
           - models: ${default(map.get(args, "models"), default_empty_map)}
           - skip_exploit_verification: ${default(map.get(args, "skip_exploit_verification"), false)}
           - skip_verify: ${default(map.get(args, "skip_verify"), true)}
@@ -65,6 +68,10 @@ main:
                         value: ${repo_url}
                       - name: CODEMENDER_BUILD_COMMAND
                         value: ${build_command}
+                      - name: CODEMENDER_TARGET_BRANCH
+                        value: ${target_branch}
+                      - name: CODEMENDER_EXECUTION_URL
+                        value: ${execution_url}
                       - name: CODEMENDER_SCAN_TARGET
                         value: ${scan_target}
                       - name: CODEMENDER_MAX_TASKS
@@ -165,6 +172,10 @@ main:
                       value: ${repo_url}
                     - name: CODEMENDER_BUILD_COMMAND
                       value: ${build_command}
+                    - name: CODEMENDER_TARGET_BRANCH
+                      value: ${target_branch}
+                    - name: CODEMENDER_EXECUTION_URL
+                      value: ${execution_url}
                     - name: CODEMENDER_TARGET_SHA
                       value: ${target_sha}
                     - name: CODEMENDER_BASE_WORKSPACE_URL
@@ -220,6 +231,10 @@ main:
                       value: ${repo_url}
                     - name: CODEMENDER_BUILD_COMMAND
                       value: ${build_command}
+                    - name: CODEMENDER_TARGET_BRANCH
+                      value: ${target_branch}
+                    - name: CODEMENDER_EXECUTION_URL
+                      value: ${execution_url}
                     - name: CODEMENDER_TOTAL_WORKERS
                       value: ${string(num_workers)}
                     - name: CODEMENDER_CLI_VERSION
