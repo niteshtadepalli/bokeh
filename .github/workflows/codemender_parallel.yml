@@ -446,7 +446,7 @@ jobs:
           print(f"Discovered {count} active PR finding(s): {blocking_count} blocking (>={min_sev}), {advisory_count} advisory.")
 
           # 5. IMMEDIATELY post/update sticky PR comment with `cm find` results BEFORE Stage 2 (`cm verify` & `cm fix`) starts!
-          def upsert_sticky_comment(markdown_body: str) -> None:
+          def upsert_sticky_comment(markdown_body: str, only_if_exists: bool = False) -> None:
               if not (pr_number and repo and token):
                   return
               marker = "<!-- codemender-security-summary -->"
@@ -469,6 +469,9 @@ jobs:
                               break
               except Exception as exc:
                   print(f"Note: listing PR comments: {exc}")
+
+              if only_if_exists and not existing_id:
+                  return
 
               target_url = (
                   f"https://api.github.com/repos/{repo}/issues/comments/{existing_id}"
@@ -529,7 +532,17 @@ jobs:
                   "",
                   *details_blocks,
               ])
-              upsert_sticky_comment(initial_comment)
+              upsert_sticky_comment(initial_comment, only_if_exists=False)
+          else:
+              resolved_comment = "\n".join([
+                  "<!-- cm-stage-header -->",
+                  "### 🛡️ CodeMender Pre-Submit Security Report *(All Findings Resolved)*",
+                  "<!-- /cm-stage-header -->",
+                  "",
+                  f"**Gate Status:** ✅ **PASSED** — `0` vulnerabilities `>= {min_sev}` detected in latest PR diff (`{target_sha[:8]}`).",
+                  f"> 🎉 All previously reported security findings in this PR have been resolved ([view scan run]({run_url})). Merging is unblocked.",
+              ])
+              upsert_sticky_comment(resolved_comment, only_if_exists=True)
 
           # 6. Partition findings across parallel background workers and archive ~/.codemender + .cm_project
           transit_base = os.path.join(workspace, ".codemender_transit", "base")
