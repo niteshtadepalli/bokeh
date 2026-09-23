@@ -33,13 +33,16 @@ main:
           - execution_url: ${"https://console.cloud.google.com/workflows/workflow/" + region + "/" + text.replace_all(job_name, "-runner", "-coordinator") + "/execution/" + sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID") + "?project=" + project_id}
           - cli_version: ${default(map.get(args, "cli_version"), "preview")}
           - raw_model: ${default(map.get(args, "model"), "")}
-          - model: ${if(raw_model == "", "gemini-3.7-flash", raw_model)}
+          - model: ${raw_model}
           - models: ${default(map.get(args, "models"), default_empty_map)}
           - skip_exploit_verification: ${default(map.get(args, "skip_exploit_verification"), false)}
           - skip_verify: ${default(map.get(args, "skip_verify"), true)}
-          - find_model: ${default(map.get(models, "find"), model)}
-          - verify_model: ${default(map.get(models, "verify"), model)}
-          - fix_model: ${default(map.get(models, "fix"), model)}
+          - raw_find_model: ${default(map.get(models, "find"), "")}
+          - raw_verify_model: ${default(map.get(models, "verify"), "")}
+          - raw_fix_model: ${default(map.get(models, "fix"), "")}
+          - find_model: ${if(raw_find_model != "", raw_find_model, model)}
+          - verify_model: ${if(raw_verify_model != "", raw_verify_model, model)}
+          - fix_model: ${if(raw_fix_model != "", raw_fix_model, model)}
 
     - log_start:
         call: sys.log

@@ -112,10 +112,10 @@ class OrchestratorConfig:
     """Loads configuration from environment variables safely in one place."""
     # 1. Parse CLI Version and Model Hierarchies
     cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
-    model = os.environ.get("CODEMENDER_MODEL")
-    find_model = os.environ.get("CODEMENDER_FIND_MODEL") or model
-    verify_model = os.environ.get("CODEMENDER_VERIFY_MODEL") or model
-    fix_model = os.environ.get("CODEMENDER_FIX_MODEL") or model
+    model = (os.environ.get("CODEMENDER_MODEL") or "").strip() or None
+    find_model = (os.environ.get("CODEMENDER_FIND_MODEL") or "").strip() or model
+    verify_model = (os.environ.get("CODEMENDER_VERIFY_MODEL") or "").strip() or model
+    fix_model = (os.environ.get("CODEMENDER_FIX_MODEL") or "").strip() or model
     skip_exploit = (
         os.environ.get("CODEMENDER_SKIP_EXPLOIT_VERIFICATION", "false").lower()
         == "true"

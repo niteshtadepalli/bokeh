@@ -116,6 +116,10 @@ variable "target_repositories" {
     schedule      = optional(string)
     max_tasks     = optional(number, 8)
     skip_verify   = optional(bool, true)
+    model         = optional(string, "")
+    find_model    = optional(string, "")
+    verify_model  = optional(string, "")
+    fix_model     = optional(string, "")
   }))
   description = "Map of repositories to schedule for automated CodeMender security scans."
   default     = {}

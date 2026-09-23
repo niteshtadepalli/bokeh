@@ -15,6 +15,7 @@
 """Stage 3: Aggregator runner for CodeMender Agent."""
 
 from contextlib import closing
+import hashlib
 import json
 import logging
 import os
@@ -24,9 +25,11 @@ import sqlite3
 import sys
 import tarfile
 import time
-from typing import Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from codemender_agent.codemender.cli import log_cm_version
+from codemender_agent.codemender.cli import parse_findings_json
+from codemender_agent.codemender.cli import restore_staged_cm_binary
 from codemender_agent.config import OrchestratorConfig
 from codemender_agent.config import PR_MODE_REVIEW_SUGGESTION
 from codemender_agent.config import get_github_credentials
@@ -493,6 +496,11 @@ def _inject_token_metrics_into_html(
   if len(token_totals) == 1:
     only_model = list(token_totals.keys())[0]
     single_model_label = f' <span style="font-size: 0.8rem; color: #6c757d; font-weight: normal;">(Model: <code>{only_model}</code>)</span>'
+  elif len(token_totals) > 1:
+    models_str = ", ".join(
+        f"<code>{m}</code>" for m in sorted(token_totals.keys())
+    )
+    single_model_label = f' <span style="font-size: 0.8rem; color: #6c757d; font-weight: normal;">(Models: {models_str})</span>'
 
   banner_html = f"""
   <div id="codemender-token-metrics-banner" style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 25px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
@@ -920,6 +928,537 @@ def _sanitize_sarif_file(
     logger.warning("Failed to sanitize SARIF report %s: %s", sarif_path, e)
 
 
+_SEVERITY_TO_SARIF_LEVEL = {
+    "CRITICAL": "error",
+    "HIGH": "error",
+    "MEDIUM": "warning",
+    "LOW": "note",
+}
+
+_SEVERITY_TO_CVSS_SCORE = {
+    "CRITICAL": "9.5",
+    "HIGH": "8.0",
+    "MEDIUM": "5.5",
+    "LOW": "2.5",
+}
+
+
+def is_sarif_complete(sarif_data: Any) -> bool:
+  """Validates whether a SARIF 2.1.0 object has complete rules, help markdown, CVSS severity, and line regions."""
+  if not isinstance(sarif_data, dict):
+    return False
+  runs = sarif_data.get("runs")
+  if not isinstance(runs, list) or not runs:
+    return False
+  run = runs[0]
+  if not isinstance(run, dict):
+    return False
+  driver = (run.get("tool") or {}).get("driver") or {}
+  if not driver.get("name"):
+    return False
+
+  results = run.get("results")
+  if not isinstance(results, list):
+    return False
+  if not results:
+    return True
+
+  rules = driver.get("rules")
+  if not isinstance(rules, list) or not rules:
+    return False
+  rules_by_id = {
+      r.get("id"): r for r in rules if isinstance(r, dict) and r.get("id")
+  }
+  if not rules_by_id:
+    return False
+
+  for res in results:
+    if not isinstance(res, dict):
+      return False
+    rule_id = res.get("ruleId")
+    rule_obj = rules_by_id.get(rule_id) if rule_id else None
+    if not rule_obj:
+      return False
+    help_md = (rule_obj.get("help") or {}).get("markdown") or ""
+    sec_sev = (rule_obj.get("properties") or {}).get("security-severity") or ""
+    if not help_md.strip() or not sec_sev.strip():
+      return False
+    locs = res.get("locations")
+    if not isinstance(locs, list) or not locs:
+      return False
+    phys = (locs[0] or {}).get("physicalLocation") or {}
+    region = phys.get("region") or {}
+    try:
+      start_line = int(region.get("startLine") or 0)
+    except (ValueError, TypeError):
+      start_line = 0
+    if start_line < 1:
+      return False
+
+  return True
+
+
+def _resolve_finding_region_and_snippet(
+    finding: Dict[str, Any],
+    repo_dir: str,
+    rel_path: str,
+) -> tuple[int, int, str]:
+  """Extracts start_line, end_line, and code snippet from finding payload, nested JSON, or source file."""
+  start_line = 0
+  end_line = 0
+  snippet = (
+      finding.get("Snippet")
+      or finding.get("snippet")
+      or ""
+  )
+
+  for s_key, e_key in (("StartLine", "EndLine"), ("start_line", "end_line")):
+    if start_line <= 0 and finding.get(s_key) is not None:
+      try:
+        start_line = int(finding.get(s_key) or 0)
+      except (ValueError, TypeError):
+        start_line = 0
+    if end_line <= 0 and finding.get(e_key) is not None:
+      try:
+        end_line = int(finding.get(e_key) or 0)
+      except (ValueError, TypeError):
+        end_line = 0
+
+  # Check nested location dict or FindingJSON proto payload if start_line is still 0
+  nested_candidates: List[Dict[str, Any]] = []
+  if isinstance(finding.get("location"), dict):
+    nested_candidates.append(finding["location"])
+  raw_fjson = finding.get("FindingJSON") or finding.get("finding_json")
+  if isinstance(raw_fjson, str) and raw_fjson.strip():
+    parsed_fj = extract_json_from_output(raw_fjson)
+    if isinstance(parsed_fj, dict):
+      nested_candidates.append(parsed_fj)
+      if isinstance(parsed_fj.get("location"), dict):
+        nested_candidates.append(parsed_fj["location"])
+  elif isinstance(raw_fjson, dict):
+    nested_candidates.append(raw_fjson)
+    if isinstance(raw_fjson.get("location"), dict):
+      nested_candidates.append(raw_fjson["location"])
+
+  for cand in nested_candidates:
+    rng = cand.get("range") if isinstance(cand.get("range"), dict) else cand
+    if start_line <= 0:
+      try:
+        start_line = int(
+            rng.get("start_line")
+            or rng.get("startLine")
+            or cand.get("start_line")
+            or cand.get("startLine")
+            or 0
+        )
+      except (ValueError, TypeError):
+        pass
+    if end_line <= 0:
+      try:
+        end_line = int(
+            rng.get("end_line")
+            or rng.get("endLine")
+            or cand.get("end_line")
+            or cand.get("endLine")
+            or 0
+        )
+      except (ValueError, TypeError):
+        pass
+    if not snippet and isinstance(cand.get("snippet"), str):
+      snippet = cand["snippet"]
+
+  # Locate snippet in source file under repo_dir if start_line is still unknown or snippet is missing
+  full_file_path = os.path.join(repo_dir, rel_path) if repo_dir and rel_path else ""
+  if full_file_path and os.path.isfile(full_file_path):
+    try:
+      with open(full_file_path, "r", encoding="utf-8", errors="replace") as f:
+        file_lines = f.splitlines()
+      if start_line <= 0 and snippet and snippet.strip():
+        target_lines = [ln.strip() for ln in snippet.strip().splitlines() if ln.strip()]
+        if target_lines:
+          first_target = target_lines[0]
+          for idx, src_line in enumerate(file_lines, start=1):
+            if first_target in src_line:
+              start_line = idx
+              end_line = min(len(file_lines), idx + len(target_lines) - 1)
+              break
+      elif start_line >= 1 and not snippet:
+        s_idx = max(0, start_line - 1)
+        e_idx = min(len(file_lines), max(start_line, end_line))
+        snippet = "\n".join(file_lines[s_idx:e_idx])
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+  if start_line < 1:
+    start_line = 1
+  if end_line < start_line:
+    snippet_line_count = len(snippet.strip().splitlines()) if snippet and snippet.strip() else 1
+    end_line = start_line + max(0, snippet_line_count - 1)
+
+  return start_line, end_line, (snippet or "").strip("\r\n")
+
+
+def _extract_first_sentence(text: str, fallback: str) -> str:
+  """Extracts a clean, single-sentence summary from multi-paragraph Markdown analysis."""
+  if not text or not text.strip():
+    return fallback
+  for raw_line in text.splitlines():
+    cleaned = re.sub(r"^#+\s*", "", raw_line.strip())
+    if not cleaned:
+      continue
+    # Split at first sentence boundary followed by whitespace
+    parts = re.split(r"(?<=[.!?])\s+", cleaned, maxsplit=1)
+    first = parts[0].strip()
+    if len(first) > 240:
+      first = first[:237].rstrip() + "..."
+    return first
+  return fallback
+
+
+def transform_json_to_sarif(
+    findings: List[Dict[str, Any]],
+    repo_dir: str,
+    skipped_finding_ids: Optional[Set[str]] = None,
+    finding_prs: Optional[Dict[str, str]] = None,
+    is_pr_scan: bool = False,
+    tool_version: str = "0.9.0",
+) -> Dict[str, Any]:
+  """Synthesizes a complete GitHub Code Scanning SARIF 2.1.0 document from CodeMender JSON findings."""
+  rules: List[Dict[str, Any]] = []
+  rules_index_by_id: Dict[str, int] = {}
+  results: List[Dict[str, Any]] = []
+  skipped_set = set(skipped_finding_ids or set())
+  prs_map = dict(finding_prs or {})
+
+  for f in findings:
+    if not isinstance(f, dict):
+      continue
+    finding_id = str(f.get("FindingID") or f.get("finding_id") or "").strip()
+    status = str(f.get("Status") or f.get("status") or "OPEN").strip().upper()
+    if status == "DISMISSED":
+      continue
+    if is_pr_scan and status in ("PRE_EXISTING_IGNORED", "SKIPPED_DUPLICATE"):
+      continue
+
+    raw_path = str(f.get("FilePath") or f.get("file_path") or "unknown_file").strip()
+    rel_path = normalize_repo_relative_path(raw_path, repo_dir=repo_dir)
+    if rel_path.startswith("../") or rel_path == "..":
+      rel_path = re.sub(r"^(\.\./)+", "", rel_path) or os.path.basename(raw_path)
+
+    vuln_type = str(
+        f.get("VulnType") or f.get("vuln_type") or "Security Vulnerability"
+    ).strip()
+    vuln_id = str(f.get("VulnID") or f.get("vuln_id") or "").strip()
+    title = str(f.get("Title") or f.get("title") or vuln_type).strip()
+    if not vuln_id:
+      cwe_match = re.search(r"(CWE-\d+)", f"{vuln_type} {title}", re.IGNORECASE)
+      if cwe_match:
+        vuln_id = cwe_match.group(1).upper()
+      else:
+        slug = re.sub(r"[^A-Z0-9]+", "-", vuln_type.upper()).strip("-")
+        vuln_id = f"CM-{slug[:24]}" if slug else "CM-VULN"
+
+    severity = str(f.get("Severity") or f.get("severity") or "MEDIUM").strip().upper()
+    level = _SEVERITY_TO_SARIF_LEVEL.get(severity, "warning")
+    security_severity = _SEVERITY_TO_CVSS_SCORE.get(severity, "5.5")
+
+    confidence_raw = f.get("Confidence") if f.get("Confidence") is not None else f.get("confidence")
+    confidence_level = str(
+        f.get("ConfidenceLevel") or f.get("confidence_level") or ""
+    ).strip().lower()
+    try:
+      conf_int = int(confidence_raw) if confidence_raw is not None else 85
+    except (ValueError, TypeError):
+      conf_int = 85
+
+    if confidence_level == "certain" or conf_int >= 90:
+      precision = "very-high"
+    elif confidence_level == "firm" or conf_int >= 75:
+      precision = "high"
+    else:
+      precision = "medium"
+    confidence_display = (
+        f"{conf_int}% ({confidence_level})"
+        if confidence_level
+        else f"{conf_int}%"
+    )
+
+    start_line, end_line, snippet = _resolve_finding_region_and_snippet(
+        f, repo_dir, rel_path
+    )
+    analysis = str(
+        f.get("Analysis")
+        or f.get("analysis")
+        or f"CodeMender detected a {severity} {vuln_type} ({vuln_id}) vulnerability in `{rel_path}`."
+    ).strip()
+
+    # Deterministic, cross-run-stable ruleId per unique finding location & CWE
+    rule_hash = hashlib.sha256(
+        f"{vuln_id}:{rel_path}:{start_line}:{title}".encode("utf-8")
+    ).hexdigest()[:8]
+    rule_id = f"{vuln_id}/{rule_hash}"
+
+    pr_url = prs_map.get(finding_id, "")
+    pr_label = ""
+    pr_markdown_cell = "—"
+    if pr_url:
+      pr_num_match = re.search(r"/pull/(\d+)", pr_url)
+      pr_label = f"Fix PR #{pr_num_match.group(1)}" if pr_num_match else "Automated Fix PR"
+      pr_markdown_cell = f"[🔧 **{pr_label}**]({pr_url})"
+
+    short_desc_text = (
+        f"[{vuln_id}] {title}"
+        if vuln_id and not title.upper().startswith(f"[{vuln_id.upper()}]")
+        else title
+    )
+    first_sentence = _extract_first_sentence(analysis, title)
+
+    tags = ["security"]
+    cwe_num_match = re.match(r"^CWE-(\d+)$", vuln_id, re.IGNORECASE)
+    if cwe_num_match:
+      tags.append(f"external/cwe/cwe-{cwe_num_match.group(1)}")
+
+    snippet_section = (
+        f"\n\n#### Vulnerable Code Snippet (`{rel_path}:{start_line}-{end_line}`)\n```\n{snippet}\n```"
+        if snippet
+        else ""
+    )
+    help_markdown = (
+        f"### 🛡️ CodeMender Security Analysis: {title}\n\n"
+        f"| Property | Value |\n"
+        f"| :--- | :--- |\n"
+        f"| **Severity** | **{severity}** (CVSS `{security_severity}`) |\n"
+        f"| **Vulnerability Type** | `{vuln_type}` (`{vuln_id}`) |\n"
+        f"| **Confidence** | `{confidence_display}` |\n"
+        f"| **Status** | `{status}` |\n"
+        f"| **Location** | `{rel_path}:{start_line}` |\n"
+        f"| **Automated Fix PR** | {pr_markdown_cell} |\n\n"
+        f"#### Root Cause & Dataflow Analysis\n\n"
+        f"{analysis}"
+        f"{snippet_section}"
+    )
+    help_text = (
+        f"[{vuln_id}] {title} ({severity})\n"
+        f"Location: {rel_path}:{start_line}-{end_line}\n"
+        + (f"Fix PR: {pr_url}\n" if pr_url else "")
+        + f"\n{analysis}"
+    )
+
+    if rule_id not in rules_index_by_id:
+      rule_name_clean = re.sub(r"[^A-Za-z0-9]", "", vuln_type.title()) or "CodeMenderSecurityFinding"
+      rules_index_by_id[rule_id] = len(rules)
+      rules.append({
+          "id": rule_id,
+          "name": rule_name_clean,
+          "shortDescription": {"text": short_desc_text},
+          "fullDescription": {"text": first_sentence},
+          "help": {
+              "text": help_text,
+              "markdown": help_markdown,
+          },
+          "defaultConfiguration": {"level": level},
+          "properties": {
+              "tags": tags,
+              "security-severity": security_severity,
+              "precision": precision,
+              "problem.severity": level,
+          },
+      })
+
+    rule_index = rules_index_by_id[rule_id]
+    inline_msg_text = first_sentence
+    if pr_url:
+      inline_msg_text = f"{first_sentence} (Remediation: {pr_label} - {pr_url})"
+    inline_msg_md = (
+        f"{first_sentence} — [{pr_label}]({pr_url})"
+        if pr_url
+        else first_sentence
+    )
+
+    line_hash = hashlib.sha256(
+        f"{vuln_id}:{rel_path}:{start_line}:{(snippet or title).strip()}".encode("utf-8")
+    ).hexdigest()[:16]
+
+    result_obj: Dict[str, Any] = {
+        "ruleId": rule_id,
+        "ruleIndex": rule_index,
+        "level": level,
+        "message": {
+            "text": inline_msg_text,
+            "markdown": inline_msg_md,
+        },
+        "locations": [
+            {
+                "physicalLocation": {
+                    "artifactLocation": {"uri": rel_path},
+                    "region": {
+                        "startLine": start_line,
+                        "endLine": end_line,
+                        "snippet": {"text": snippet or title},
+                    },
+                }
+            }
+        ],
+        "partialFingerprints": {
+            "primaryLocationLineHash": line_hash,
+        },
+        "properties": {
+            "finding_id": finding_id,
+            "status": status,
+            "vuln_id": vuln_id,
+            "vuln_type": vuln_type,
+            "severity": severity,
+            "confidence": conf_int,
+            "pr_url": pr_url,
+        },
+    }
+
+    if not is_pr_scan and (
+        (finding_id and finding_id in skipped_set)
+        or status == "SKIPPED_DUPLICATE"
+    ):
+      result_obj["suppressions"] = [
+          {
+              "kind": "external",
+              "status": "underReview",
+              "justification": "Remediation PR or branch already exists",
+          }
+      ]
+
+    results.append(result_obj)
+
+  return {
+      "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+      "version": "2.1.0",
+      "runs": [
+          {
+              "tool": {
+                  "driver": {
+                      "name": "CodeMender",
+                      "version": tool_version,
+                      "semanticVersion": tool_version,
+                      "informationUri": "https://cloud.google.com/security",
+                      "rules": rules,
+                  }
+              },
+              "results": results,
+          }
+      ],
+  }
+
+
+def _load_findings_for_sarif(
+    json_path: Optional[str],
+    state_db_path: Optional[str],
+) -> List[Dict[str, Any]]:
+  """Loads and merges finding records from report.json and SQLite state.db."""
+  findings_by_id: Dict[str, Dict[str, Any]] = {}
+  ordered_findings: List[Dict[str, Any]] = []
+
+  if json_path and os.path.isfile(json_path):
+    try:
+      with open(json_path, "r", encoding="utf-8") as f:
+        parsed = parse_findings_json(f.read())
+      for item in parsed:
+        fid = str(item.get("FindingID") or item.get("finding_id") or "")
+        if fid:
+          findings_by_id[fid] = item
+        ordered_findings.append(item)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Could not read findings from %s for SARIF synthesis: %s", json_path, e)
+
+  if state_db_path and os.path.isfile(state_db_path):
+    try:
+      with closing(sqlite3.connect(state_db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='findings'"
+        )
+        if cursor.fetchone():
+          cursor.execute("SELECT * FROM findings")
+          rows = cursor.fetchall()
+          for row in rows:
+            row_dict = dict(row)
+            normalized = parse_findings_json(json.dumps([row_dict]))
+            if not normalized:
+              continue
+            item = normalized[0]
+            fid = str(item.get("FindingID") or item.get("finding_id") or "")
+            if fid and fid in findings_by_id:
+              # Fill any missing fields (e.g. start_line, snippet, finding_json, status) from state.db
+              existing = findings_by_id[fid]
+              for k, v in item.items():
+                if v not in (None, "", 0) and existing.get(k) in (None, "", 0):
+                  existing[k] = v
+              # Always prefer latest status from merged state.db (e.g. FIXED, SKIPPED_DUPLICATE)
+              if item.get("Status"):
+                existing["Status"] = item["Status"]
+                existing["status"] = item["Status"]
+            elif fid:
+              findings_by_id[fid] = item
+              ordered_findings.append(item)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Could not enrich SARIF findings from %s: %s", state_db_path, e)
+
+  return ordered_findings
+
+
+def validate_and_enrich_sarif(
+    sarif_path: str,
+    json_path: Optional[str],
+    repo_dir: str,
+    skipped_finding_ids: Optional[Set[str]] = None,
+    finding_prs: Optional[Dict[str, str]] = None,
+    is_pr_scan: bool = False,
+    state_db_path: Optional[str] = None,
+) -> bool:
+  """Validates SARIF completeness and synthesizes rich SARIF 2.1.0 from report.json + state.db when incomplete."""
+  existing_sarif = None
+  if sarif_path and os.path.isfile(sarif_path):
+    try:
+      with open(sarif_path, "r", encoding="utf-8") as f:
+        existing_sarif = extract_json_from_output(f.read())
+    except Exception:  # pylint: disable=broad-exception-caught
+      existing_sarif = None
+
+  if existing_sarif is not None and is_sarif_complete(existing_sarif):
+    # Even if complete, ensure finding_prs links are present if provided
+    if not finding_prs:
+      logger.info("SARIF report at %s passed completeness validation.", sarif_path)
+      return True
+
+  findings = _load_findings_for_sarif(json_path, state_db_path)
+  if not findings:
+    logger.info(
+        "No findings available in report.json or state.db to enrich %s; keeping existing SARIF.",
+        sarif_path,
+    )
+    return False
+
+  enriched_sarif = transform_json_to_sarif(
+      findings=findings,
+      repo_dir=repo_dir,
+      skipped_finding_ids=skipped_finding_ids,
+      finding_prs=finding_prs,
+      is_pr_scan=is_pr_scan,
+  )
+  try:
+    os.makedirs(os.path.dirname(os.path.abspath(sarif_path)), exist_ok=True)
+    with open(sarif_path, "w", encoding="utf-8") as f:
+      json.dump(enriched_sarif, f, indent=2)
+    logger.info(
+        "Synthesized complete SARIF 2.1.0 report (%d results, %d rules) at %s",
+        len(enriched_sarif["runs"][0]["results"]),
+        len(enriched_sarif["runs"][0]["tool"]["driver"]["rules"]),
+        sarif_path,
+    )
+    return True
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Failed to write enriched SARIF report to %s: %s", sarif_path, e)
+    return False
+
+
 # -----------------------------------------------------------------------------
 # Final Report Generation and Upload Pipeline
 # -----------------------------------------------------------------------------
@@ -938,6 +1477,7 @@ def _generate_and_upload_report(
     skipped_finding_ids: Optional[Set[str]] = None,
     storage_mode: str = "gcs",
     config: Optional[OrchestratorConfig] = None,
+    finding_prs: Optional[Dict[str, str]] = None,
 ) -> None:
   """Generates final HTML and SARIF reports using cm CLI and uploads to GCS or publishes locally."""
   cfg = config or OrchestratorConfig.from_env()
@@ -1096,15 +1636,27 @@ def _generate_and_upload_report(
       except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning("Failed to write SARIF stdout fallback to disk: %s", e)
 
-  # 7. Sanitize SARIF paths and copy to standard upload locations
+  # 7. Sanitize SARIF paths, validate completeness, enrich from report.json + state.db, and copy to standard upload locations
   workspace_dir = cfg.workspace_dir or os.getcwd()
-  if found_sarif:
+  if not found_sarif:
+    found_sarif = os.path.join(codemender_home, "reports/report.sarif")
+  if os.path.exists(found_sarif):
     _sanitize_sarif_file(
         found_sarif,
         repo_dir,
         skipped_finding_ids=skipped_finding_ids,
         is_pr_scan=is_pr_scan,
     )
+  validate_and_enrich_sarif(
+      sarif_path=found_sarif,
+      json_path=local_json_path if "local_json_path" in locals() else os.path.join(codemender_home, "reports/report.json"),
+      repo_dir=repo_dir,
+      skipped_finding_ids=skipped_finding_ids,
+      finding_prs=finding_prs,
+      is_pr_scan=is_pr_scan,
+      state_db_path=os.path.join(codemender_home, "state.db"),
+  )
+  if os.path.exists(found_sarif):
     # Ensure SARIF is placed in repo_dir and workspace root for upload-sarif action
     for target_dest in [
         os.path.join(repo_dir, "report.sarif"),
@@ -1459,8 +2011,9 @@ def run_aggregate_pipeline() -> None:
 
   # 11. Generate final HTML and SARIF reports and upload
   inject_codemender_config(repo_dir, config=config)
-  # Resolve path to CodeMender 'cm' executable
-  cm_binary = shutil.which("cm") or "cm"
+  # Restore staged cm binary from workspace_base.tar.gz if present, then resolve path
+  restored_cm = restore_staged_cm_binary(codemender_home)
+  cm_binary = shutil.which("cm") or restored_cm or "cm"
   log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   # Invoke report generation and upload routine with full run parameters
   _generate_and_upload_report(
@@ -1478,6 +2031,7 @@ def run_aggregate_pipeline() -> None:
       skipped_finding_ids=skipped_finding_ids,
       storage_mode=config.storage_mode,
       config=config,
+      finding_prs=finding_prs,
   )
 
   # 12. Publish Commit Status Check and SARIF to GitHub (both PR Security Gate and Scheduled Nightly Scan)

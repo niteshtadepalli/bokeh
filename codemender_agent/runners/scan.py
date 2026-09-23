@@ -25,9 +25,13 @@ import time
 from typing import Optional
 import uuid
 
-# CodeMender CLI JSON parser and version logging
+# CodeMender CLI JSON parser, version logging, and binary auto-update helpers
+from codemender_agent.codemender.cli import ensure_cm_updated
+from codemender_agent.codemender.cli import get_cm_default_model
 from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
+from codemender_agent.codemender.cli import stage_cm_binary_for_archive
+from codemender_agent.runners.aggregate import transform_json_to_sarif
 # Configuration injection and credentials
 from codemender_agent.config import OrchestratorConfig
 from codemender_agent.config import get_github_credentials
@@ -388,7 +392,11 @@ def _scan_repository(
   max_scan_attempts = int(os.environ.get("CODEMENDER_MAX_SCAN_ATTEMPTS", "1"))
   findings = []
   scan_token_usage: dict[str, dict[str, int]] = {}
-  find_model = cfg.find_model or resolve_command_model("find") or "default"
+  find_model = (
+      cfg.find_model
+      or resolve_command_model("find")
+      or get_cm_default_model(cm_binary, env=scrubbed_env, cwd=repo_dir)
+  )
 
   # Retry loop to account for transient cold-start, gRPC stream cancellation, or API rate-limit delays
   for attempt in range(1, max_scan_attempts + 1):
@@ -704,8 +712,9 @@ def _save_and_upload_state(
     logger.critical("Failed to upload scan_metadata.json to GCS.")
     sys.exit(1)
 
-  # 3. Archive ~/.codemender state directory containing initialized project metadata
+  # 3. Stage active cm binary into ~/.codemender/bin/cm and archive ~/.codemender state directory
   codemender_home = os.path.expanduser("~/.codemender")
+  stage_cm_binary_for_archive(codemender_home)
   tarball_path = os.path.join(workspace_dir, "workspace_base.tar.gz")
   logger.info("Archiving ~/.codemender to %s", tarball_path)
   make_tarfile(tarball_path, codemender_home)
@@ -863,9 +872,11 @@ def run_scan_pipeline() -> None:
         target_url=config.execution_url or None,
     )
 
-  # 4. Initialize CodeMender CLI environment and local cache paths
+  # 4. Initialize CodeMender CLI environment, self-update binary, and configure local cache paths
   scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
-  cm_binary = shutil.which("cm") or "cm"
+  cm_binary = ensure_cm_updated(
+      shutil.which("cm") or "cm", env=scrubbed_env, cwd=repo_dir
+  )
   log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   _init_codemender(repo_dir, scrubbed_env, cm_binary, config=config)
 
@@ -1037,8 +1048,25 @@ def run_scan_pipeline() -> None:
   # 10. Handle case where all findings were filtered out
   if active_findings_count == 0:
     logger.info("Zero active findings after filtering. Exiting Stage 1.")
-    # Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
-    sarif_path = _write_clean_sarif_file(repo_dir, workspace_dir)
+    if not config.is_pr_scan and skipped_finding_ids:
+      # Synthesize rich SARIF with underReview suppressions so existing open alerts stay tracked on GitHub
+      sarif_data = transform_json_to_sarif(
+          findings=findings,
+          repo_dir=repo_dir,
+          skipped_finding_ids=set(skipped_finding_ids),
+          is_pr_scan=False,
+      )
+      sarif_path = os.path.join(workspace_dir, "report.sarif")
+      for dest_dir in [repo_dir, workspace_dir]:
+        if dest_dir and os.path.exists(dest_dir):
+          try:
+            with open(os.path.join(dest_dir, "report.sarif"), "w", encoding="utf-8") as f:
+              json.dump(sarif_data, f, indent=2)
+          except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Failed to write suppressed SARIF to %s: %s", dest_dir, e)
+    else:
+      # Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
+      sarif_path = _write_clean_sarif_file(repo_dir, workspace_dir)
     filtered_reason = (
         None
         if config.is_pr_scan
@@ -1108,6 +1136,20 @@ def run_scan_pipeline() -> None:
           context=STATUS_CONTEXT_SCHEDULED,
           target_url=config.execution_url or None,
       )
+      if sarif_path and os.path.exists(sarif_path):
+        scan_ref = (
+            f"refs/heads/{config.target_branch}"
+            if config.target_branch
+            else f"refs/heads/{get_default_branch(token, owner, repo_name)}"
+        )
+        upload_sarif_to_code_scanning(
+            token=token,
+            owner=owner,
+            repo=repo_name,
+            sarif_path=sarif_path,
+            commit_sha=target_sha,
+            ref=scan_ref,
+        )
     sys.exit(0)
 
   # 11. Partition findings into balanced worker buckets

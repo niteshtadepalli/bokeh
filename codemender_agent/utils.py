@@ -85,10 +85,13 @@ def parse_token_metric(token_str: str) -> int:
 
 def resolve_command_model(command_name: str) -> Optional[str]:
   """Implements model precedence hierarchy: CODEMENDER_<COMMAND>_MODEL > CODEMENDER_MODEL > None."""
-  cmd_override = os.environ.get(f"CODEMENDER_{command_name.upper()}_MODEL")
+  cmd_override = (
+      os.environ.get(f"CODEMENDER_{command_name.upper()}_MODEL") or ""
+  ).strip()
   if cmd_override:
     return cmd_override
-  return os.environ.get("CODEMENDER_MODEL")
+  model = (os.environ.get("CODEMENDER_MODEL") or "").strip()
+  return model or None
 
 
 def accumulate_model_token_usage(

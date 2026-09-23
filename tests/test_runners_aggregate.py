@@ -1032,6 +1032,139 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertNotIn("`fid-3`", summary_md)
     self.assertNotIn("Pre-existing XSS", summary_md)
 
+  def test_sarif_completeness_and_json_to_sarif_synthesis(self):
+    """Verify incomplete CLI SARIF is detected and transformed into rich SARIF 2.1.0 with rules, line numbers, CVSS, and Fix PR links."""
+    from codemender_agent.runners.aggregate import (
+        _inject_token_metrics_into_html,
+        is_sarif_complete,
+        validate_and_enrich_sarif,
+    )
+
+    repo_dir = os.path.join(self.workspace_dir, "sarif-repo")
+    os.makedirs(os.path.join(repo_dir, "src/bokeh/server/views"), exist_ok=True)
+    sarif_path = os.path.join(self.workspace_dir, "incomplete.sarif")
+    json_path = os.path.join(self.workspace_dir, "report.json")
+
+    # 1. Incomplete SARIF produced by `cm report -f sarif` (no rules, no region.startLine)
+    incomplete_sarif = {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {"driver": {"name": "CodeMender", "version": "0.9.0"}},
+                "results": [
+                    {
+                        "ruleId": "Cross-Site Scripting (XSS)",
+                        "level": "error",
+                        "message": {"text": "XSS: Unescaped template parameter"},
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {
+                                        "uri": f"{repo_dir}/src/bokeh/server/views/autoload_js_handler.py"
+                                    }
+                                }
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    self.assertFalse(is_sarif_complete(incomplete_sarif))
+    with open(sarif_path, "w", encoding="utf-8") as f:
+      json.dump(incomplete_sarif, f)
+
+    # 2. Rich report.json produced by `cm report -f json`
+    report_findings = [
+        {
+            "finding_id": "fid-xss-1",
+            "title": "Reflected XSS in Autoload JS Handler",
+            "file_path": f"{repo_dir}/src/bokeh/server/views/autoload_js_handler.py",
+            "severity": "HIGH",
+            "confidence": 95,
+            "confidence_level": "certain",
+            "vuln_type": "Cross-Site Scripting (XSS)",
+            "vuln_id": "CWE-79",
+            "status": "FIXED",
+            "start_line": 42,
+            "end_line": 45,
+            "snippet": "script = bundle_for_objs_and_resources(None, resources)",
+            "analysis": (
+                "User-controlled query parameter `bokeh-autoload-element` is interpolated into JavaScript output without escaping.\n\n"
+                "An attacker can craft a malicious URL to execute arbitrary script in the victim's browser."
+            ),
+        },
+        {
+            "finding_id": "fid-dup-2",
+            "title": "Open Redirect in Root Handler",
+            "file_path": "src/bokeh/server/views/root_handler.py",
+            "severity": "MEDIUM",
+            "confidence": 80,
+            "vuln_type": "Open Redirect",
+            "vuln_id": "CWE-601",
+            "status": "SKIPPED_DUPLICATE",
+            "start_line": 19,
+            "end_line": 21,
+            "snippet": "self.redirect(next_url)",
+            "analysis": "Unvalidated redirect target allows phishing redirects.",
+        },
+    ]
+    with open(json_path, "w", encoding="utf-8") as f:
+      json.dump(report_findings, f)
+
+    ok = validate_and_enrich_sarif(
+        sarif_path=sarif_path,
+        json_path=json_path,
+        repo_dir=repo_dir,
+        skipped_finding_ids={"fid-dup-2"},
+        finding_prs={"fid-xss-1": "https://github.com/carloschulo/cm-test/pull/5"},
+        is_pr_scan=False,
+    )
+    self.assertTrue(ok)
+
+    with open(sarif_path, "r", encoding="utf-8") as f:
+      enriched = json.load(f)
+
+    self.assertTrue(is_sarif_complete(enriched))
+    rules = enriched["runs"][0]["tool"]["driver"]["rules"]
+    results = enriched["runs"][0]["results"]
+    self.assertEqual(len(rules), 2)
+    self.assertEqual(len(results), 2)
+
+    # Check deterministic ruleId, CWE tag, CVSS score, and Fix PR link in help.markdown
+    self.assertTrue(rules[0]["id"].startswith("CWE-79/"))
+    self.assertEqual(rules[0]["properties"]["security-severity"], "8.0")
+    self.assertIn("external/cwe/cwe-79", rules[0]["properties"]["tags"])
+    self.assertIn("https://github.com/carloschulo/cm-test/pull/5", rules[0]["help"]["markdown"])
+    self.assertIn("Fix PR #5", rules[0]["help"]["markdown"])
+
+    # Check exact region startLine=42, endLine=45 and concise message
+    region0 = results[0]["locations"][0]["physicalLocation"]["region"]
+    self.assertEqual(region0["startLine"], 42)
+    self.assertEqual(region0["endLine"], 45)
+    self.assertIn("Fix PR #5", results[0]["message"]["text"])
+    self.assertNotIn("suppressions", results[0])
+
+    # Check SKIPPED_DUPLICATE suppression on second result
+    self.assertIn("suppressions", results[1])
+    self.assertEqual(results[1]["suppressions"][0]["status"], "underReview")
+
+    # 3. Verify multi-model HTML banner displays both find and fix models
+    html_path = os.path.join(self.workspace_dir, "multi_model_report.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+      f.write('<html><body><div class="cards"></div></body></html>')
+    _inject_token_metrics_into_html(
+        html_path,
+        {
+            "gemini-3.1-pro-preview": {"in_tokens": 25000, "out_tokens": 1500, "total_tokens": 26500},
+            "gemini-3.8-flash": {"in_tokens": 40000, "out_tokens": 2000, "total_tokens": 42000},
+        },
+    )
+    with open(html_path, "r", encoding="utf-8") as f:
+      html_out = f.read()
+    self.assertIn("Models: <code>gemini-3.1-pro-preview</code>, <code>gemini-3.8-flash</code>", html_out)
+
 
 if __name__ == "__main__":
   unittest.main()
+

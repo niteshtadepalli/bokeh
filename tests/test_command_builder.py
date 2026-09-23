@@ -170,6 +170,62 @@ class TestCommandBuilder(unittest.TestCase):
         ["cm", "fix", "-y", "--bypass-warning", "--unrestricted", "id-123"],
     )
 
+  def test_empty_model_env_does_not_pass_model_flag(self):
+    """Verify empty CODEMENDER_MODEL='' and CODEMENDER_FIND_MODEL='' do not pass --model to cm."""
+    from codemender_agent.config import OrchestratorConfig
+
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_CLI_VERSION": "preview",
+            "CODEMENDER_MODEL": "   ",
+            "CODEMENDER_FIND_MODEL": "",
+            "CODEMENDER_FIX_MODEL": "",
+        },
+        clear=True,
+    ):
+      self.assertIsNone(resolve_command_model("find"))
+      self.assertIsNone(resolve_command_model("fix"))
+      cfg = OrchestratorConfig.from_env()
+      self.assertIsNone(cfg.model)
+      self.assertIsNone(cfg.find_model)
+      self.assertIsNone(cfg.fix_model)
+      cmd = build_cm_command("cm", "find", ".")
+      self.assertNotIn("--model", cmd)
+
+  def test_get_cm_default_model_and_binary_staging(self):
+    """Verify dynamic default model detection from `cm find --help` and binary staging/restoration."""
+    import tempfile
+    from codemender_agent.codemender.cli import (
+        _CM_DEFAULT_MODEL_CACHE,
+        get_cm_default_model,
+        restore_staged_cm_binary,
+        stage_cm_binary_for_archive,
+    )
+
+    _CM_DEFAULT_MODEL_CACHE.clear()
+    with tempfile.TemporaryDirectory() as tmpdir:
+      fake_cm = os.path.join(tmpdir, "cm")
+      with open(fake_cm, "w", encoding="utf-8") as f:
+        f.write(
+            '#!/bin/sh\necho \'      --model string     LLM model to use (default "gemini-3.8-flash")\'\n'
+        )
+      os.chmod(fake_cm, 0o755)
+
+      detected = get_cm_default_model(fake_cm)
+      self.assertEqual(detected, "gemini-3.8-flash")
+
+      cm_home = os.path.join(tmpdir, ".codemender")
+      staged = stage_cm_binary_for_archive(cm_home, fake_cm)
+      self.assertTrue(staged and os.path.isfile(staged))
+
+      install_dest = os.path.join(tmpdir, "installed_bin", "cm")
+      os.makedirs(os.path.dirname(install_dest), exist_ok=True)
+      restored = restore_staged_cm_binary(cm_home, install_path=install_dest)
+      self.assertEqual(restored, install_dest)
+      self.assertTrue(os.path.isfile(install_dest))
+
 
 if __name__ == "__main__":
   unittest.main()
+

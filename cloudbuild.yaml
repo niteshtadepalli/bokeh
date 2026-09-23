@@ -33,6 +33,8 @@ steps:
           echo "Using pre-staged ./cm binary"
         fi
         chmod +x ./cm
+        ./cm update || true
+        ./cm --version || true
 
   # Step 2: Pull cached image and build the container image
   - name: 'gcr.io/cloud-builders/docker'

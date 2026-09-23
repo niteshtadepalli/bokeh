@@ -27,18 +27,32 @@ resource "google_cloud_scheduler_job" "repo_scans" {
     http_method = "POST"
 
     body = base64encode(jsonencode({
-      argument = jsonencode({
-        job_name        = google_cloud_run_v2_job.runner.name
-        worker_job_name = google_cloud_run_v2_job.worker.name
-        gcs_bucket      = google_storage_bucket.reports.name
-        region          = var.region
-        repo_url        = each.value.repo_url
-        scan_target     = coalesce(each.value.scan_target, ".")
-        target_branch   = coalesce(each.value.target_branch, "")
-        build_command   = coalesce(each.value.build_command, "")
-        max_tasks       = coalesce(each.value.max_tasks, 8)
-        skip_verify     = coalesce(each.value.skip_verify, true)
-      })
+      argument = jsonencode(merge(
+        {
+          job_name        = google_cloud_run_v2_job.runner.name
+          worker_job_name = google_cloud_run_v2_job.worker.name
+          gcs_bucket      = google_storage_bucket.reports.name
+          region          = var.region
+          repo_url        = each.value.repo_url
+          scan_target     = (each.value.scan_target != null && each.value.scan_target != "") ? each.value.scan_target : "."
+          target_branch   = each.value.target_branch != null ? each.value.target_branch : ""
+          build_command   = each.value.build_command != null ? each.value.build_command : ""
+          max_tasks       = each.value.max_tasks != null ? each.value.max_tasks : 8
+          skip_verify     = each.value.skip_verify != null ? each.value.skip_verify : true
+        },
+        (each.value.model != null && each.value.model != "") ? { model = each.value.model } : {},
+        (
+          (each.value.find_model != null && each.value.find_model != "") ||
+          (each.value.verify_model != null && each.value.verify_model != "") ||
+          (each.value.fix_model != null && each.value.fix_model != "")
+        ) ? {
+          models = merge(
+            (each.value.find_model != null && each.value.find_model != "") ? { find = each.value.find_model } : {},
+            (each.value.verify_model != null && each.value.verify_model != "") ? { verify = each.value.verify_model } : {},
+            (each.value.fix_model != null && each.value.fix_model != "") ? { fix = each.value.fix_model } : {}
+          )
+        } : {}
+      ))
     }))
 
     headers = {
