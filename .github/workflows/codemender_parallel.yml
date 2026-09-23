@@ -144,6 +144,12 @@ jobs:
           fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
 
+      - name: Run Workflow Unit Tests
+        if: hashFiles('.github/workflows/tests/test_codemender_security_gate.py') != ''
+        run: |
+          python3 -c "import yaml" 2>/dev/null || pip install -q pyyaml
+          python3 .github/workflows/tests/test_codemender_security_gate.py -v
+
       - name: Resolve PR Diff Scan Targets
         id: diff-targets
         env:
@@ -183,7 +189,7 @@ jobs:
           }
           code_files = [
               path for path in changed_files
-              if os.path.splitext(path)[1].lower() in code_exts and os.path.exists(path)
+              if not path.startswith(".github/") and os.path.splitext(path)[1].lower() in code_exts and os.path.exists(path)
           ]
 
           if not code_files:
