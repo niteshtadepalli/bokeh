@@ -490,6 +490,7 @@ jobs:
           if count > 0:
               rows = []
               details_blocks = []
+              patch_slots = []
               for sev, item in blocking + advisory:
                   fid = item["finding_id"]
                   status_tag = "🚫 **BLOCKING**" if rank.get(sev, 2) >= threshold else "ℹ️ Advisory"
@@ -498,8 +499,9 @@ jobs:
                   title = item["title"]
                   desc = item["description"]
                   rows.append(
-                      f"| `{sev}` | {status_tag} | `{fpath}:{line_no}` | **{title}** (`{fid[:8]}`) | ⏳ *Running `cm verify` & `cm fix` in background...* |"
+                      f"| `{sev}` | {status_tag} | `{fpath}:{line_no}` | **{title}** (`{fid[:8]}`) | ⏳ *Queued for `cm verify`...* <!-- cm-row:{fid} --> |"
                   )
+                  patch_slots.append(f"<!-- cm-patch:{fid} --><!-- /cm-patch:{fid} -->")
                   if desc:
                       details_blocks.append(f"<details><summary>🔎 <b>[{sev}] {title}</b> (<code>{fpath}:{line_no}</code>)</summary>\n\n{desc}\n</details>")
 
@@ -510,16 +512,20 @@ jobs:
                   else f"✅ **PASSED** — `0` vulnerabilities `>= {min_sev}` (`{advisory_count}` advisory finding(s))."
               )
               initial_comment = "\n".join([
-                  "### 🛡️ CodeMender Pre-Submit Security Report *(Stage 1: Initial `cm find` Scan)*",
+                  "<!-- cm-stage-header -->",
+                  f"### 🛡️ CodeMender Pre-Submit Security Report *(Stage 1 Complete — Stage 2 Running: 0/{count} Verified)*",
+                  "<!-- /cm-stage-header -->",
                   "",
                   f"**Gate Status:** {verdict_banner}",
-                  f"> ⚡ **Early Feedback Mode:** `cm find` has completed and posted these findings immediately. "
-                  f"**Background workers (`cm verify` & `cm fix`) are now running asynchronously** ([view live run]({run_url})) "
-                  f"to verify exploitability and post inline `Commit suggestion` patch blocks on the PR diff. This comment will automatically update when fixes are ready.",
+                  f"> ⚡ **Live Incremental Updates:** `cm find` has completed and posted all `{count}` finding(s) immediately. "
+                  f"**Background workers (`Stage 2.1: cm verify` → `Stage 2.2: cm fix` → `Stage 2.3: Inline PR Suggestion`)** are now running in parallel ([view live run]({run_url})) "
+                  f"and will update each row below in real time as each vulnerability finishes.",
                   "",
                   "| Severity | Gate Impact | Location | Vulnerability | Verification & Auto-Fix (`cm verify` / `cm fix`) |",
                   "| :--- | :--- | :--- | :--- | :--- |",
                   *rows,
+                  "",
+                  *patch_slots,
                   "",
                   *details_blocks,
               ])
@@ -744,67 +750,41 @@ jobs:
           name: codemender-base-state
           path: .codemender_transit/base/
 
-      - name: Execute Background `cm verify` & `cm fix` + Post Inline PR Suggestions
+      - name: Initialize Worker Workspace & Sandbox Config
         env:
           WORKER_INDEX: ${{ matrix.worker_index }}
-          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
-          TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
-          REPO_FULL_NAME: ${{ github.repository }}
           BUILD_COMMAND: ${{ inputs.build_command }}
-          SKIP_VERIFY: ${{ inputs.skip_exploit_verification }}
           SANDBOX_ENABLED: ${{ inputs.sandbox_enabled }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
         run: |
           python3 - <<'EOF'
           import json
           import os
-          import re
           import shutil
-          import sqlite3
           import subprocess
           import tarfile
-          import urllib.request
 
           workspace = os.path.abspath(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
           worker_idx = os.environ.get("WORKER_INDEX", "0")
-          pr_number = os.environ.get("PR_NUMBER", "").strip()
-          target_sha = os.environ.get("TARGET_SHA", "").strip()
-          repo = os.environ.get("REPO_FULL_NAME", "").strip()
-          token = os.environ.get("GITHUB_TOKEN", "").strip()
           build_cmd = os.environ.get("BUILD_COMMAND", "").strip() or "true"
-          skip_verify = os.environ.get("SKIP_VERIFY", "false").lower() == "true"
           sandbox_enabled = os.environ.get("SANDBOX_ENABLED", "true").lower() != "false"
 
           base_dir = os.path.join(workspace, ".codemender_transit", "base")
           shard_dir = os.path.join(workspace, ".codemender_transit", "shards", f"worker_{worker_idx}")
           os.makedirs(shard_dir, exist_ok=True)
+          os.makedirs(os.path.join(workspace, ".codemender_cache", "tmp"), exist_ok=True)
 
-          # Build scrubbed_env for cm subprocesses: strip GitHub tokens & redirect caches inside workspace for sbox
-          cache_dir = os.path.join(workspace, ".codemender_cache")
-          tmp_dir = os.path.join(cache_dir, "tmp")
-          os.makedirs(tmp_dir, exist_ok=True)
-          cm_env = dict(os.environ)
-          for secret_key in ("GITHUB_TOKEN", "GH_APP_KEY", "GCP_SA_KEY", "CUSTOM_GITHUB_TOKEN"):
-              cm_env.pop(secret_key, None)
-          cm_env["XDG_CACHE_HOME"] = cache_dir
-          cm_env["TMPDIR"] = tmp_dir
-          cm_env["TEMP"] = tmp_dir
-          cm_env["TMP"] = tmp_dir
-          cm_env["PIP_CACHE_DIR"] = os.path.join(cache_dir, "pip")
-
-          # 1. Restore .cm_project in workspace and ~/.codemender state from Stage 1
+          # Restore .cm_project in workspace and ~/.codemender state from Stage 1
           saved_cm_proj = os.path.join(base_dir, ".cm_project")
           if os.path.exists(saved_cm_proj):
               shutil.copy2(saved_cm_proj, os.path.join(workspace, ".cm_project"))
           else:
-              subprocess.run(["cm", "init", "--yes", "--bypass-warning"], cwd=workspace, env=cm_env, check=False)
+              subprocess.run(["cm", "init", "--yes", "--bypass-warning"], cwd=workspace, check=False)
 
           tar_path = os.path.join(base_dir, "codemender_home.tar.gz")
           if os.path.exists(tar_path):
               with tarfile.open(tar_path, "r:gz") as tar:
                   tar.extractall(path=os.path.expanduser("~"))
 
-          # Configure ~/.codemender/config.yaml with sbox sandbox enabled and target_dir mounted to workspace
           cm_dir = os.path.expanduser("~/.codemender")
           os.makedirs(cm_dir, exist_ok=True)
           with open(os.path.join(cm_dir, "config.yaml"), "w", encoding="utf-8") as cfg:
@@ -816,7 +796,32 @@ jobs:
                   f'tools:\n  confirm_commands: false\n  confirm_writes: false\n'
               )
 
-          def to_repo_relpath(raw_path: str) -> str:
+          import textwrap
+          helper_path = os.path.join(shard_dir, "worker_helpers.py")
+          with open(helper_path, "w", encoding="utf-8") as hf:
+              hf.write(textwrap.dedent(r'''
+          import json
+          import os
+          import random
+          import re
+          import time
+          import urllib.request
+
+          def get_cm_env(workspace: str) -> dict:
+              cache_dir = os.path.join(workspace, ".codemender_cache")
+              tmp_dir = os.path.join(cache_dir, "tmp")
+              os.makedirs(tmp_dir, exist_ok=True)
+              cm_env = dict(os.environ)
+              for secret_key in ("GITHUB_TOKEN", "GH_APP_KEY", "GCP_SA_KEY", "CUSTOM_GITHUB_TOKEN"):
+                  cm_env.pop(secret_key, None)
+              cm_env["XDG_CACHE_HOME"] = cache_dir
+              cm_env["TMPDIR"] = tmp_dir
+              cm_env["TEMP"] = tmp_dir
+              cm_env["TMP"] = tmp_dir
+              cm_env["PIP_CACHE_DIR"] = os.path.join(cache_dir, "pip")
+              return cm_env
+
+          def to_repo_relpath(raw_path: str, workspace: str) -> str:
               p = str(raw_path or "").strip()
               if not p:
                   return ""
@@ -830,6 +835,331 @@ jobs:
                   p = p[2:]
               return p
 
+          def update_finding_in_sticky_comment(
+              repo: str,
+              pr_number: str,
+              token: str,
+              worker_idx: int,
+              finding: dict,
+              status_cell_md: str,
+              patch_block_md: str = None,
+              min_sev: str = "MEDIUM",
+          ) -> None:
+              if not (repo and pr_number and token):
+                  return
+              fid = str(finding.get("finding_id") or finding.get("FindingID") or "")
+              if not fid:
+                  return
+              sev = str(finding.get("severity") or finding.get("Severity") or "MEDIUM").upper()
+              rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0, "INFORMATIONAL": 0}
+              threshold = rank.get(min_sev.upper(), 2)
+              v_status = str(finding.get("verified_status", "CONFIRMED"))
+              if v_status == "DISMISSED_FALSE_POSITIVE":
+                  status_tag = "⚪ Dismissed (FP)"
+              else:
+                  status_tag = "🚫 **BLOCKING**" if rank.get(sev, 2) >= threshold else "ℹ️ Advisory"
+              fpath = finding.get("file_path") or finding.get("FilePath") or "N/A"
+              line_no = finding.get("line_number") or finding.get("StartLine") or 1
+              title = finding.get("title") or finding.get("Title") or finding.get("VulnType") or fid
+
+              new_row = f"| `{sev}` | {status_tag} | `{fpath}:{line_no}` | **{title}** (`{fid[:8]}`) | {status_cell_md} <!-- cm-row:{fid} --> |"
+
+              headers = {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              }
+              marker = "<!-- codemender-security-summary -->"
+              comment_id = None
+              try:
+                  list_req = urllib.request.Request(
+                      f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments?per_page=100",
+                      headers=headers, method="GET"
+                  )
+                  with urllib.request.urlopen(list_req, timeout=15) as resp:
+                      for c in json.loads(resp.read().decode("utf-8")):
+                          if marker in str(c.get("body", "")):
+                              comment_id = c.get("id")
+                              break
+              except Exception as exc:
+                  print(f"Note locating sticky comment: {exc}")
+                  return
+              if not comment_id:
+                  return
+
+              comment_url = f"https://api.github.com/repos/{repo}/issues/comments/{comment_id}"
+              row_pattern = re.compile(rf"^\|[^\n]*<!-- cm-row:{re.escape(fid)} -->\s*\|$", re.MULTILINE)
+              patch_pattern = re.compile(rf"<!-- cm-patch:{re.escape(fid)} -->.*?<!-- /cm-patch:{re.escape(fid)} -->", re.DOTALL)
+              header_pattern = re.compile(r"<!-- cm-stage-header -->.*?<!-- /cm-stage-header -->", re.DOTALL)
+
+              for attempt in range(5):
+                  try:
+                      get_req = urllib.request.Request(comment_url, headers=headers, method="GET")
+                      with urllib.request.urlopen(get_req, timeout=15) as resp:
+                          current_body = json.loads(resp.read().decode("utf-8")).get("body", "")
+
+                      updated_body = row_pattern.sub(lambda _: new_row, current_body)
+                      if patch_block_md is not None:
+                          replacement_patch = f"<!-- cm-patch:{fid} -->\n{patch_block_md}\n<!-- /cm-patch:{fid} -->" if patch_block_md else f"<!-- cm-patch:{fid} --><!-- /cm-patch:{fid} -->"
+                          updated_body = patch_pattern.sub(lambda _: replacement_patch, updated_body)
+
+                      all_rows = re.findall(r"^\|[^\n]*<!-- cm-row:[^>]+ -->\s*\|$", updated_body, flags=re.MULTILINE)
+                      total_rows = len(all_rows)
+                      done_rows = sum(1 for r in all_rows if ("✅" in r or "⚪" in r or "⚠️" in r))
+                      if total_rows > 0:
+                          if done_rows >= total_rows:
+                              new_hdr = f"<!-- cm-stage-header -->\n### 🛡️ CodeMender Pre-Submit Security Report *(Stage 2 Complete: {done_rows}/{total_rows} Findings Processed)*\n<!-- /cm-stage-header -->"
+                          else:
+                              new_hdr = f"<!-- cm-stage-header -->\n### 🛡️ CodeMender Pre-Submit Security Report *(Stage 2 Running: {done_rows}/{total_rows} Findings Completed)*\n<!-- /cm-stage-header -->"
+                          updated_body = header_pattern.sub(lambda _: new_hdr, updated_body)
+
+                      patch_req = urllib.request.Request(
+                          comment_url,
+                          data=json.dumps({"body": updated_body}).encode("utf-8"),
+                          headers=headers,
+                          method="PATCH",
+                      )
+                      with urllib.request.urlopen(patch_req, timeout=15) as _:
+                          pass
+
+                      time.sleep(0.35 + 0.25 * (worker_idx % 4) + random.uniform(0.05, 0.2))
+                      verify_req = urllib.request.Request(comment_url, headers=headers, method="GET")
+                      with urllib.request.urlopen(verify_req, timeout=15) as v_resp:
+                          live_body = json.loads(v_resp.read().decode("utf-8")).get("body", "")
+                      if new_row in live_body:
+                          print(f"Updated sticky PR comment for finding {fid[:8]} (attempt {attempt + 1}).")
+                          return
+                  except Exception as exc:
+                      print(f"Retry {attempt + 1} updating sticky comment for {fid[:8]}: {exc}")
+                      time.sleep(0.5 * (attempt + 1))
+          ''').lstrip())
+
+          part_file = os.path.join(base_dir, f"partition_{worker_idx}.json")
+          partition = {"finding_ids": [], "findings": []}
+          if os.path.exists(part_file):
+              with open(part_file, "r", encoding="utf-8") as f:
+                  partition = json.load(f)
+
+          results_file = os.path.join(shard_dir, f"results_worker_{worker_idx}.json")
+          with open(results_file, "w", encoding="utf-8") as rf:
+              json.dump(partition.get("findings", []), rf, indent=2)
+          print(f"Worker {worker_idx} initialized with {len(partition.get('findings', []))} finding(s).")
+          EOF
+
+      - name: "Stage 2.1: Exploit Verification (`cm verify`)"
+        env:
+          WORKER_INDEX: ${{ matrix.worker_index }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
+          SKIP_VERIFY: ${{ inputs.skip_exploit_verification }}
+          SANDBOX_ENABLED: ${{ inputs.sandbox_enabled }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          workspace = os.path.abspath(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
+          worker_idx = int(os.environ.get("WORKER_INDEX", "0") or "0")
+          pr_number = os.environ.get("PR_NUMBER", "").strip()
+          repo = os.environ.get("REPO_FULL_NAME", "").strip()
+          token = os.environ.get("GITHUB_TOKEN", "").strip()
+          min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").strip().upper()
+          skip_verify = os.environ.get("SKIP_VERIFY", "false").lower() == "true"
+          sandbox_enabled = os.environ.get("SANDBOX_ENABLED", "true").lower() != "false"
+
+          shard_dir = os.path.join(workspace, ".codemender_transit", "shards", f"worker_{worker_idx}")
+          sys.path.insert(0, shard_dir)
+          from worker_helpers import get_cm_env, to_repo_relpath, update_finding_in_sticky_comment
+
+          cm_env = get_cm_env(workspace)
+          sandbox_flags = [] if sandbox_enabled else ["--unrestricted"]
+          results_file = os.path.join(shard_dir, f"results_worker_{worker_idx}.json")
+          with open(results_file, "r", encoding="utf-8") as rf:
+              findings = json.load(rf)
+
+          for finding in findings:
+              fid = str(finding.get("finding_id") or finding.get("FindingID") or finding.get("id") or "")
+              finding["file_path"] = to_repo_relpath(finding.get("file_path") or finding.get("FilePath") or "", workspace)
+              finding["line_number"] = int(finding.get("line_number") or finding.get("StartLine") or 1)
+
+              verified_status = "CONFIRMED"
+              if fid and not skip_verify:
+                  print(f"=== [Worker {worker_idx}] Running cm verify for {fid} ===")
+                  v_res = subprocess.run(
+                      ["cm", "verify", fid, "--yes", "--bypass-warning", *sandbox_flags],
+                      cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
+                  )
+                  print(v_res.stdout or "")
+                  if "DISMISSED" in (v_res.stdout or "").upper() or "FALSE_POSITIVE" in (v_res.stdout or "").upper():
+                      verified_status = "DISMISSED_FALSE_POSITIVE"
+
+              finding["verified_status"] = verified_status
+              if verified_status == "DISMISSED_FALSE_POSITIVE":
+                  status_msg = "⚪ **Dismissed (False Positive)** by `cm verify`"
+              else:
+                  status_msg = "🔍 **Exploit Confirmed** (`cm verify`) — 🔨 *Running `cm fix`...*"
+
+              update_finding_in_sticky_comment(
+                  repo=repo,
+                  pr_number=pr_number,
+                  token=token,
+                  worker_idx=worker_idx,
+                  finding=finding,
+                  status_cell_md=status_msg,
+                  min_sev=min_sev,
+              )
+
+          with open(results_file, "w", encoding="utf-8") as rf:
+              json.dump(findings, rf, indent=2)
+          EOF
+
+      - name: "Stage 2.2: Patch Synthesis (`cm fix`)"
+        env:
+          WORKER_INDEX: ${{ matrix.worker_index }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
+          SANDBOX_ENABLED: ${{ inputs.sandbox_enabled }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+          import sqlite3
+          import subprocess
+          import sys
+
+          workspace = os.path.abspath(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
+          worker_idx = int(os.environ.get("WORKER_INDEX", "0") or "0")
+          pr_number = os.environ.get("PR_NUMBER", "").strip()
+          repo = os.environ.get("REPO_FULL_NAME", "").strip()
+          token = os.environ.get("GITHUB_TOKEN", "").strip()
+          min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").strip().upper()
+          sandbox_enabled = os.environ.get("SANDBOX_ENABLED", "true").lower() != "false"
+
+          shard_dir = os.path.join(workspace, ".codemender_transit", "shards", f"worker_{worker_idx}")
+          sys.path.insert(0, shard_dir)
+          from worker_helpers import get_cm_env, to_repo_relpath, update_finding_in_sticky_comment
+
+          cm_env = get_cm_env(workspace)
+          sandbox_flags = [] if sandbox_enabled else ["--unrestricted"]
+          state_db_path = os.path.expanduser("~/.codemender/state.db")
+          results_file = os.path.join(shard_dir, f"results_worker_{worker_idx}.json")
+          with open(results_file, "r", encoding="utf-8") as rf:
+              findings = json.load(rf)
+
+          for finding in findings:
+              fid = str(finding.get("finding_id") or finding.get("FindingID") or finding.get("id") or "")
+              sev = str(finding.get("severity") or finding.get("Severity") or "MEDIUM").upper()
+              title = str(finding.get("title") or finding.get("Title") or finding.get("VulnType") or fid)
+              fpath = to_repo_relpath(finding.get("file_path") or finding.get("FilePath") or "", workspace)
+              line_no = int(finding.get("line_number") or finding.get("StartLine") or 1)
+              verified_status = str(finding.get("verified_status", "CONFIRMED"))
+
+              patch_diff = ""
+              if fid and verified_status != "DISMISSED_FALSE_POSITIVE":
+                  print(f"=== [Worker {worker_idx}] Running cm fix for {fid} ===")
+                  subprocess.run(["git", "checkout", "HEAD", "--", "."], cwd=workspace, check=False)
+                  fix_res = subprocess.run(
+                      ["cm", "fix", fid, "--yes", "--bypass-warning", *sandbox_flags],
+                      cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
+                  )
+                  print(fix_res.stdout or "")
+                  if fix_res.returncode != 0 and "Sandbox violations detected" in (fix_res.stdout or ""):
+                      print(f"Retrying cm fix for {fid} with --unrestricted inside isolated runner VM (scrubbed_env)...")
+                      fix_res = subprocess.run(
+                          ["cm", "fix", fid, "--unrestricted", "--yes", "--bypass-warning"],
+                          cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
+                      )
+                      print(fix_res.stdout or "")
+
+                  diff_res = subprocess.run(
+                      ["git", "diff", "HEAD", "--", fpath] if fpath else ["git", "diff", "HEAD"],
+                      cwd=workspace, capture_output=True, text=True, check=False
+                  )
+                  patch_diff = diff_res.stdout.strip()
+
+                  if not patch_diff and os.path.exists(state_db_path):
+                      try:
+                          conn = sqlite3.connect(state_db_path)
+                          cur = conn.cursor()
+                          cur.execute(
+                              "SELECT diff, target_file FROM patches WHERE finding_id LIKE ? ORDER BY rowid DESC LIMIT 1",
+                              (f"{fid}%",),
+                          )
+                          row = cur.fetchone()
+                          if row and row[0]:
+                              patch_diff = str(row[0]).strip()
+                              if not fpath and row[1]:
+                                  fpath = to_repo_relpath(row[1], workspace)
+                          conn.close()
+                      except Exception as db_exc:
+                          print(f"Note querying state.db patches table: {db_exc}")
+
+                  subprocess.run(["git", "checkout", "HEAD", "--", "."], cwd=workspace, check=False)
+
+              finding["file_path"] = fpath
+              finding["has_patch"] = bool(patch_diff)
+              finding["patch_diff"] = patch_diff[:4000] if patch_diff else ""
+
+              if verified_status != "DISMISSED_FALSE_POSITIVE":
+                  if patch_diff:
+                      status_msg = "🔨 **Patch Synthesized** (`cm fix`) — 💬 *Posting inline PR suggestion...*"
+                      patch_md = (
+                          f"<details><summary>💡 <b>Proposed Patch for [{sev}] {title}</b> (<code>{fpath}:{line_no}</code>)</summary>\n\n"
+                          f"```diff\n{finding['patch_diff']}\n```\n</details>"
+                      )
+                  else:
+                      status_msg = "⚠️ **Manual remediation required** (`cm fix` produced no auto-patch)"
+                      patch_md = ""
+                  update_finding_in_sticky_comment(
+                      repo=repo,
+                      pr_number=pr_number,
+                      token=token,
+                      worker_idx=worker_idx,
+                      finding=finding,
+                      status_cell_md=status_msg,
+                      patch_block_md=patch_md,
+                      min_sev=min_sev,
+                  )
+
+          with open(results_file, "w", encoding="utf-8") as rf:
+              json.dump(findings, rf, indent=2)
+          EOF
+
+      - name: "Stage 2.3: Post Inline PR Review Suggestions"
+        env:
+          WORKER_INDEX: ${{ matrix.worker_index }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          MIN_SEVERITY: ${{ inputs.min_blocking_severity }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+          import re
+          import sys
+          import urllib.request
+
+          workspace = os.path.abspath(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
+          worker_idx = int(os.environ.get("WORKER_INDEX", "0") or "0")
+          pr_number = os.environ.get("PR_NUMBER", "").strip()
+          target_sha = os.environ.get("TARGET_SHA", "").strip()
+          repo = os.environ.get("REPO_FULL_NAME", "").strip()
+          token = os.environ.get("GITHUB_TOKEN", "").strip()
+          min_sev = os.environ.get("MIN_SEVERITY", "MEDIUM").strip().upper()
+
+          shard_dir = os.path.join(workspace, ".codemender_transit", "shards", f"worker_{worker_idx}")
+          sys.path.insert(0, shard_dir)
+          from worker_helpers import to_repo_relpath, update_finding_in_sticky_comment
+
           def parse_diff_hunks_to_review_comments(diff_text: str, default_relpath: str, header_md: str) -> list[dict]:
               """Parses unified diff hunks into GitHub Pull Request Review suggestion comments."""
               comments = []
@@ -840,7 +1170,7 @@ jobs:
               while i < len(lines):
                   line = lines[i]
                   if line.startswith("+++ b/"):
-                      current_file = to_repo_relpath(line[6:].strip())
+                      current_file = to_repo_relpath(line[6:].strip(), workspace)
                       i += 1
                       continue
                   m = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
@@ -896,78 +1226,21 @@ jobs:
                   comments.append(c_obj)
               return comments
 
-          part_file = os.path.join(base_dir, f"partition_{worker_idx}.json")
-          partition = {"finding_ids": [], "findings": []}
-          if os.path.exists(part_file):
-              with open(part_file, "r", encoding="utf-8") as f:
-                  partition = json.load(f)
+          results_file = os.path.join(shard_dir, f"results_worker_{worker_idx}.json")
+          with open(results_file, "r", encoding="utf-8") as rf:
+              findings = json.load(rf)
 
-          sandbox_flags = [] if sandbox_enabled else ["--unrestricted"]
-          state_db_path = os.path.join(cm_dir, "state.db")
-          results = []
-          for finding in partition.get("findings", []):
+          for finding in findings:
               fid = str(finding.get("finding_id") or finding.get("FindingID") or finding.get("id") or "")
               sev = str(finding.get("severity") or finding.get("Severity") or "MEDIUM").upper()
               title = str(finding.get("title") or finding.get("Title") or finding.get("VulnType") or fid)
-              fpath = to_repo_relpath(finding.get("file_path") or finding.get("FilePath") or "")
+              fpath = to_repo_relpath(finding.get("file_path") or finding.get("FilePath") or "", workspace)
               line_no = int(finding.get("line_number") or finding.get("StartLine") or 1)
               desc = str(finding.get("description") or finding.get("Description") or "")
+              verified_status = str(finding.get("verified_status", "CONFIRMED"))
+              patch_diff = str(finding.get("patch_diff") or "")
 
-              verified_status = "CONFIRMED"
-              if fid and not skip_verify:
-                  v_res = subprocess.run(
-                      ["cm", "verify", fid, "--yes", "--bypass-warning", *sandbox_flags],
-                      cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
-                  )
-                  print(v_res.stdout or "")
-                  if "DISMISSED" in (v_res.stdout or "").upper() or "FALSE_POSITIVE" in (v_res.stdout or "").upper():
-                      verified_status = "DISMISSED_FALSE_POSITIVE"
-
-              patch_diff = ""
-              if fid and verified_status != "DISMISSED_FALSE_POSITIVE":
-                  subprocess.run(["git", "checkout", "HEAD", "--", "."], cwd=workspace, check=False)
-                  fix_res = subprocess.run(
-                      ["cm", "fix", fid, "--yes", "--bypass-warning", *sandbox_flags],
-                      cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
-                  )
-                  print(fix_res.stdout or "")
-                  # If sbox blocked ~/.codemender/config.yaml read inside child tool, retry with scrubbed_env
-                  if fix_res.returncode != 0 and "Sandbox violations detected" in (fix_res.stdout or ""):
-                      print(f"Retrying cm fix for {fid} with --unrestricted inside isolated runner VM (scrubbed_env)...")
-                      fix_res = subprocess.run(
-                          ["cm", "fix", fid, "--unrestricted", "--yes", "--bypass-warning"],
-                          cwd=workspace, env=cm_env, capture_output=True, text=True, check=False
-                      )
-                      print(fix_res.stdout or "")
-
-                  # 1. Extract diff from working tree (excluding .codemender_cache)
-                  diff_res = subprocess.run(
-                      ["git", "diff", "HEAD", "--", fpath] if fpath else ["git", "diff", "HEAD"],
-                      cwd=workspace, capture_output=True, text=True, check=False
-                  )
-                  patch_diff = diff_res.stdout.strip()
-
-                  # 2. Fallback: extract saved patch from ~/.codemender/state.db patches table if working tree was reset
-                  if not patch_diff and os.path.exists(state_db_path):
-                      try:
-                          conn = sqlite3.connect(state_db_path)
-                          cur = conn.cursor()
-                          cur.execute(
-                              "SELECT diff, target_file FROM patches WHERE finding_id LIKE ? ORDER BY rowid DESC LIMIT 1",
-                              (f"{fid}%",),
-                          )
-                          row = cur.fetchone()
-                          if row and row[0]:
-                              patch_diff = str(row[0]).strip()
-                              if not fpath and row[1]:
-                                  fpath = to_repo_relpath(row[1])
-                          conn.close()
-                      except Exception as db_exc:
-                          print(f"Note querying state.db patches table: {db_exc}")
-
-                  subprocess.run(["git", "checkout", "HEAD", "--", "."], cwd=workspace, check=False)
-
-              # Post inline PR Review Suggestion (`POST /repos/{repo}/pulls/{pr_number}/reviews`)
+              review_url = ""
               if pr_number and repo and token and fpath and verified_status != "DISMISSED_FALSE_POSITIVE":
                   header_md = (
                       f"### 🛡️ CodeMender Security Finding (`{sev}`)\n"
@@ -1005,27 +1278,38 @@ jobs:
                   )
                   try:
                       with urllib.request.urlopen(req, timeout=20) as resp:
-                          print(f"Successfully posted inline PR review suggestion on {fpath} (HTTP {resp.status}).")
+                          resp_json = json.loads(resp.read().decode("utf-8"))
+                          review_url = str(resp_json.get("html_url") or "")
+                          print(f"Successfully posted inline PR review suggestion on {fpath} (HTTP {resp.status}, url={review_url}).")
                   except Exception as exc:
                       print(f"Note: inline PR review fallback ({fpath}:{line_no}): {exc}")
 
-              finding_copy = dict(finding)
-              finding_copy["file_path"] = fpath
-              finding_copy["line_number"] = line_no
-              finding_copy["verified_status"] = verified_status
-              finding_copy["has_patch"] = bool(patch_diff)
-              finding_copy["patch_diff"] = patch_diff[:4000] if patch_diff else ""
-              results.append(finding_copy)
+              finding["review_url"] = review_url
+              if verified_status != "DISMISSED_FALSE_POSITIVE":
+                  if patch_diff:
+                      link_md = f"[Inline `Commit suggestion` posted]({review_url})" if review_url else "see inline `Commit suggestion` / diff below"
+                      final_status_md = f"✅ **Patch Ready** ({link_md})"
+                  else:
+                      final_status_md = "⚠️ **Manual remediation required**"
+                  update_finding_in_sticky_comment(
+                      repo=repo,
+                      pr_number=pr_number,
+                      token=token,
+                      worker_idx=worker_idx,
+                      finding=finding,
+                      status_cell_md=final_status_md,
+                      min_sev=min_sev,
+                  )
 
-          with open(os.path.join(shard_dir, "results.json"), "w", encoding="utf-8") as rf:
-              json.dump(results, rf, indent=2)
+          with open(results_file, "w", encoding="utf-8") as rf:
+              json.dump(findings, rf, indent=2)
           EOF
 
       - name: Upload Worker Shard Artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: worker-shard-${{ matrix.worker_index }}
-          path: .codemender_transit/shards/worker_${{ matrix.worker_index }}/
+          path: .codemender_transit/shards/worker_${{ matrix.worker_index }}/results_worker_${{ matrix.worker_index }}.json
           retention-days: ${{ inputs.intermediate_artifact_retention_days }}
           overwrite: true
           if-no-files-found: ignore
@@ -1085,7 +1369,7 @@ jobs:
         with:
           pattern: worker-shard-*
           path: .codemender_transit/shards/
-          merge-multiple: true
+          merge-multiple: false
 
       - name: Update Sticky PR Comment with Verified Results & Auto-Fix Patches
         env:
@@ -1122,15 +1406,28 @@ jobs:
               with open("report.html", "w", encoding="utf-8") as hf:
                   hf.write(html_res.stdout)
 
-          findings = []
-          for shard_file in sorted(glob.glob(os.path.join(workspace, ".codemender_transit", "shards", "**", "results.json"), recursive=True)):
+          # Load canonical list of all active findings from Stage 1 so no finding is ever dropped
+          base_findings = []
+          af_path = os.path.join(base_dir, "active_findings.json")
+          if os.path.exists(af_path):
+              with open(af_path, "r", encoding="utf-8") as f:
+                  base_findings = json.load(f)
+
+          shard_by_id = {}
+          for shard_file in sorted(glob.glob(os.path.join(workspace, ".codemender_transit", "shards", "**", "results_worker_*.json"), recursive=True)):
               with open(shard_file, "r", encoding="utf-8") as f:
-                  findings.extend(json.load(f))
-          if not findings:
-              af_path = os.path.join(base_dir, "active_findings.json")
-              if os.path.exists(af_path):
-                  with open(af_path, "r", encoding="utf-8") as f:
-                      findings = json.load(f)
+                  for item in json.load(f):
+                      fid = str(item.get("finding_id") or item.get("FindingID") or "")
+                      if fid:
+                          shard_by_id[fid] = item
+
+          findings = []
+          if base_findings:
+              for bf in base_findings:
+                  fid = str(bf.get("finding_id") or bf.get("FindingID") or "")
+                  findings.append(shard_by_id.get(fid, bf))
+          else:
+              findings = list(shard_by_id.values())
 
           with open("report.json", "w", encoding="utf-8") as rf:
               json.dump({"findings": findings}, rf, indent=2)
@@ -1183,29 +1480,45 @@ jobs:
           if pr_number and repo and token:
               rows = []
               patch_sections = []
+              details_blocks = []
               for sev, item in confirmed_blocking + advisory_or_dismissed:
                   fid = str(item.get("finding_id") or item.get("FindingID") or "")
                   v_status = str(item.get("verified_status", "CONFIRMED"))
+                  review_url = str(item.get("review_url") or "")
                   if v_status == "DISMISSED_FALSE_POSITIVE":
                       status_tag = "⚪ Dismissed (FP)"
-                      fix_col = "Dismissed by `cm verify`"
+                      fix_col = "⚪ **Dismissed (False Positive)** by `cm verify`"
                   else:
                       status_tag = "🚫 **BLOCKING**" if rank.get(sev, 2) >= threshold else "ℹ️ Advisory"
-                      fix_col = "✅ **Patch Ready** (see inline `Commit suggestion` / below)" if item.get("has_patch") else "⚠️ Manual remediation required"
+                      if item.get("has_patch"):
+                          link_md = f"[Inline `Commit suggestion` posted]({review_url})" if review_url else "see inline `Commit suggestion` / diff below"
+                          fix_col = f"✅ **Patch Ready** ({link_md})"
+                      else:
+                          fix_col = "⚠️ **Manual remediation required**"
                   fpath = item.get("file_path") or item.get("FilePath") or "N/A"
                   line_no = item.get("line_number") or item.get("StartLine") or 1
                   title = item.get("title") or item.get("Title") or item.get("VulnType") or "Finding"
-                  rows.append(f"| `{sev}` | {status_tag} | `{fpath}:{line_no}` | **{title}** (`{fid[:8]}`) | {fix_col} |")
+                  desc = item.get("description") or item.get("Description") or ""
+                  rows.append(f"| `{sev}` | {status_tag} | `{fpath}:{line_no}` | **{title}** (`{fid[:8]}`) | {fix_col} <!-- cm-row:{fid} --> |")
                   if item.get("patch_diff"):
                       patch_sections.append(
+                          f"<!-- cm-patch:{fid} -->\n"
                           f"<details><summary>💡 <b>Proposed Patch for [{sev}] {title}</b> (<code>{fpath}:{line_no}</code>)</summary>\n\n"
-                          f"```diff\n{item['patch_diff']}\n```\n</details>"
+                          f"```diff\n{item['patch_diff']}\n```\n</details>\n"
+                          f"<!-- /cm-patch:{fid} -->"
                       )
+                  else:
+                      patch_sections.append(f"<!-- cm-patch:{fid} --><!-- /cm-patch:{fid} -->")
+                  if desc:
+                      details_blocks.append(f"<details><summary>🔎 <b>[{sev}] {title}</b> (<code>{fpath}:{line_no}</code>)</summary>\n\n{desc}\n</details>")
 
               marker = "<!-- codemender-security-summary -->"
+              total_count = len(confirmed_blocking) + len(advisory_or_dismissed)
               updated_body = "\n".join([
                   marker,
-                  "### 🛡️ CodeMender Pre-Submit Security Report *(Stage 2 Complete: Verified & Patches Ready)*",
+                  "<!-- cm-stage-header -->",
+                  f"### 🛡️ CodeMender Pre-Submit Security Report *(Stage 2 Complete: {total_count}/{total_count} Findings Verified & Patches Ready)*",
+                  "<!-- /cm-stage-header -->",
                   "",
                   f"**Gate Status:** {'❌ **BLOCKED** — `' + str(blocking_count) + '` confirmed vulnerability(ies) `>= ' + min_sev + '` must be resolved before merging.' if gate_status == 'failure' else '✅ **PASSED** — `0` confirmed vulnerabilities `>= ' + min_sev + '`.'}",
                   "",
@@ -1214,6 +1527,8 @@ jobs:
                   *rows,
                   "",
                   *patch_sections,
+                  "",
+                  *details_blocks,
               ])
 
               headers = {
