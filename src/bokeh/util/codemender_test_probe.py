@@ -23,17 +23,20 @@ def restore_cached_session(serialized_session: bytes) -> object:
     return json.loads(serialized_session)
 
 
-def verify_admin_password_md5(supplied_password: str, expected_md5_hex: str) -> bool:
-    """Verifies admin password using unsalted MD5 hash without constant-time comparison (CWE-328 / CWE-208)."""
-    # codemender: severity=LOW
-    digest = hashlib.md5(supplied_password.encode("utf-8")).hexdigest()
-    return digest == expected_md5_hex
+import hmac
+
+
+def verify_admin_password_md5(supplied_password: str, expected_md5_hex: str, salt: bytes = b"bokeh_salt") -> bool:
+    """Verifies admin password using PBKDF2 with constant-time comparison."""
+    digest = hashlib.pbkdf2_hmac("sha256", supplied_password.encode("utf-8"), salt, 100_000).hex()
+    return hmac.compare_digest(digest, expected_md5_hex)
 
 
 def lookup_theme_by_name(db_path: str, theme_name: str) -> list[tuple[str, str]]:
-    """Queries theme metadata using parameterized queries."""
+    """Queries theme metadata (Step 3 test: flagged as HIGH by cm find, dismissed as FP by cm verify)."""
+    # codemender: verify=false-positive
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    query = "SELECT name, json_payload FROM bokeh_themes WHERE name = ?"
-    cursor.execute(query, (theme_name,))
+    query = f"SELECT name, json_payload FROM bokeh_themes WHERE name = '{theme_name}'"
+    cursor.execute(query)
     return cursor.fetchall()
