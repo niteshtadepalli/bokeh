@@ -94,6 +94,8 @@ class OrchestratorConfig:
   is_fork_pr: bool = False
   pr_number: Optional[int] = None
   fail_on_findings: bool = False
+  min_blocking_severity: str = "MEDIUM"
+  diff_scoped_pr_scan: bool = True
   pr_remediation_mode: str = PR_MODE_REVIEW_SUGGESTION
 
   # Scheduled / Branch Scan Parameters
@@ -113,25 +115,42 @@ class OrchestratorConfig:
     # 1. Parse CLI Version and Model Hierarchies
     cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
     model = (os.environ.get("CODEMENDER_MODEL") or "").strip() or None
-    find_model = (os.environ.get("CODEMENDER_FIND_MODEL") or "").strip() or model
-    verify_model = (os.environ.get("CODEMENDER_VERIFY_MODEL") or "").strip() or model
-    fix_model = (os.environ.get("CODEMENDER_FIX_MODEL") or "").strip() or model
+    find_model = (
+        os.environ.get("CODEMENDER_FIND_MODEL")
+        or os.environ.get("FIND_MODEL")
+        or ""
+    ).strip() or model
+    verify_model = (
+        os.environ.get("CODEMENDER_VERIFY_MODEL")
+        or os.environ.get("VERIFY_MODEL")
+        or ""
+    ).strip() or model
+    fix_model = (
+        os.environ.get("CODEMENDER_FIX_MODEL")
+        or os.environ.get("FIX_MODEL")
+        or ""
+    ).strip() or model
     skip_exploit = (
-        os.environ.get("CODEMENDER_SKIP_EXPLOIT_VERIFICATION", "false").lower()
-        == "true"
-    )
+        os.environ.get("CODEMENDER_SKIP_EXPLOIT_VERIFICATION")
+        or os.environ.get("SKIP_EXPLOIT_VERIFICATION")
+        or "false"
+    ).lower() == "true"
     skip_verify = (
         os.environ.get("CODEMENDER_SKIP_VERIFY", "true").strip().lower()
         in ("true", "1", "yes")
     )
 
     # 2. Parse Workspace Directories and Runner Step Outputs
-    workspace_dir = os.environ.get("WORKSPACE_DIR", os.getcwd())
+    workspace_dir = (
+        os.environ.get("WORKSPACE_DIR")
+        or os.environ.get("GITHUB_WORKSPACE")
+        or os.getcwd()
+    )
     github_output = os.environ.get("GITHUB_OUTPUT")
     github_step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
 
     # 3. Parse Storage Mode and Storage Identifiers
-    scan_id = os.environ.get("CODEMENDER_SCAN_ID")
+    scan_id = os.environ.get("CODEMENDER_SCAN_ID") or os.environ.get("SCAN_ID")
     gcs_bucket = os.environ.get("CODEMENDER_GCS_BUCKET")
     report_bucket = os.environ.get("CODEMENDER_REPORT_BUCKET") or gcs_bucket
 
@@ -151,8 +170,10 @@ class OrchestratorConfig:
       intermediate_retention_days = 3
 
     # 4. Parse Worker Task Identifiers and Manifest Signed URLs
-    worker_idx_env = os.environ.get("CODEMENDER_WORKER_INDEX") or os.environ.get(
-        "CLOUD_RUN_TASK_INDEX"
+    worker_idx_env = (
+        os.environ.get("CODEMENDER_WORKER_INDEX")
+        or os.environ.get("WORKER_INDEX")
+        or os.environ.get("CLOUD_RUN_TASK_INDEX")
     )
     worker_index = int(worker_idx_env) if worker_idx_env is not None and str(worker_idx_env).isdigit() else None
 
@@ -161,8 +182,10 @@ class OrchestratorConfig:
     )
     total_workers = int(total_workers_env) if total_workers_env is not None and str(total_workers_env).isdigit() else None
 
-    target_sha = os.environ.get("CODEMENDER_TARGET_SHA") or os.environ.get(
-        "GITHUB_SHA"
+    target_sha = (
+        os.environ.get("CODEMENDER_TARGET_SHA")
+        or os.environ.get("TARGET_SHA")
+        or os.environ.get("GITHUB_SHA")
     )
     base_workspace_url = os.environ.get("CODEMENDER_BASE_WORKSPACE_URL")
     partition_urls = os.environ.get("CODEMENDER_PARTITION_URLS")
@@ -174,12 +197,24 @@ class OrchestratorConfig:
     github_token = (
         os.environ.get("GITHUB_APP_TOKEN")
         or os.environ.get("GITHUB_PAT")
+        or os.environ.get("GH_TOKEN")
         or os.environ.get("GITHUB_TOKEN")
     )
-    build_command = os.environ.get("CODEMENDER_BUILD_COMMAND")
-    scan_target = os.environ.get("CODEMENDER_SCAN_TARGET", ".")
+    build_command = os.environ.get("CODEMENDER_BUILD_COMMAND") or os.environ.get(
+        "BUILD_COMMAND"
+    )
+    scan_target = (
+        os.environ.get("CODEMENDER_SCAN_TARGET")
+        or os.environ.get("SCAN_TARGET")
+        or os.environ.get("DEFAULT_SCAN_TARGET")
+        or "."
+    )
     try:
-      max_tasks = int(os.environ.get("CODEMENDER_MAX_TASKS", "20"))
+      max_tasks = int(
+          os.environ.get("CODEMENDER_MAX_TASKS")
+          or os.environ.get("MAX_TASKS")
+          or "20"
+      )
     except ValueError:
       max_tasks = 20
 
@@ -188,15 +223,23 @@ class OrchestratorConfig:
     )
 
     # 6. Parse Pull Request Detection Parameters
-    is_pr_env = os.environ.get("CODEMENDER_IS_PR_SCAN")
+    is_pr_env = os.environ.get("CODEMENDER_IS_PR_SCAN") or os.environ.get("IS_PR")
     if is_pr_env is not None and is_pr_env.strip():
       is_pr_scan = is_pr_env.strip().lower() == "true"
     else:
       is_pr_scan = (
           os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
-          or bool(os.environ.get("CODEMENDER_PR_BASE_REF") or os.environ.get("GITHUB_BASE_REF"))
+          or bool(
+              os.environ.get("CODEMENDER_PR_BASE_REF")
+              or os.environ.get("BASE_REF")
+              or os.environ.get("GITHUB_BASE_REF")
+          )
       )
-    pr_base_ref = os.environ.get("CODEMENDER_PR_BASE_REF") or os.environ.get("GITHUB_BASE_REF")
+    pr_base_ref = (
+        os.environ.get("CODEMENDER_PR_BASE_REF")
+        or os.environ.get("BASE_REF")
+        or os.environ.get("GITHUB_BASE_REF")
+    )
     if pr_base_ref:
       pr_base_ref = pr_base_ref.strip()
     pr_head_ref = os.environ.get("CODEMENDER_PR_HEAD_REF") or os.environ.get("GITHUB_HEAD_REF")
@@ -206,7 +249,11 @@ class OrchestratorConfig:
         os.environ.get("CODEMENDER_IS_FORK_PR", "").lower() == "true"
     )
 
-    pr_num_env = os.environ.get("CODEMENDER_PR_NUMBER") or os.environ.get("GITHUB_PR_NUMBER")
+    pr_num_env = (
+        os.environ.get("CODEMENDER_PR_NUMBER")
+        or os.environ.get("PR_NUMBER")
+        or os.environ.get("GITHUB_PR_NUMBER")
+    )
     pr_number = None
     if pr_num_env:
       try:
@@ -214,7 +261,12 @@ class OrchestratorConfig:
       except ValueError:
         pr_number = None
 
-    fail_on_findings_env = os.environ.get("CODEMENDER_FAIL_ON_FINDINGS")
+    fail_on_findings_env = (
+        os.environ.get("BLOCK_PR_MERGE")
+        or os.environ.get("CODEMENDER_BLOCK_PR_MERGE")
+        or os.environ.get("FAIL_ON_FINDINGS")
+        or os.environ.get("CODEMENDER_FAIL_ON_FINDINGS")
+    )
     if fail_on_findings_env is not None and fail_on_findings_env.strip():
       fail_on_findings = fail_on_findings_env.strip().lower() in (
           "true",
@@ -226,6 +278,19 @@ class OrchestratorConfig:
       fail_on_findings = True
     else:
       fail_on_findings = False
+
+    min_blocking_severity = (
+        os.environ.get("CODEMENDER_MIN_BLOCKING_SEVERITY")
+        or os.environ.get("MIN_BLOCKING_SEVERITY")
+        or os.environ.get("MIN_SEVERITY")
+        or "MEDIUM"
+    ).strip().upper()
+    diff_scoped_env = (
+        os.environ.get("CODEMENDER_DIFF_SCOPED_PR_SCAN")
+        or os.environ.get("DIFF_SCOPED")
+        or "true"
+    ).strip().lower()
+    diff_scoped_pr_scan = diff_scoped_env not in ("false", "0", "no", "off")
 
     # Parse PR remediation routing mode, falling back to the default when unset
     # or when an unrecognized value is supplied.
@@ -245,7 +310,9 @@ class OrchestratorConfig:
     )
 
     # 7. Parse Sandbox and Cleanup Port Configurations
-    sandbox_env = os.environ.get("CODEMENDER_SANDBOX_ENABLED")
+    sandbox_env = os.environ.get("CODEMENDER_SANDBOX_ENABLED") or os.environ.get(
+        "SANDBOX_ENABLED"
+    )
     if sandbox_env is not None and sandbox_env.strip():
       sandbox_enabled = sandbox_env.strip().lower() not in (
           "false",
@@ -330,6 +397,8 @@ class OrchestratorConfig:
         is_fork_pr=is_fork_pr,
         pr_number=pr_number,
         fail_on_findings=fail_on_findings,
+        min_blocking_severity=min_blocking_severity,
+        diff_scoped_pr_scan=diff_scoped_pr_scan,
         pr_remediation_mode=pr_remediation_mode,
         # Scheduled / branch scan parameters
         target_branch=target_branch,

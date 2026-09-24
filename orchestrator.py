@@ -24,7 +24,10 @@ import logging
 import os
 import sys
 
+from codemender_agent.config import OrchestratorConfig
 from codemender_agent.runners.aggregate import run_aggregate_pipeline
+from codemender_agent.runners.gate import resolve_pr_diff_targets
+from codemender_agent.runners.gate import run_security_gate_pipeline
 from codemender_agent.runners.scan import run_scan_pipeline
 from codemender_agent.runners.sequential import run_sequential_pipeline
 from codemender_agent.runners.worker import run_worker_pipeline
@@ -43,8 +46,20 @@ def main() -> None:
 
   if run_mode == "sequential":
     run_sequential_pipeline()
+  elif run_mode == "preflight":
+    cfg = OrchestratorConfig.from_env()
+    resolve_pr_diff_targets(
+        workspace_dir=cfg.workspace_dir,
+        is_pr=cfg.is_pr_scan,
+        diff_scoped=cfg.diff_scoped_pr_scan,
+        base_ref=cfg.pr_base_ref or "",
+        default_scan_target=cfg.scan_target,
+        github_output=cfg.github_output or "",
+    )
   elif run_mode == "scan":
     run_scan_pipeline()
+  elif run_mode in ("gate", "security_gate"):
+    run_security_gate_pipeline()
   elif run_mode == "worker":
     run_worker_pipeline()
   elif run_mode == "aggregate":
