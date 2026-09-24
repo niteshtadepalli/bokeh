@@ -893,6 +893,7 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
   repo_dir = os.path.join(workspace_dir, repo_name)
   ctx.repository = f"{owner}/{repo_name}"
+  ctx.repo_dir = repo_dir
 
   # 3. Synchronize repository and record the target commit SHA
   target_sha = _sync_repository(
@@ -926,6 +927,21 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   # Capture the resolved version so analytics can correlate finding rates
   # against scanner upgrades.
   ctx.cm_version = log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
+  # The model columns have to name the model that actually ran. With no
+  # override configured the scan uses the scanner's own built-in default, so
+  # it is resolved here rather than left NULL -- otherwise every unoverridden
+  # run, which is most of them, drops out of model comparisons entirely. The
+  # lookup is cached and is repeated by the scan itself below, so this costs
+  # nothing beyond the first call; it is still gated on telemetry being
+  # configured so the failure-guard path stays cheap, and guarded so telemetry
+  # can never be the thing that fails a scan.
+  if bq_telemetry.telemetry_enabled():
+    try:
+      ctx.apply_default_model(
+          get_cm_default_model(cm_binary, env=scrubbed_env, cwd=repo_dir)
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Could not resolve the default model for telemetry: %s", e)
   _init_codemender(repo_dir, scrubbed_env, cm_binary, config=config)
 
   # 5. Parse scan targets (normalized to absolute paths to prevent sandbox mount errors)

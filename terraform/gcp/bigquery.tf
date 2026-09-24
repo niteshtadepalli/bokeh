@@ -153,25 +153,25 @@ resource "google_bigquery_table" "scan_runs" {
       name        = "cm_version"
       type        = "STRING"
       mode        = "NULLABLE"
-      description = "Version string of the CodeMender 'cm' scanner binary used. Useful for correlating shifts in finding counts against scanner upgrades."
+      description = "Version of the CodeMender 'cm' scanner binary used, stored as the bare version number (e.g. '0.9.0') so releases group cleanly. Useful for correlating shifts in finding counts against scanner upgrades. Falls back to the binary's raw version banner if no version number could be parsed from it."
     },
     {
       name        = "find_model"
       type        = "STRING"
       mode        = "NULLABLE"
-      description = "LLM model used for the vulnerability discovery (find) phase. NULL means the scanner's built-in default was used."
+      description = "LLM model actually used for the vulnerability discovery (find) phase: the explicitly configured model when one was set, otherwise the scanner's built-in default detected at run time. Lines up with token_totals.model for the same run; if the default could not be detected, the same placeholder used for token accounting is recorded here rather than a real model name."
     },
     {
       name        = "verify_model"
       type        = "STRING"
       mode        = "NULLABLE"
-      description = "LLM model used for the exploit verification phase. NULL means the scanner's built-in default was used."
+      description = "LLM model actually used for the exploit verification phase: the explicitly configured model when one was set, otherwise the scanner's built-in default detected at run time. Lines up with token_totals.model for the same run; if the default could not be detected, the same placeholder used for token accounting is recorded here rather than a real model name."
     },
     {
       name        = "fix_model"
       type        = "STRING"
       mode        = "NULLABLE"
-      description = "LLM model used for the patch generation (fix) phase. NULL means the scanner's built-in default was used."
+      description = "LLM model actually used for the patch generation (fix) phase: the explicitly configured model when one was set, otherwise the scanner's built-in default detected at run time. Lines up with token_totals.model for the same run; if the default could not be detected, the same placeholder used for token accounting is recorded here rather than a real model name."
     },
     {
       name        = "total_findings_count"

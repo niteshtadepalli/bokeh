@@ -55,6 +55,8 @@ import sqlite3
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from codemender_agent.vcs.git import normalize_repo_relative_path
+
 logger = logging.getLogger("codemender-orchestrator")
 
 # --- Environment configuration keys -----------------------------------------
@@ -127,6 +129,30 @@ _FIXED_STATUSES = frozenset({"FIXED", "REMEDIATED", "PATCHED"})
 _FAILED_FIX_STATUSES = frozenset({"FIX_FAILED", "PR_CREATION_FAILED", "PATCH_FAILED"})
 
 _CWE_PATTERN = re.compile(r"(CWE-\d+)", re.IGNORECASE)
+
+# Matches a `cm --version` banner token that is *entirely* a dotted version
+# number, optionally `v`-prefixed and optionally carrying a pre-release or
+# build suffix. The banner text around the number is owned by the external
+# `cm` binary and is free to change between releases, so nothing about the
+# surrounding words is assumed; but the match is anchored to a whole token
+# rather than searched for anywhere in the string, because a loose search
+# happily picks a version out of the middle of an unrelated word (a toolchain
+# stamp such as `go1.24.2` yields `24.2`) and silently records a number the
+# scanner never had.
+_VERSION_TOKEN_PATTERN = re.compile(
+    r"^v?(\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.\-+]*)?)$"
+)
+
+# Banners separate their parts with whitespace or a slash (`cm/1.2.3`).
+_VERSION_SEPARATORS = re.compile(r"[\s/]+")
+
+# Punctuation a version token may be wrapped in, e.g. `(1.2.3)` or `1.2.3,`.
+_VERSION_TOKEN_PUNCTUATION = "()[]{}<>,;:.'\"`"
+
+# Redundant path separators, which would otherwise split one file into two
+# distinct values in the warehouse.
+_REPEATED_SLASHES = re.compile(r"/{2,}")
+
 _TRUTHY = frozenset({"true", "1", "yes", "on"})
 
 # --- Streaming insert safety limits -----------------------------------------
@@ -213,6 +239,65 @@ def extract_cwe_id(*candidates: Optional[str]) -> Optional[str]:
   return None
 
 
+def normalize_cm_version(raw_version: Optional[str]) -> Optional[str]:
+  """Reduces a `cm --version` banner to the bare version number.
+
+  The binary reports something like `cm version 1.2.3`, which groups badly in
+  analytics: any future change to the surrounding banner text would fork one
+  release into two distinct values. The first banner token that is *entirely*
+  a version number is taken, so a version embedded in an unrelated word -- a
+  toolchain stamp such as `go1.24.2` -- cannot be mistaken for the scanner's
+  own.
+
+  A banner carrying no recognisable version number is returned unchanged
+  rather than discarded -- an unexpected string is still more useful for
+  diagnosing a bad deployment than a NULL.
+  """
+  text = _as_str(raw_version)
+  if text is None:
+    return None
+  for token in _VERSION_SEPARATORS.split(text):
+    match = _VERSION_TOKEN_PATTERN.match(
+        token.strip(_VERSION_TOKEN_PUNCTUATION)
+    )
+    if match:
+      return match.group(1)
+  return text
+
+
+def repo_relative_path(
+    raw_path: Any, repo_dir: Optional[str] = None
+) -> Optional[str]:
+  """Coerces a finding's file path to a repository-relative path.
+
+  Findings come out of `state.db` with whatever path the scanner happened to
+  see, which inside a container is an absolute path under the checkout mount
+  (`/workspace/<repo>/src/...`). Such paths neither join across runs nor mean
+  anything to a reader, so they are rewritten relative to the repository root.
+
+  When the repository root is unknown -- or the path simply does not live
+  under it -- the original value is preserved. Stripping only the filesystem
+  root would yield a path that still joins with nothing while no longer being
+  recognisably absolute, which is strictly worse than leaving it alone.
+  """
+  text = _as_str(raw_path)
+  if text is None:
+    return None
+  try:
+    normalized = normalize_repo_relative_path(text, repo_dir)
+  except Exception:  # pylint: disable=broad-exception-caught
+    # Path normalization is cosmetic; a surprising input must not cost the
+    # row the rest of its fields.
+    return text
+  if not normalized:
+    return text
+  if text.startswith("/") and normalized == text.lstrip("/"):
+    return text
+  # A path that survived normalization may still carry redundant separators
+  # (`src//a.py`), which would group as a distinct file from `src/a.py`.
+  return _REPEATED_SLASHES.sub("/", normalized)
+
+
 # --- Configuration resolution -----------------------------------------------
 
 
@@ -284,6 +369,11 @@ class ScanRunContext:
   execution_url: Optional[str] = None
   token_totals: Optional[Dict[str, Dict[str, Any]]] = None
 
+  # Absolute path of the checkout this run scanned. Not itself exported; it is
+  # the reference point that turns the container-absolute paths recorded in
+  # `state.db` into repository-relative paths that join across runs.
+  repo_dir: Optional[str] = None
+
   # Wall-clock anchor for duration_seconds. Defaults to object construction,
   # which the runners perform as their very first statement.
   started_monotonic: float = dataclasses.field(default_factory=time.monotonic)
@@ -316,6 +406,28 @@ class ScanRunContext:
     self.verify_model = self.verify_model or getattr(config, "verify_model", None)
     self.fix_model = self.fix_model or getattr(config, "fix_model", None)
     self.execution_url = self.execution_url or getattr(config, "execution_url", None)
+    return self
+
+  def apply_default_model(self, default_model: Optional[str]) -> "ScanRunContext":
+    """Backfills the model columns with the scanner's resolved default model.
+
+    These columns answer "which model produced these findings?", so they have
+    to record the model that actually ran. An explicit per-command or global
+    override always wins; when none was set the run silently used whatever
+    default the scanner binary resolved at startup, and leaving the columns
+    NULL in that case makes every unoverridden run invisible to model
+    comparisons -- which is the majority of runs.
+
+    The default is supplied by the caller rather than resolved here so this
+    module stays free of any knowledge of the scanner CLI, and so no
+    subprocess is ever spawned on behalf of a disabled exporter.
+    """
+    resolved = (default_model or "").strip() or None
+    if resolved is None:
+      return self
+    self.find_model = self.find_model or resolved
+    self.verify_model = self.verify_model or resolved
+    self.fix_model = self.fix_model or resolved
     return self
 
 
@@ -386,7 +498,7 @@ def build_scan_run_row(
       "status": status,
       "failure_reason": _as_str(failure_reason),
       "duration_seconds": round(float(effective_duration), 3),
-      "cm_version": _as_str(ctx.cm_version),
+      "cm_version": normalize_cm_version(ctx.cm_version),
       "find_model": _as_str(ctx.find_model),
       "verify_model": _as_str(ctx.verify_model),
       "fix_model": _as_str(ctx.fix_model),
@@ -416,6 +528,7 @@ def build_finding_rows(
   scan_id = _as_str(ctx.scan_id) or "unknown"
   repository = _as_str(ctx.repository)
   prs = finding_prs or {}
+  repo_dir = _as_str(ctx.repo_dir)
   emit_sensitive = (
       include_snippets() if with_snippets is None else bool(with_snippets)
   )
@@ -446,7 +559,7 @@ def build_finding_rows(
         "cwe_id": extract_cwe_id(finding.get("vuln_id"), vuln_type, title),
         "severity": severity.upper() if severity else None,
         "confidence_level": confidence_level.upper() if confidence_level else None,
-        "file_path": _as_str(finding.get("file_path")),
+        "file_path": repo_relative_path(finding.get("file_path"), repo_dir),
         "start_line": _as_int(finding.get("start_line")),
         "end_line": _as_int(finding.get("end_line")),
         "status": (_as_str(finding.get("status")) or "DETECTED").upper(),

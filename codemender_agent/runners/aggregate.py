@@ -28,6 +28,7 @@ import tarfile
 import time
 from typing import Any, Dict, List, Optional, Set
 
+from codemender_agent.codemender.cli import get_cm_default_model
 from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.cli import restore_staged_cm_binary
@@ -1875,6 +1876,7 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   repo_dir = os.path.join(workspace_dir, repo_name)
   scrubbed_env = get_scrubbed_env()
   ctx.repository = f"{owner}/{repo_name}"
+  ctx.repo_dir = repo_dir
 
   # 3. Download or discover scan manifest.json
   manifest_path = os.path.join(workspace_dir, "manifest.json")
@@ -2174,6 +2176,20 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   # Restore staged cm binary from workspace_base.tar.gz if present
   cm_binary = restore_staged_cm_binary(codemender_home)
   ctx.cm_version = log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
+  # The model columns have to name the model that actually ran. With no
+  # override configured the run used the scanner's own built-in default, so it
+  # is probed here rather than left NULL -- otherwise every unoverridden run,
+  # which is most of them, drops out of model comparisons entirely. Gated on
+  # telemetry being configured so an unconfigured deployment never pays for
+  # the lookup, and guarded so a telemetry-only probe can never fail the
+  # stage after all its work is done.
+  if bq_telemetry.telemetry_enabled():
+    try:
+      ctx.apply_default_model(
+          get_cm_default_model(cm_binary, env=scrubbed_env, cwd=repo_dir)
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Could not resolve the default model for telemetry: %s", e)
   # Invoke report generation and upload routine with full run parameters
   ctx.report_uri = _generate_and_upload_report(
       repo_dir,

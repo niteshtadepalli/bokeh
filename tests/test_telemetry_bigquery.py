@@ -205,7 +205,7 @@ class TestSchemaMapping(unittest.TestCase):
         target_branch="main",
         target_sha="abc123",
         scan_target=".",
-        cm_version="cm 0.9.0",
+        cm_version="cm version 0.9.0",
         find_model="gemini-2.5-pro",
         active_findings_count=2,
         report_uri="gs://bucket/reports/x.html",
@@ -217,7 +217,8 @@ class TestSchemaMapping(unittest.TestCase):
     self.assertEqual(row["scan_id"], "scan-1")
     self.assertEqual(row["repository"], "acme/widgets")
     self.assertEqual(row["status"], "SUCCESS")
-    self.assertEqual(row["cm_version"], "cm 0.9.0")
+    # Stored bare so releases group cleanly, not as the raw CLI banner.
+    self.assertEqual(row["cm_version"], "0.9.0")
     self.assertEqual(row["report_uri"], "gs://bucket/reports/x.html")
     self.assertIsInstance(row["duration_seconds"], float)
     self.assertEqual(row["token_totals"][0]["total_tokens"], 3)
@@ -786,6 +787,447 @@ class TestGuardExportsStashedFindings(unittest.TestCase):
     source = inspect.getsource(aggregate._run_aggregate_pipeline)
     self.assertIn("ctx.pending_findings", source)
     self.assertIn("ctx.pending_finding_prs", source)
+
+
+class TestScanTargetReachesTheRowWriter(unittest.TestCase):
+  """The stage that writes the row must know what was actually scanned.
+
+  Live validation recorded `scan_target="."` for every run that produced
+  findings: those rows are written by the aggregate stage, and the workflow
+  only handed the scan target to the scan stage, so the orchestrator config
+  fell back to its `"."` default. That makes "which directory has the most
+  findings?" unanswerable for precisely the runs that matter.
+  """
+
+  _WORKFLOW = os.path.join(
+      os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+      "workflows",
+      "gcp_parallel_workflow.yaml",
+  )
+
+  @staticmethod
+  def _env_names(step):
+    """Collects the env var names declared by one Cloud Run job step."""
+    overrides = step["call_args"]["body"]["overrides"]["containerOverrides"]
+    names = set()
+    for override in overrides:
+      for entry in override.get("env", []):
+        names.add(entry["name"])
+    return names
+
+  def _steps(self):
+    import yaml
+
+    with open(self._WORKFLOW, "r", encoding="utf-8") as f:
+      workflow = yaml.safe_load(f)
+
+    steps = {}
+    for step in workflow["main"]["steps"]:
+      (name, body), = step.items()
+      # Stage 1 wraps its job launch in a try/retry block.
+      call_args = body.get("args") or body.get("try", {}).get("args")
+      if call_args and "body" in call_args:
+        steps[name] = {"call_args": call_args}
+    return steps
+
+  def test_every_job_stage_receives_the_scan_target(self):
+    steps = self._steps()
+    for name in (
+        "run_stage1_scan",
+        "run_stage2_workers",
+        "run_stage3_aggregate",
+    ):
+      with self.subTest(stage=name):
+        self.assertIn(
+            "CODEMENDER_SCAN_TARGET",
+            self._env_names(steps[name]),
+            f"{name} must carry the scan target so all stages agree on scope",
+        )
+
+  def test_aggregate_stage_target_is_the_workflow_variable(self):
+    """It must be the real target, not a literal or a differently named var."""
+    overrides = (
+        self._steps()["run_stage3_aggregate"]["call_args"]["body"]["overrides"]
+    )
+    env = {e["name"]: e["value"] for e in overrides["containerOverrides"][0]["env"]}
+    self.assertEqual(env["CODEMENDER_SCAN_TARGET"], "${scan_target}")
+
+  def test_scan_target_env_reaches_the_context(self):
+    """End to end: the env var the workflow now sets lands in the row."""
+    from codemender_agent.config import OrchestratorConfig
+
+    with patch.dict(
+        os.environ, {"CODEMENDER_SCAN_TARGET": "src/pkg/util"}, clear=False
+    ):
+      config = OrchestratorConfig.from_env()
+    ctx = bq.ScanRunContext(stage="aggregate", scan_id="s1")
+    ctx.apply_config(config)
+    row = bq.build_scan_run_row(ctx, status=bq.STATUS_SUCCESS)
+    self.assertEqual(row["scan_target"], "src/pkg/util")
+
+  def test_unset_scan_target_still_falls_back_to_repository_root(self):
+    env = {k: v for k, v in os.environ.items() if k != "CODEMENDER_SCAN_TARGET"}
+    from codemender_agent.config import OrchestratorConfig
+
+    with patch.dict(os.environ, env, clear=True):
+      config = OrchestratorConfig.from_env()
+    ctx = bq.ScanRunContext(stage="aggregate", scan_id="s1")
+    ctx.apply_config(config)
+    self.assertEqual(
+        bq.build_scan_run_row(ctx, bq.STATUS_SUCCESS)["scan_target"], "."
+    )
+
+  def test_github_actions_pipeline_also_propagates_the_scan_target(self):
+    """The same runners execute under Actions, so the same gap applies there.
+
+    The aggregate job writes the row for findings-producing runs on that path
+    too; fixing only the Cloud Workflows definition would leave the identical
+    defect waiting on the second supported deployment surface.
+    """
+    import yaml
+
+    actions_workflow = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ".github",
+        "workflows",
+        "codemender_parallel.yml",
+    )
+    with open(actions_workflow, "r", encoding="utf-8") as f:
+      pipeline = yaml.safe_load(f)
+
+    for job_name, job in pipeline["jobs"].items():
+      stage_steps = [
+          step
+          for step in job.get("steps", [])
+          if (step.get("env") or {}).get("CODEMENDER_RUN_MODE")
+      ]
+      for step in stage_steps:
+        with self.subTest(job=job_name, run_mode=step["env"]["CODEMENDER_RUN_MODE"]):
+          self.assertIn(
+              "CODEMENDER_SCAN_TARGET",
+              step["env"],
+              f"{job_name} must carry the scan target so all stages agree",
+          )
+
+
+class TestFilePathIsRepositoryRelative(unittest.TestCase):
+  """Finding paths must join across runs and repositories.
+
+  Live rows contained `/workspace/<repo>/src/pkg/token.py`: the container
+  mount point leaked into the warehouse, so the same file scanned from two
+  different checkouts produced two unrelated path values.
+  """
+
+  def setUp(self):
+    self.ctx = bq.ScanRunContext(
+        stage="aggregate",
+        scan_id="s1",
+        repository="acme/widgets",
+        repo_dir="/workspace/widgets",
+    )
+
+  def _path(self, raw, ctx=None):
+    rows = bq.build_finding_rows(
+        ctx or self.ctx, [{"finding_id": "f1", "file_path": raw}]
+    )
+    return rows[0]["file_path"]
+
+  def test_container_absolute_path_is_stripped_to_repo_relative(self):
+    self.assertEqual(
+        self._path("/workspace/widgets/src/pkg/token.py"), "src/pkg/token.py"
+    )
+
+  def test_already_relative_path_is_left_alone(self):
+    self.assertEqual(self._path("src/pkg/token.py"), "src/pkg/token.py")
+
+  def test_dot_slash_prefix_is_removed(self):
+    self.assertEqual(self._path("./src/pkg/token.py"), "src/pkg/token.py")
+
+  def test_repo_root_itself_is_not_collapsed_to_empty(self):
+    """An empty file_path is useless; the original is kept instead."""
+    self.assertEqual(self._path("/workspace/widgets"), "/workspace/widgets")
+
+  def test_absolute_path_is_not_mangled_when_repo_dir_is_unknown(self):
+    """Half-stripping an absolute path is worse than leaving it intact."""
+    ctx = bq.ScanRunContext(stage="scan", scan_id="s1")
+    self.assertIsNone(ctx.repo_dir)
+    self.assertEqual(
+        self._path("/workspace/widgets/src/pkg/token.py", ctx),
+        "/workspace/widgets/src/pkg/token.py",
+    )
+
+  def test_relative_path_still_normalized_when_repo_dir_is_unknown(self):
+    ctx = bq.ScanRunContext(stage="scan", scan_id="s1")
+    self.assertEqual(self._path("./src/pkg/token.py", ctx), "src/pkg/token.py")
+
+  def test_ci_runner_mount_is_stripped_without_a_repo_dir(self):
+    ctx = bq.ScanRunContext(stage="scan", scan_id="s1")
+    self.assertEqual(
+        self._path("/github/workspace/src/pkg/token.py", ctx), "src/pkg/token.py"
+    )
+
+  def test_path_outside_the_repository_is_preserved(self):
+    self.assertEqual(self._path("/etc/hosts"), "/etc/hosts")
+
+  def test_missing_path_stays_null(self):
+    self.assertIsNone(self._path(None))
+    self.assertIsNone(self._path("   "))
+
+  def test_backslash_paths_are_normalized(self):
+    self.assertEqual(self._path("src\\pkg\\token.py"), "src/pkg/token.py")
+
+  def test_redundant_separators_are_collapsed(self):
+    """`src//a.py` and `src/a.py` are the same file and must group as one."""
+    self.assertEqual(
+        self._path("/workspace/widgets/./src//pkg/token.py"),
+        "src/pkg/token.py",
+    )
+
+  def test_normalizer_failure_falls_back_to_the_raw_value(self):
+    with patch.object(
+        bq, "normalize_repo_relative_path", side_effect=RuntimeError("boom")
+    ):
+      self.assertEqual(self._path("src/pkg/token.py"), "src/pkg/token.py")
+
+  def test_aggregate_runner_records_the_repo_dir(self):
+    """The mapper is useless unless the runner actually supplies the root."""
+    import inspect
+
+    from codemender_agent.runners import aggregate
+    from codemender_agent.runners import scan
+
+    self.assertIn(
+        "ctx.repo_dir", inspect.getsource(aggregate._run_aggregate_pipeline)
+    )
+    self.assertIn("ctx.repo_dir", inspect.getsource(scan._run_scan_pipeline))
+
+
+class TestModelColumnsRecordTheEffectiveModel(unittest.TestCase):
+  """Model columns must name the model that ran, not only an explicit override.
+
+  Both live scans genuinely ran on the scanner's default model, yet all three
+  model columns were NULL because nothing had been overridden -- while the
+  nested token_totals struct recorded the resolved name correctly. That makes
+  "which model found the most vulnerabilities?" return nothing.
+  """
+
+  def test_default_backfills_all_three_columns(self):
+    ctx = bq.ScanRunContext(stage="scan", scan_id="s1")
+    ctx.apply_default_model("model-under-test")
+    row = bq.build_scan_run_row(ctx, status=bq.STATUS_SUCCESS)
+    self.assertEqual(row["find_model"], "model-under-test")
+    self.assertEqual(row["verify_model"], "model-under-test")
+    self.assertEqual(row["fix_model"], "model-under-test")
+
+  def test_explicit_override_always_wins(self):
+    ctx = bq.ScanRunContext(
+        stage="scan", scan_id="s1", find_model="explicit-find-model"
+    )
+    ctx.apply_default_model("resolved-default")
+    row = bq.build_scan_run_row(ctx, status=bq.STATUS_SUCCESS)
+    self.assertEqual(row["find_model"], "explicit-find-model")
+    # The columns without an override still get the resolved default.
+    self.assertEqual(row["verify_model"], "resolved-default")
+    self.assertEqual(row["fix_model"], "resolved-default")
+
+  def test_config_override_survives_the_backfill(self):
+    class _Config:
+      scan_id = "s1"
+      target_branch = None
+      target_sha = None
+      scan_target = "."
+      find_model = "cfg-find"
+      verify_model = "cfg-verify"
+      fix_model = "cfg-fix"
+      execution_url = None
+
+    ctx = bq.ScanRunContext(stage="aggregate")
+    ctx.apply_config(_Config()).apply_default_model("resolved-default")
+    row = bq.build_scan_run_row(ctx, status=bq.STATUS_SUCCESS)
+    self.assertEqual(
+        [row["find_model"], row["verify_model"], row["fix_model"]],
+        ["cfg-find", "cfg-verify", "cfg-fix"],
+    )
+
+  def test_unresolvable_default_leaves_columns_null(self):
+    for default in (None, "", "   "):
+      with self.subTest(default=default):
+        ctx = bq.ScanRunContext(stage="scan", scan_id="s1")
+        ctx.apply_default_model(default)
+        row = bq.build_scan_run_row(ctx, status=bq.STATUS_SUCCESS)
+        self.assertIsNone(row["find_model"])
+        self.assertIsNone(row["verify_model"])
+        self.assertIsNone(row["fix_model"])
+
+  def test_backfill_is_idempotent(self):
+    ctx = bq.ScanRunContext(stage="scan", scan_id="s1")
+    ctx.apply_default_model("first").apply_default_model("second")
+    self.assertEqual(ctx.find_model, "first")
+
+  def test_warehouse_column_descriptions_match_what_is_written(self):
+    """Descriptions ground natural-language analytics, so they must be true.
+
+    They previously told readers that NULL meant the built-in default had
+    been used. Now the default is recorded explicitly, so that sentence would
+    actively mislead anyone -- or any model -- reading the schema.
+    """
+    schema = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "terraform",
+        "gcp",
+        "bigquery.tf",
+    )
+    with open(schema, "r", encoding="utf-8") as f:
+      definition = f.read()
+    self.assertNotIn(
+        "NULL means the scanner's built-in default was used", definition
+    )
+
+  def test_runners_resolve_the_default_only_when_telemetry_is_configured(self):
+    """The probe spawns a subprocess, so it must stay off the no-op path.
+
+    It must also be wrapped: resolving a model name is telemetry-only work and
+    may never be the reason a scan fails.
+    """
+    import inspect
+    import re as _re
+
+    from codemender_agent.runners import aggregate
+    from codemender_agent.runners import scan
+
+    for name, func in (
+        ("aggregate", aggregate._run_aggregate_pipeline),
+        ("scan", scan._run_scan_pipeline),
+    ):
+      with self.subTest(runner=name):
+        source = inspect.getsource(func)
+        self.assertIn("apply_default_model", source)
+        guard = _re.search(
+            r"if bq_telemetry\.telemetry_enabled\(\):\s*\n"
+            r"\s*try:\s*\n"
+            r"\s*ctx\.apply_default_model\(\s*\n"
+            r"\s*get_cm_default_model\([^\n]*\n"
+            r"\s*\)\s*\n"
+            r"\s*except Exception",
+            source,
+        )
+        self.assertIsNotNone(
+            guard,
+            f"{name} must gate the default-model probe on telemetry being on"
+            " and swallow any failure from it",
+        )
+
+  def test_no_model_name_is_hardcoded_in_the_telemetry_module(self):
+    """Model names are resolved at runtime; none may be baked into the export."""
+    import inspect
+    import re as _re
+
+    source = inspect.getsource(bq)
+    self.assertIsNone(
+        _re.search(r"gemini-[0-9]", source, _re.IGNORECASE),
+        "telemetry must not hardcode a model name",
+    )
+
+
+class TestCmVersionIsGroupable(unittest.TestCase):
+  """`cm --version` prints a banner; the warehouse wants the number."""
+
+  def test_banner_prefix_is_stripped(self):
+    self.assertEqual(bq.normalize_cm_version("cm version 0.9.0"), "0.9.0")
+
+  def test_bare_version_is_unchanged(self):
+    self.assertEqual(bq.normalize_cm_version("0.9.0"), "0.9.0")
+
+  def test_tolerates_alternative_banner_formats(self):
+    cases = {
+        "cm v1.2.3": "1.2.3",
+        "CodeMender CLI 1.2.3 (linux/amd64)": "1.2.3",
+        "cm version 1.2.3-rc.1": "1.2.3-rc.1",
+        "cm version 2026.1.15+build7": "2026.1.15+build7",
+        "  cm version 0.9.0  ": "0.9.0",
+    }
+    for raw, expected in cases.items():
+      with self.subTest(raw=raw):
+        self.assertEqual(bq.normalize_cm_version(raw), expected)
+
+  def test_unrecognised_banner_falls_back_to_the_raw_string(self):
+    """A surprising string beats a NULL when diagnosing a bad deployment."""
+    self.assertEqual(
+        bq.normalize_cm_version("cm version unknown"), "cm version unknown"
+    )
+
+  def test_absent_version_stays_null(self):
+    self.assertIsNone(bq.normalize_cm_version(None))
+    self.assertIsNone(bq.normalize_cm_version("   "))
+
+  def test_version_embedded_in_another_word_is_not_mistaken_for_the_scanner(self):
+    """A toolchain stamp in the banner must not become the recorded version.
+
+    Substring matching picks `24.2` out of `go1.24.2` and writes a number the
+    scanner never had -- worse than the raw banner, because it looks valid.
+    """
+    cases = {
+        "go1.24.2 cm version 0.9.0": "0.9.0",
+        "cm version 0.9.0 (go1.24.2 linux/amd64)": "0.9.0",
+        "built-with-go1.24.2": "built-with-go1.24.2",
+    }
+    for raw, expected in cases.items():
+      with self.subTest(raw=raw):
+        self.assertEqual(bq.normalize_cm_version(raw), expected)
+
+  def test_slash_delimited_banner_is_understood(self):
+    self.assertEqual(bq.normalize_cm_version("cm/0.9.0"), "0.9.0")
+
+  def test_surrounding_punctuation_is_trimmed(self):
+    for raw in ("cm version 0.9.0.", "cm (0.9.0)", "cm version 0.9.0,"):
+      with self.subTest(raw=raw):
+        self.assertEqual(bq.normalize_cm_version(raw), "0.9.0")
+
+
+class TestFixesDoNotWeakenTheNoOpGuarantee(unittest.TestCase):
+  """None of the above may cause work when no dataset is configured."""
+
+  def test_telemetry_still_disabled_without_a_dataset(self):
+    env = {k: v for k, v in os.environ.items() if k != bq.ENV_DATASET}
+    with patch.dict(os.environ, env, clear=True):
+      self.assertFalse(bq.telemetry_enabled())
+
+  def test_emit_makes_no_calls_and_builds_no_rows(self):
+    env = {k: v for k, v in os.environ.items() if k != bq.ENV_DATASET}
+    with patch.dict(os.environ, env, clear=True):
+      factory = MagicMock()
+      ctx = bq.ScanRunContext(
+          stage="aggregate",
+          scan_id="s1",
+          repo_dir="/workspace/widgets",
+          cm_version="cm version 0.9.0",
+      )
+      ctx.apply_default_model("resolved-default")
+      self.assertFalse(
+          bq.emit_scan_telemetry(
+              ctx,
+              findings=[{
+                  "finding_id": "f1",
+                  "file_path": "/workspace/widgets/a.py",
+              }],
+              exporter=bq.BigQueryTelemetryExporter(client_factory=factory),
+          )
+      )
+      factory.assert_not_called()
+
+  def test_snippets_remain_excluded_by_default_after_path_normalization(self):
+    env = {k: v for k, v in os.environ.items() if k != bq.ENV_INCLUDE_SNIPPETS}
+    with patch.dict(os.environ, env, clear=True):
+      ctx = bq.ScanRunContext(scan_id="s1", repo_dir="/workspace/widgets")
+      rows = bq.build_finding_rows(ctx, [{
+          "finding_id": "f1",
+          "file_path": "/workspace/widgets/a.py",
+          "snippet": "secret = 1",
+          "analysis": "prose",
+      }])
+      self.assertEqual(rows[0]["file_path"], "a.py")
+      self.assertNotIn("snippet", rows[0])
+      self.assertNotIn("analysis", rows[0])
 
 
 if __name__ == "__main__":

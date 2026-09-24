@@ -279,6 +279,10 @@ jobs:
           CODEMENDER_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
           CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
           CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
+          # Workers act on the partitions the scan stage already carved out, so
+          # they do not resolve the target themselves. It is propagated anyway
+          # so every stage describes the same scan scope.
+          CODEMENDER_SCAN_TARGET: ${{ inputs.scan_target }}
           CODEMENDER_MODEL: ${{ inputs.model }}
           CODEMENDER_VERIFY_MODEL: ${{ inputs.verify_model }}
           CODEMENDER_FIX_MODEL: ${{ inputs.fix_model }}
@@ -371,6 +375,12 @@ jobs:
           CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
           CODEMENDER_TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
           CODEMENDER_BUILD_COMMAND: ${{ inputs.build_command }}
+          # The aggregator writes the telemetry row for every run that produced
+          # findings, so it needs the same scan target the scan stage was
+          # launched with; without it the orchestrator config falls back to its
+          # "." default and the recorded target no longer identifies what was
+          # scanned.
+          CODEMENDER_SCAN_TARGET: ${{ inputs.scan_target }}
           CODEMENDER_MAX_TASKS: ${{ inputs.max_tasks }}
           CODEMENDER_FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.custom_github_token || secrets.GITHUB_TOKEN || github.token }}

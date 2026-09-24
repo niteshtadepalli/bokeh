@@ -179,6 +179,13 @@ main:
                       value: ${target_branch}
                     - name: CODEMENDER_EXECUTION_URL
                       value: ${execution_url}
+                    # Workers act on the partitions the manifest already
+                    # carved out, so they do not resolve the target
+                    # themselves. It is propagated anyway so all three stages
+                    # describe the same scan scope, and so any future
+                    # worker-side telemetry starts out attributable.
+                    - name: CODEMENDER_SCAN_TARGET
+                      value: ${scan_target}
                     - name: CODEMENDER_TARGET_SHA
                       value: ${target_sha}
                     - name: CODEMENDER_BASE_WORKSPACE_URL
@@ -238,6 +245,13 @@ main:
                       value: ${target_branch}
                     - name: CODEMENDER_EXECUTION_URL
                       value: ${execution_url}
+                    # Stage 3 writes the scan_runs telemetry row for every run
+                    # that produced findings, so it needs the same scan target
+                    # Stage 1 was launched with. Without it the orchestrator
+                    # config falls back to its "." default and the recorded
+                    # target no longer identifies what was scanned.
+                    - name: CODEMENDER_SCAN_TARGET
+                      value: ${scan_target}
                     - name: CODEMENDER_TOTAL_WORKERS
                       value: ${string(num_workers)}
                     - name: CODEMENDER_CLI_VERSION
