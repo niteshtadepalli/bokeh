@@ -31,6 +31,9 @@ from codemender_agent.codemender.cli import get_cm_default_model
 from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.cli import stage_cm_binary_for_archive
+from codemender_agent.runners.aggregate import _build_automation_details_id
+from codemender_agent.runners.aggregate import _record_failure_marker
+from codemender_agent.runners.aggregate import has_sarif_results
 from codemender_agent.runners.aggregate import transform_json_to_sarif
 # Configuration injection and credentials
 from codemender_agent.config import OrchestratorConfig
@@ -56,6 +59,7 @@ from codemender_agent.vcs.git import parse_repo_owner_and_name
 from codemender_agent.vcs.git import sanitize_git_url
 from codemender_agent.vcs.git import setup_local_git_excludes
 # GitHub REST API check and deduplication helpers
+from codemender_agent.vcs.github import STATUS_CONTEXT_PR
 from codemender_agent.vcs.github import STATUS_CONTEXT_SCHEDULED
 from codemender_agent.vcs.github import check_remote_branch_exists
 from codemender_agent.vcs.github import delete_remote_branch
@@ -112,9 +116,15 @@ def _emit_github_output(
 
 
 def _write_clean_sarif_file(
-    repo_dir: Optional[str], workspace_dir: str
+    repo_dir: Optional[str],
+    workspace_dir: str,
+    repository: str = "",
+    scan_target: str = "",
 ) -> str:
   """Generates a valid empty SARIF report when zero findings are discovered."""
+  automation_id = _build_automation_details_id(
+      repository=repository, scan_target=scan_target
+  )
   clean_sarif = {
       "$schema": (
           "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
@@ -122,6 +132,9 @@ def _write_clean_sarif_file(
       "version": "2.1.0",
       "runs": [
           {
+              "automationDetails": {
+                  "id": automation_id,
+              },
               "tool": {
                   "driver": {
                       "name": "CodeMender",
@@ -862,7 +875,47 @@ def run_scan_pipeline() -> None:
   """
   ctx = bq_telemetry.ScanRunContext(stage="scan")
   with bq_telemetry.telemetry_run_guard(ctx):
-    _run_scan_pipeline(ctx)
+    try:
+      _run_scan_pipeline(ctx)
+    except BaseException as exc:
+      is_clean_exit = isinstance(exc, SystemExit) and exc.code in (0, None)
+      if not is_clean_exit:
+        try:
+          cfg = OrchestratorConfig.from_env()
+          _record_failure_marker(
+              cfg.workspace_dir or os.getcwd(),
+              cfg.gcs_bucket,
+              ctx.scan_id or cfg.scan_id,
+              "scan",
+              ctx.target_sha or cfg.target_sha,
+          )
+          if (ctx.target_sha or cfg.target_sha) and ctx.repository and "/" in ctx.repository:
+            token = cfg.github_token
+            if not token:
+              try:
+                _, token = get_github_credentials(config=cfg)
+              except Exception:  # pylint: disable=broad-exception-caught
+                token = None
+            if token:
+              owner_part, repo_part = ctx.repository.split("/", 1)
+              gate_ctx = (
+                  STATUS_CONTEXT_PR
+                  if cfg.is_pr_scan
+                  else STATUS_CONTEXT_SCHEDULED
+              )
+              post_commit_status(
+                  token=token,
+                  owner=owner_part,
+                  repo=repo_part,
+                  sha=ctx.target_sha or cfg.target_sha,
+                  state="error",
+                  description="Scan failed during Stage 1.",
+                  context=gate_ctx,
+                  target_url=cfg.execution_url or None,
+              )
+        except Exception as status_err:  # pylint: disable=broad-exception-caught
+          logger.warning("Failed to post Stage 1 error commit status: %s", status_err)
+      raise
 
 
 def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
@@ -967,7 +1020,12 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   if not findings:
     logger.info("Zero findings confirmed after scanning. Exiting Stage 1.")
     # Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
-    sarif_path = _write_clean_sarif_file(repo_dir, workspace_dir)
+    sarif_path = _write_clean_sarif_file(
+        repo_dir,
+        workspace_dir,
+        repository=f"{owner}/{repo_name}",
+        scan_target=config.scan_target,
+    )
     # Render clean Step Summary before exiting
     _render_zero_findings_summary(
         owner,
@@ -1029,19 +1087,25 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
           target_url=config.execution_url or None,
       )
       if sarif_path and os.path.exists(sarif_path):
-        scan_ref = (
-            f"refs/heads/{config.target_branch}"
-            if config.target_branch
-            else f"refs/heads/{get_default_branch(token, owner, repo_name)}"
-        )
-        upload_sarif_to_code_scanning(
-            token=token,
-            owner=owner,
-            repo=repo_name,
-            sarif_path=sarif_path,
-            commit_sha=target_sha,
-            ref=scan_ref,
-        )
+        if has_sarif_results(sarif_path) or config.upload_empty_sarif:
+          scan_ref = (
+              f"refs/heads/{config.target_branch}"
+              if config.target_branch
+              else f"refs/heads/{get_default_branch(token, owner, repo_name)}"
+          )
+          upload_sarif_to_code_scanning(
+              token=token,
+              owner=owner,
+              repo=repo_name,
+              sarif_path=sarif_path,
+              commit_sha=target_sha,
+              ref=scan_ref,
+          )
+        else:
+          logger.info(
+              "Skipping GitHub Code Scanning SARIF upload because report.sarif contains 0 results "
+              "(set CODEMENDER_UPLOAD_EMPTY_SARIF=true to auto-resolve existing alerts on empty runs)."
+          )
     # Clean-repo terminal path. On the GCP path the coordinating workflow
     # short-circuits to completion when findings_count == 0, so Stage 3 never
     # runs -- this is the only opportunity to record that the scan happened.
@@ -1139,6 +1203,8 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
           skipped_finding_ids=set(skipped_finding_ids),
           finding_prs=skipped_finding_prs,
           is_pr_scan=False,
+          repository=f"{owner}/{repo_name}",
+          scan_target=config.scan_target,
       )
       sarif_path = os.path.join(workspace_dir, "report.sarif")
       for dest_dir in [repo_dir, workspace_dir]:
@@ -1150,7 +1216,12 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
             logger.warning("Failed to write suppressed SARIF to %s: %s", dest_dir, e)
     else:
       # Generate schema-compliant clean SARIF for GitHub Code Scanning alert resolution
-      sarif_path = _write_clean_sarif_file(repo_dir, workspace_dir)
+      sarif_path = _write_clean_sarif_file(
+          repo_dir,
+          workspace_dir,
+          repository=f"{owner}/{repo_name}",
+          scan_target=config.scan_target,
+      )
     filtered_reason = (
         None
         if config.is_pr_scan
@@ -1221,19 +1292,25 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
           target_url=config.execution_url or None,
       )
       if sarif_path and os.path.exists(sarif_path):
-        scan_ref = (
-            f"refs/heads/{config.target_branch}"
-            if config.target_branch
-            else f"refs/heads/{get_default_branch(token, owner, repo_name)}"
-        )
-        upload_sarif_to_code_scanning(
-            token=token,
-            owner=owner,
-            repo=repo_name,
-            sarif_path=sarif_path,
-            commit_sha=target_sha,
-            ref=scan_ref,
-        )
+        if has_sarif_results(sarif_path) or config.upload_empty_sarif:
+          scan_ref = (
+              f"refs/heads/{config.target_branch}"
+              if config.target_branch
+              else f"refs/heads/{get_default_branch(token, owner, repo_name)}"
+          )
+          upload_sarif_to_code_scanning(
+              token=token,
+              owner=owner,
+              repo=repo_name,
+              sarif_path=sarif_path,
+              commit_sha=target_sha,
+              ref=scan_ref,
+          )
+        else:
+          logger.info(
+              "Skipping GitHub Code Scanning SARIF upload because report.sarif contains 0 results "
+              "(set CODEMENDER_UPLOAD_EMPTY_SARIF=true to auto-resolve existing alerts on empty runs)."
+          )
     # All-findings-filtered terminal path (duplicates / pre-existing). Stage 3
     # is likewise skipped here, so record the run now. Keeping the raw and
     # active counts distinct is what lets analytics separate "genuinely clean"

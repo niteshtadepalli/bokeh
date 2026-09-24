@@ -685,7 +685,59 @@ class TestScanRunner(unittest.TestCase):
     self.assertEqual(ignored, [])
     mock_delete_branch.assert_not_called()
 
+  def test_write_clean_sarif_file_includes_automation_details_id(self):
+    """Verify _write_clean_sarif_file embeds automationDetails.id and has_sarif_results returns False."""
+    from codemender_agent.runners.aggregate import has_sarif_results
+    from codemender_agent.runners.scan import _write_clean_sarif_file
+
+    sarif_path = _write_clean_sarif_file(
+        self.workspace_dir,
+        self.workspace_dir,
+        repository="org/repo",
+        scan_target="litemall-core;litemall-db",
+    )
+    self.assertFalse(has_sarif_results(sarif_path))
+    with open(sarif_path, "r", encoding="utf-8") as f:
+      data = json.load(f)
+    self.assertEqual(
+        data["runs"][0]["automationDetails"]["id"],
+        "codemender/org-repo/litemall-core-litemall-db/",
+    )
+
+  @patch("codemender_agent.runners.scan.post_commit_status")
+  @patch("codemender_agent.runners.scan._run_scan_pipeline")
+  def test_run_scan_pipeline_posts_error_status_on_stage1_crash(
+      self, mock_inner_scan, mock_post_status
+  ):
+    """Verify run_scan_pipeline posts state='error' if Stage 1 fails after setting target_sha."""
+    import sys
+    from codemender_agent.runners.scan import run_scan_pipeline
+
+    def crash_after_sync(ctx):
+      ctx.repository = "org/repo"
+      ctx.target_sha = "cafebabe12345678"
+      sys.exit(1)
+
+    mock_inner_scan.side_effect = crash_after_sync
+    with patch.dict(
+        os.environ,
+        {
+            "GITHUB_REPO_URL": "https://github.com/org/repo.git",
+            "GITHUB_TOKEN": "ghp_test",
+            "CODEMENDER_IS_PR_SCAN": "false",
+        },
+    ):
+      with self.assertRaises(SystemExit) as cm:
+        run_scan_pipeline()
+      self.assertEqual(cm.exception.code, 1)
+
+    mock_post_status.assert_called_once()
+    kwargs = mock_post_status.call_args.kwargs
+    self.assertEqual(kwargs["state"], "error")
+    self.assertEqual(kwargs["sha"], "cafebabe12345678")
+
 
 if __name__ == "__main__":
   unittest.main()
+
 

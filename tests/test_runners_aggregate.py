@@ -1239,7 +1239,206 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertEqual(results2[0]["properties"]["pr_url"], "https://github.com/carloschulo/cm-test/pull/9")
     self.assertIn("Fix PR #9", rules2[0]["help"]["markdown"])
 
+  def test_transform_json_to_sarif_cross_run_stable_rule_id_and_automation_id(self):
+    """Verify ruleId and primaryLocationLineHash remain stable across LLM title variations and line shifts, and automationDetails.id reflects repo + scan_target."""
+    from codemender_agent.runners.aggregate import transform_json_to_sarif
+
+    repo_dir = os.path.join(self.workspace_dir, "repo")
+    os.makedirs(os.path.join(repo_dir, "src"), exist_ok=True)
+    source_file = os.path.join(repo_dir, "src", "auth.py")
+    with open(source_file, "w", encoding="utf-8") as f:
+      f.write(
+          "# Header comment\n"
+          "def authenticate_user(cursor, username):\n"
+          "    query = f'SELECT * FROM users WHERE name = \"{username}\"'\n"
+          "    return cursor.execute(query)\n"
+      )
+
+    run1_findings = [
+        {
+            "finding_id": "run1-fid",
+            "title": "SQL Injection in authenticate_user via f-string",
+            "file_path": "src/auth.py",
+            "severity": "HIGH",
+            "vuln_type": "SQL Injection",
+            "vuln_id": "CWE-89",
+            "status": "VERIFIED",
+            "start_line": 3,
+            "end_line": 3,
+        }
+    ]
+    sarif1 = transform_json_to_sarif(
+        findings=run1_findings,
+        repo_dir=repo_dir,
+        repository="org/my-repo",
+        scan_target="src/bokeh;bokehjs/src",
+    )
+
+    # Simulate a subsequent commit that inserts lines above `authenticate_user` and an LLM re-phrasing `title`
+    with open(source_file, "w", encoding="utf-8") as f:
+      f.write(
+          "# Added imports\n"
+          "import logging\n"
+          "import os\n\n"
+          "def authenticate_user(cursor, username):\n"
+          "    query = f'SELECT * FROM users WHERE name = \"{username}\"'\n"
+          "    return cursor.execute(query)\n"
+      )
+    run2_findings = [
+        {
+            "finding_id": "run2-fid",
+            "title": "Unsanitized user input concatenated into SQL query",
+            "file_path": "src/auth.py",
+            "severity": "HIGH",
+            "vuln_type": "SQL Injection",
+            "vuln_id": "CWE-89",
+            "status": "VERIFIED",
+            "start_line": 6,
+            "end_line": 6,
+        }
+    ]
+    sarif2 = transform_json_to_sarif(
+        findings=run2_findings,
+        repo_dir=repo_dir,
+        repository="org/my-repo",
+        scan_target="src/bokeh;bokehjs/src",
+    )
+
+    res1 = sarif1["runs"][0]["results"][0]
+    res2 = sarif2["runs"][0]["results"][0]
+    self.assertEqual(res1["ruleId"], res2["ruleId"])
+    self.assertEqual(
+        res1["partialFingerprints"]["primaryLocationLineHash"],
+        res2["partialFingerprints"]["primaryLocationLineHash"],
+    )
+    self.assertEqual(
+        sarif1["runs"][0]["automationDetails"]["id"],
+        "codemender/org-my-repo/src-bokeh-bokehjs-src/",
+    )
+
+  @patch("codemender_agent.runners.aggregate.upload_sarif_to_code_scanning")
+  @patch("codemender_agent.runners.aggregate.post_commit_status")
+  @patch("codemender_agent.runners.aggregate.download_file_from_gcs")
+  def test_aggregate_workflow_failed_recovery_mode_updates_commit_status(
+      self, mock_download, mock_post_status, mock_upload_sarif
+  ):
+    """Verify CODEMENDER_WORKFLOW_FAILED=true posts terminal error status so GitHub is never left pending."""
+    def fake_download(dest, bucket, blob):
+      if blob.endswith("manifest.json"):
+        with open(dest, "w", encoding="utf-8") as f:
+          json.dump({"findings_count": 2, "target_sha": "deadbeef12345678"}, f)
+        return True
+      return False
+
+    mock_download.side_effect = fake_download
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "gcs",
+            "CODEMENDER_SCAN_ID": "scan-fail-1",
+            "CODEMENDER_GCS_BUCKET": "test-bucket",
+            "CODEMENDER_WORKFLOW_FAILED": "true",
+            "CODEMENDER_FAILURE_REASON": "Stage 1 timed out",
+            "GITHUB_REPO_URL": "https://github.com/org/repo.git",
+            "GITHUB_TOKEN": "ghp_test",
+        },
+    ):
+      run_aggregate_pipeline()
+
+    mock_post_status.assert_called_once()
+    kwargs = mock_post_status.call_args.kwargs
+    self.assertEqual(kwargs["state"], "error")
+    self.assertEqual(kwargs["sha"], "deadbeef12345678")
+    self.assertIn("Stage 1 timed out", kwargs["description"])
+    mock_upload_sarif.assert_not_called()
+
+  def test_transform_json_to_sarif_stable_without_disk_file_and_distinct_per_statement(self):
+    """Verify ruleId stays stable across line shifts without source on disk, while keeping distinct statements in the same file separate."""
+    from codemender_agent.runners.aggregate import is_sarif_complete, transform_json_to_sarif
+
+    empty_repo_dir = os.path.join(self.workspace_dir, "missing_src_repo")
+    os.makedirs(empty_repo_dir, exist_ok=True)
+
+    run1 = [
+        {
+            "finding_id": "f1",
+            "title": "SQL Injection in user lookup",
+            "file_path": "app/db.py",
+            "severity": "HIGH",
+            "vuln_type": "SQL Injection",
+            "vuln_id": "CWE-89",
+            "start_line": 10,
+            "snippet": "cursor.execute(f'SELECT * FROM users WHERE id = {user_id}')",
+        },
+        {
+            "finding_id": "f2",
+            "title": "SQL Injection in order deletion",
+            "file_path": "app/db.py",
+            "severity": "HIGH",
+            "vuln_type": "SQL Injection",
+            "vuln_id": "CWE-89",
+            "start_line": 40,
+            "snippet": "cursor.execute(f'DELETE FROM orders WHERE order_id = {order_id}')",
+        },
+    ]
+    run2 = [
+        {
+            "finding_id": "f1-next",
+            "title": "Different LLM Title for User Query SQLi",
+            "file_path": "app/db.py",
+            "severity": "HIGH",
+            "vuln_type": "SQL Injection",
+            "vuln_id": "CWE-89",
+            "start_line": 35,
+            "snippet": "cursor.execute(f'SELECT * FROM users WHERE id = {user_id}')",
+        },
+    ]
+    sarif1 = transform_json_to_sarif(run1, empty_repo_dir, repository="org/repo", scan_target=".")
+    sarif2 = transform_json_to_sarif(run2, empty_repo_dir, repository="org/repo", scan_target=".")
+
+    self.assertTrue(is_sarif_complete(sarif1))
+    r1_user = sarif1["runs"][0]["results"][0]["ruleId"]
+    r1_order = sarif1["runs"][0]["results"][1]["ruleId"]
+    r2_user = sarif2["runs"][0]["results"][0]["ruleId"]
+    self.assertEqual(r1_user, r2_user)
+    self.assertNotEqual(r1_user, r1_order)
+
+  @patch("codemender_agent.runners.aggregate.bq_telemetry.emit_scan_telemetry")
+  @patch("codemender_agent.runners.aggregate.post_commit_status")
+  @patch("codemender_agent.runners.aggregate.download_file_from_gcs")
+  def test_workflow_failed_skips_duplicate_telemetry_when_failure_marker_exists(
+      self, mock_download, mock_post_status, mock_emit_telemetry
+  ):
+    """Verify CODEMENDER_WORKFLOW_FAILED=true does not emit a second FAILED BigQuery row when failure_recorded.json exists."""
+    def fake_download(dest, bucket, blob):
+      if blob.endswith("failure_recorded.json"):
+        with open(dest, "w", encoding="utf-8") as f:
+          json.dump({"scan_id": "scan-dup-1", "stage": "scan", "target_sha": "11223344aabbccdd", "recorded": True}, f)
+        return True
+      return False
+
+    mock_download.side_effect = fake_download
+    with patch.dict(
+        os.environ,
+        {
+            "CODEMENDER_STORAGE_MODE": "gcs",
+            "CODEMENDER_SCAN_ID": "scan-dup-1",
+            "CODEMENDER_GCS_BUCKET": "test-bucket",
+            "CODEMENDER_WORKFLOW_FAILED": "true",
+            "CODEMENDER_FAILURE_REASON": "Stage 1 exited with code 1",
+            "GITHUB_REPO_URL": "https://github.com/org/repo.git",
+            "GITHUB_TOKEN": "ghp_test",
+        },
+    ):
+      run_aggregate_pipeline()
+
+    mock_post_status.assert_called_once()
+    self.assertEqual(mock_post_status.call_args.kwargs["sha"], "11223344aabbccdd")
+    mock_emit_telemetry.assert_not_called()
+
 
 if __name__ == "__main__":
   unittest.main()
+
+
 

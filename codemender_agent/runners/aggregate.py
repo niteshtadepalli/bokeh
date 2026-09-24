@@ -814,11 +814,145 @@ def _render_step_summary(
   return summary_md, findings_stats["total"]
 
 
+def _build_automation_details_id(
+    repository: Optional[str] = None,
+    scan_target: Optional[str] = None,
+    repo_dir: Optional[str] = None,
+) -> str:
+  """Builds a deterministic SARIF automationDetails.id scoped by repository and scan_target."""
+  repo_val = (repository or "").strip()
+  if not repo_val:
+    repo_val = (os.environ.get("GITHUB_REPOSITORY") or "").strip()
+  if not repo_val:
+    raw_url = (os.environ.get("GITHUB_REPO_URL") or "").strip()
+    if raw_url:
+      try:
+        owner_p, name_p = parse_repo_owner_and_name(sanitize_git_url(raw_url))
+        if owner_p and name_p:
+          repo_val = f"{owner_p}/{name_p}"
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+  if not repo_val and repo_dir:
+    repo_val = os.path.basename(os.path.abspath(repo_dir))
+
+  repo_slug = (
+      re.sub(r"[^a-z0-9._-]+", "-", repo_val.lower()).strip("-")
+      or "default-repo"
+  )
+
+  raw_target = (
+      scan_target
+      if scan_target is not None
+      else os.environ.get("CODEMENDER_SCAN_TARGET", ".")
+  )
+  raw_target = (raw_target or ".").strip()
+  if raw_target in ("", ".", "./", "/"):
+    target_slug = "root"
+  else:
+    parts = [
+        re.sub(r"[^a-z0-9._-]+", "-", p.strip().lower()).strip("-")
+        for chunk in raw_target.split(";")
+        for p in chunk.split(",")
+        if p.strip() and p.strip() not in (".", "./", "/")
+    ]
+    target_slug = "-".join(p for p in parts if p)[:64] or "root"
+
+  return f"codemender/{repo_slug}/{target_slug}/"
+
+
+_SYMBOL_DECL_RE = re.compile(
+    r"^\s*(?:async\s+def|def|class|function|func)\s+([A-Za-z_][A-Za-z0-9_]*)\b"
+    r"|^\s*(?:public|private|protected|internal|static|final|synchronized|abstract|native|\s)+"
+    r"[\w<>\[\],.?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+
+
+_SYMBOL_STOP_WORDS = frozenset({
+    "if",
+    "else",
+    "elif",
+    "for",
+    "while",
+    "switch",
+    "case",
+    "catch",
+    "try",
+    "return",
+    "new",
+    "var",
+    "let",
+    "const",
+    "from",
+    "import",
+    "None",
+    "none",
+    "true",
+    "false",
+    "null",
+})
+
+
+def _extract_stable_symbol_anchor(
+    finding: Dict[str, Any],
+    repo_dir: str,
+    rel_path: str,
+    start_line: int,
+    snippet: str = "",
+) -> str:
+  """Extracts an enclosing function, method, class, or code-token anchor for cross-run ruleId stability."""
+  for key in ("Symbol", "symbol", "Function", "function", "Method", "method"):
+    val = finding.get(key)
+    if isinstance(val, str) and val.strip():
+      return re.sub(r"[^a-z0-9_.:-]+", "", val.strip().lower())
+
+  full_path = os.path.join(repo_dir, rel_path) if repo_dir and rel_path else ""
+  if full_path and os.path.isfile(full_path) and start_line >= 1:
+    try:
+      with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.splitlines()
+      upper_idx = min(len(lines), start_line)
+      for idx in range(upper_idx - 1, -1, -1):
+        m = _SYMBOL_DECL_RE.match(lines[idx])
+        if m:
+          sym = m.group(1) or m.group(2)
+          if sym and sym.lower() not in _SYMBOL_STOP_WORDS:
+            return sym.lower()
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+  raw_snippet = (
+      snippet
+      or finding.get("Snippet")
+      or finding.get("snippet")
+      or ""
+  )
+  if isinstance(raw_snippet, str) and raw_snippet.strip():
+    for raw_ln in raw_snippet.splitlines():
+      ln = raw_ln.strip()
+      if not ln or ln.startswith(("#", "//", "/*", "*")):
+        continue
+      m = _SYMBOL_DECL_RE.match(ln)
+      if m:
+        sym = m.group(1) or m.group(2)
+        if sym and sym.lower() not in _SYMBOL_STOP_WORDS:
+          return sym.lower()
+      tokens = [
+          t.lower()
+          for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", ln)
+          if t.lower() not in _SYMBOL_STOP_WORDS
+      ]
+      if tokens:
+        return "_".join(tokens[:6])
+  return ""
+
+
 def _sanitize_sarif_file(
     sarif_path: str,
     repo_dir: str,
     skipped_finding_ids: Optional[Set[str]] = None,
     is_pr_scan: bool = False,
+    repository: Optional[str] = None,
+    scan_target: Optional[str] = None,
 ) -> None:
   """Sanitizes SARIF file paths, deduplicates finding messages, and formats Markdown rule help."""
   if not os.path.exists(sarif_path):
@@ -834,9 +968,18 @@ def _sanitize_sarif_file(
       return
 
     clean_repo_dir = os.path.abspath(repo_dir)
+    automation_id = _build_automation_details_id(
+        repository=repository,
+        scan_target=scan_target,
+        repo_dir=repo_dir,
+    )
 
     # Iterate through all runs and results to normalize file URIs, deduplicate messages, and inject suppressions
     for run in (data.get("runs") or []):
+      if isinstance(run, dict):
+        auto_details = run.get("automationDetails")
+        if not isinstance(auto_details, dict) or not auto_details.get("id"):
+          run["automationDetails"] = {"id": automation_id}
       driver = run.get("tool", {}).get("driver", {})
       rules = driver.get("rules") or []
       rules_by_id = {r.get("id"): r for r in rules if isinstance(r, dict) and r.get("id")}
@@ -1008,6 +1151,11 @@ def is_sarif_complete(
         or not tags
     ):
       return False
+    if not re.search(r"/[0-9a-f]{8}$", str(rule_id or "")):
+      return False
+    pf = res.get("partialFingerprints") or {}
+    if not isinstance(pf, dict) or not str(pf.get("primaryLocationLineHash") or "").strip():
+      return False
     locs = res.get("locations")
     if not isinstance(locs, list) or not locs:
       return False
@@ -1151,6 +1299,8 @@ def transform_json_to_sarif(
     finding_prs: Optional[Dict[str, str]] = None,
     is_pr_scan: bool = False,
     tool_version: str = "0.9.0",
+    repository: Optional[str] = None,
+    scan_target: Optional[str] = None,
 ) -> Dict[str, Any]:
   """Synthesizes a complete GitHub Code Scanning SARIF 2.1.0 document from CodeMender JSON findings."""
   rules: List[Dict[str, Any]] = []
@@ -1180,10 +1330,22 @@ def transform_json_to_sarif(
     vuln_type = str(
         f.get("VulnType") or f.get("vuln_type") or "Security Vulnerability"
     ).strip()
-    vuln_id = str(f.get("VulnID") or f.get("vuln_id") or "").strip()
+    vuln_id = str(
+        f.get("VulnID")
+        or f.get("vuln_id")
+        or f.get("cwe_id")
+        or f.get("CWE")
+        or ""
+    ).strip()
     title = str(f.get("Title") or f.get("title") or vuln_type).strip()
     if not vuln_id:
-      cwe_match = re.search(r"(CWE-\d+)", f"{vuln_type} {title}", re.IGNORECASE)
+      cwe_match = re.search(r"(CWE-\d+)", vuln_type, re.IGNORECASE)
+      if not cwe_match and vuln_type.lower() in (
+          "security vulnerability",
+          "vulnerability",
+          "unknown",
+      ):
+        cwe_match = re.search(r"(CWE-\d+)", title, re.IGNORECASE)
       if cwe_match:
         vuln_id = cwe_match.group(1).upper()
       else:
@@ -1224,10 +1386,16 @@ def transform_json_to_sarif(
         or f"CodeMender detected a {severity} {vuln_type} ({vuln_id}) vulnerability in `{rel_path}`."
     ).strip()
 
-    # Deterministic, cross-run-stable ruleId per unique finding location & CWE
-    rule_hash = hashlib.sha256(
-        f"{vuln_id}:{rel_path}:{start_line}:{title}".encode("utf-8")
-    ).hexdigest()[:8]
+    # Cross-run-stable ruleId: hash of vuln_id/vuln_type, normalized file_path,
+    # and enclosing symbol/function anchor (omitting volatile raw line numbers
+    # and LLM-generated titles).
+    symbol_anchor = _extract_stable_symbol_anchor(
+        f, repo_dir, rel_path, start_line, snippet=snippet
+    )
+    rule_seed = (
+        f"{vuln_id.upper()}:{vuln_type.strip().lower()}:{rel_path}:{symbol_anchor}"
+    )
+    rule_hash = hashlib.sha256(rule_seed.encode("utf-8")).hexdigest()[:8]
     rule_id = f"{vuln_id}/{rule_hash}"
 
     pr_url = prs_map.get(finding_id) or str(f.get("pr_url") or "").strip()
@@ -1313,9 +1481,15 @@ def transform_json_to_sarif(
         else first_sentence
     )
 
-    line_hash = hashlib.sha256(
-        f"{vuln_id}:{rel_path}:{start_line}:{(snippet or title).strip()}".encode("utf-8")
-    ).hexdigest()[:16]
+    normalized_snippet = (
+        re.sub(r"\s+", " ", snippet.strip())
+        if snippet and snippet.strip()
+        else ""
+    )
+    fp_seed = (
+        f"{vuln_id.upper()}:{vuln_type.strip().lower()}:{rel_path}:{symbol_anchor}:{normalized_snippet}"
+    )
+    line_hash = hashlib.sha256(fp_seed.encode("utf-8")).hexdigest()[:16]
 
     result_obj: Dict[str, Any] = {
         "ruleId": rule_id,
@@ -1365,11 +1539,20 @@ def transform_json_to_sarif(
 
     results.append(result_obj)
 
+  automation_id = _build_automation_details_id(
+      repository=repository,
+      scan_target=scan_target,
+      repo_dir=repo_dir,
+  )
+
   return {
       "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
       "version": "2.1.0",
       "runs": [
           {
+              "automationDetails": {
+                  "id": automation_id,
+              },
               "tool": {
                   "driver": {
                       "name": "CodeMender",
@@ -1450,6 +1633,8 @@ def validate_and_enrich_sarif(
     finding_prs: Optional[Dict[str, str]] = None,
     is_pr_scan: bool = False,
     state_db_path: Optional[str] = None,
+    repository: Optional[str] = None,
+    scan_target: Optional[str] = None,
 ) -> bool:
   """Validates SARIF completeness and synthesizes rich SARIF 2.1.0 from report.json + state.db when incomplete."""
   existing_sarif = None
@@ -1459,6 +1644,12 @@ def validate_and_enrich_sarif(
         existing_sarif = extract_json_from_output(f.read())
     except Exception:  # pylint: disable=broad-exception-caught
       existing_sarif = None
+
+  automation_id = _build_automation_details_id(
+      repository=repository,
+      scan_target=scan_target,
+      repo_dir=repo_dir,
+  )
 
   findings = _load_findings_for_sarif(json_path, state_db_path)
   skipped_set = set(skipped_finding_ids or set())
@@ -1484,6 +1675,17 @@ def validate_and_enrich_sarif(
       )
       and not finding_prs
   ):
+    if isinstance(existing_sarif, dict):
+      for run in existing_sarif.get("runs") or []:
+        if isinstance(run, dict):
+          auto_details = run.get("automationDetails")
+          if not isinstance(auto_details, dict) or not auto_details.get("id"):
+            run["automationDetails"] = {"id": automation_id}
+      try:
+        with open(sarif_path, "w", encoding="utf-8") as f:
+          json.dump(existing_sarif, f, indent=2)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
     logger.info("SARIF report at %s passed completeness validation.", sarif_path)
     return True
 
@@ -1492,6 +1694,9 @@ def validate_and_enrich_sarif(
       # Ensure tool.driver.rules is an array (not null) even when 0 findings exist
       for run in existing_sarif.get("runs") or []:
         if isinstance(run, dict):
+          auto_details = run.get("automationDetails")
+          if not isinstance(auto_details, dict) or not auto_details.get("id"):
+            run["automationDetails"] = {"id": automation_id}
           driver = (run.get("tool") or {}).get("driver")
           if isinstance(driver, dict) and driver.get("rules") is None:
             driver["rules"] = []
@@ -1512,6 +1717,8 @@ def validate_and_enrich_sarif(
       skipped_finding_ids=skipped_finding_ids,
       finding_prs=finding_prs,
       is_pr_scan=is_pr_scan,
+      repository=repository,
+      scan_target=scan_target,
   )
   try:
     os.makedirs(os.path.dirname(os.path.abspath(sarif_path)), exist_ok=True)
@@ -1725,6 +1932,8 @@ def _generate_and_upload_report(
         repo_dir,
         skipped_finding_ids=skipped_finding_ids,
         is_pr_scan=is_pr_scan,
+        repository=f"{owner}/{repo_name}",
+        scan_target=cfg.scan_target,
     )
   validate_and_enrich_sarif(
       sarif_path=found_sarif,
@@ -1734,6 +1943,8 @@ def _generate_and_upload_report(
       finding_prs=finding_prs,
       is_pr_scan=is_pr_scan,
       state_db_path=os.path.join(codemender_home, "state.db"),
+      repository=f"{owner}/{repo_name}",
+      scan_target=cfg.scan_target,
   )
   if os.path.exists(found_sarif):
     # Ensure SARIF is placed in repo_dir and workspace root for upload-sarif action
@@ -1802,6 +2013,23 @@ def _generate_and_upload_report(
   return report_gcs_uri
 
 
+def has_sarif_results(sarif_path: Optional[str]) -> bool:
+  """Returns True if the SARIF file exists and contains at least one result across its runs."""
+  if not sarif_path or not os.path.isfile(sarif_path):
+    return False
+  try:
+    with open(sarif_path, "r", encoding="utf-8") as f:
+      data = extract_json_from_output(f.read())
+    if not isinstance(data, dict):
+      return False
+    for run in data.get("runs") or []:
+      if isinstance(run, dict) and run.get("results"):
+        return True
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+  return False
+
+
 def _resolve_end_to_end_duration(workspace_dir: str) -> Optional[float]:
   """Computes total scan wall-clock seconds from the Stage 1 start timestamp.
 
@@ -1834,6 +2062,69 @@ def _resolve_end_to_end_duration(workspace_dir: str) -> Optional[float]:
     return None
 
 
+def _resolve_fallback_commit_sha(
+    clean_repo_url: str,
+    token: str,
+    owner: str,
+    repo_name: str,
+    target_branch: Optional[str],
+    workspace_dir: str,
+) -> Optional[str]:
+  """Resolves the target branch HEAD SHA via git ls-remote when manifest.json is unavailable."""
+  if not clean_repo_url or not token:
+    return None
+  try:
+    branch = target_branch or get_default_branch(token, owner, repo_name) or "HEAD"
+    ref_arg = f"refs/heads/{branch}" if branch != "HEAD" else "HEAD"
+    res = run_command(
+        [
+            "git",
+            "-c",
+            get_git_auth_header(token),
+            "ls-remote",
+            clean_repo_url,
+            ref_arg,
+        ],
+        cwd=workspace_dir,
+        check=False,
+    )
+    stdout = (getattr(res, "stdout", "") or "").strip()
+    if stdout:
+      return stdout.split()[0].strip()
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Could not resolve fallback commit SHA via ls-remote: %s", e)
+  return None
+
+
+def _record_failure_marker(
+    workspace_dir: str,
+    bucket_name: Optional[str],
+    scan_id: Optional[str],
+    stage: str,
+    target_sha: Optional[str],
+) -> None:
+  """Uploads a failure marker to GCS so the Cloud Workflows finalizer knows the container already emitted telemetry."""
+  if not bucket_name or not scan_id or scan_id.startswith("local"):
+    return
+  try:
+    marker_path = os.path.join(workspace_dir or "/tmp", "failure_recorded.json")
+    with open(marker_path, "w", encoding="utf-8") as f:
+      json.dump(
+          {
+              "scan_id": scan_id,
+              "stage": stage,
+              "target_sha": target_sha or "",
+              "recorded": True,
+          },
+          f,
+      )
+    upload_file_to_gcs(
+        marker_path, bucket_name, f"scans/{scan_id}/failure_recorded.json"
+    )
+  except Exception as err:  # pylint: disable=broad-exception-caught
+    logger.warning("Failed to upload failure marker to GCS: %s", err)
+
+
 def run_aggregate_pipeline() -> None:
   """Executes Stage 3: Download all worker states, merge DBs, generate report, and upload.
 
@@ -1844,7 +2135,49 @@ def run_aggregate_pipeline() -> None:
   """
   ctx = bq_telemetry.ScanRunContext(stage="aggregate")
   with bq_telemetry.telemetry_run_guard(ctx):
-    _run_aggregate_pipeline(ctx)
+    try:
+      _run_aggregate_pipeline(ctx)
+    except BaseException as exc:
+      is_clean_exit = isinstance(exc, SystemExit) and exc.code in (0, None)
+      if not is_clean_exit:
+        try:
+          cfg = OrchestratorConfig.from_env()
+          _record_failure_marker(
+              cfg.workspace_dir or os.getcwd(),
+              cfg.gcs_bucket,
+              ctx.scan_id or cfg.scan_id,
+              "aggregate",
+              ctx.target_sha or cfg.target_sha,
+          )
+          if (ctx.target_sha or cfg.target_sha) and ctx.repository and "/" in ctx.repository:
+            token = cfg.github_token
+            if not token:
+              try:
+                _, token = get_github_credentials(config=cfg)
+              except Exception:  # pylint: disable=broad-exception-caught
+                token = None
+            if token:
+              owner_part, repo_part = ctx.repository.split("/", 1)
+              gate_ctx = (
+                  STATUS_CONTEXT_PR
+                  if cfg.is_pr_scan
+                  else STATUS_CONTEXT_SCHEDULED
+              )
+              post_commit_status(
+                  token=token,
+                  owner=owner_part,
+                  repo=repo_part,
+                  sha=ctx.target_sha or cfg.target_sha,
+                  state="error",
+                  description="Scan failed during Stage 3 aggregation.",
+                  context=gate_ctx,
+                  target_url=cfg.execution_url or None,
+              )
+        except Exception as status_err:  # pylint: disable=broad-exception-caught
+          logger.warning(
+              "Failed to post Stage 3 error commit status: %s", status_err
+          )
+      raise
 
 
 def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
@@ -1877,6 +2210,78 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   scrubbed_env = get_scrubbed_env()
   ctx.repository = f"{owner}/{repo_name}"
   ctx.repo_dir = repo_dir
+
+  # Handle workflow-level failure finalizer mode (triggered when Stage 1 or Stage 3 failed in Cloud Workflows)
+  workflow_failed = (
+      os.environ.get("CODEMENDER_WORKFLOW_FAILED", "false").strip().lower()
+      in ("true", "1", "yes")
+  )
+  if workflow_failed:
+    failure_reason = (
+        os.environ.get("CODEMENDER_FAILURE_REASON")
+        or "Upstream workflow stage failed."
+    ).strip()
+    manifest_sha = None
+    already_recorded_telemetry = False
+    if bucket_name and scan_id:
+      tmp_marker = os.path.join(workspace_dir, "failure_recorded_recovery.json")
+      if download_file_from_gcs(
+          tmp_marker, bucket_name, f"scans/{scan_id}/failure_recorded.json"
+      ):
+        already_recorded_telemetry = True
+        try:
+          with open(tmp_marker, "r", encoding="utf-8") as f:
+            manifest_sha = json.load(f).get("target_sha") or manifest_sha
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+      tmp_manifest = os.path.join(workspace_dir, "manifest_recovery.json")
+      if download_file_from_gcs(
+          tmp_manifest, bucket_name, f"scans/{scan_id}/manifest.json"
+      ):
+        try:
+          with open(tmp_manifest, "r", encoding="utf-8") as f:
+            manifest_sha = json.load(f).get("target_sha") or manifest_sha
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+    resolved_sha = (
+        config.target_sha
+        or manifest_sha
+        or _resolve_fallback_commit_sha(
+            clean_repo_url,
+            token,
+            owner,
+            repo_name,
+            config.target_branch,
+            workspace_dir,
+        )
+    )
+    ctx.target_sha = resolved_sha or ctx.target_sha
+    if resolved_sha and token:
+      gate_ctx = STATUS_CONTEXT_PR if config.is_pr_scan else STATUS_CONTEXT_SCHEDULED
+      post_commit_status(
+          token=token,
+          owner=owner,
+          repo=repo_name,
+          sha=resolved_sha,
+          state="error",
+          description=f"CodeMender scan failed: {failure_reason[:100]}",
+          context=gate_ctx,
+          target_url=config.execution_url or None,
+      )
+    if already_recorded_telemetry:
+      logger.info(
+          "Container already emitted FAILED telemetry row for scan %s; skipping duplicate BigQuery emission.",
+          scan_id,
+      )
+      ctx.emitted = True
+    else:
+      bq_telemetry.emit_scan_telemetry(
+          ctx,
+          status=bq_telemetry.STATUS_FAILED,
+          failure_reason=failure_reason,
+      )
+    logger.info("Workflow failure finalizer completed commit status and telemetry recovery.")
+    return
 
   # 3. Download or discover scan manifest.json
   manifest_path = os.path.join(workspace_dir, "manifest.json")
@@ -2260,21 +2665,27 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
 
     sarif_path = os.path.join(repo_dir, "report.sarif")
     if os.path.exists(sarif_path):
-      if config.is_pr_scan and config.pr_number:
-        scan_ref = f"refs/pull/{config.pr_number}/head"
-      elif config.target_branch:
-        scan_ref = f"refs/heads/{config.target_branch}"
+      if has_sarif_results(sarif_path) or config.upload_empty_sarif:
+        if config.is_pr_scan and config.pr_number:
+          scan_ref = f"refs/pull/{config.pr_number}/head"
+        elif config.target_branch:
+          scan_ref = f"refs/heads/{config.target_branch}"
+        else:
+          default_br = get_default_branch(token, owner, repo_name)
+          scan_ref = f"refs/heads/{default_br}"
+        upload_sarif_to_code_scanning(
+            token=token,
+            owner=owner,
+            repo=repo_name,
+            sarif_path=sarif_path,
+            commit_sha=target_commit_sha,
+            ref=scan_ref,
+        )
       else:
-        default_br = get_default_branch(token, owner, repo_name)
-        scan_ref = f"refs/heads/{default_br}"
-      upload_sarif_to_code_scanning(
-          token=token,
-          owner=owner,
-          repo=repo_name,
-          sarif_path=sarif_path,
-          commit_sha=target_commit_sha,
-          ref=scan_ref,
-      )
+        logger.info(
+            "Skipping GitHub Code Scanning SARIF upload because report.sarif contains 0 results "
+            "(set CODEMENDER_UPLOAD_EMPTY_SARIF=true to auto-resolve existing alerts on empty runs)."
+        )
 
   # 13. Mirror the run summary into a single sticky comment on the Pull Request
   # This runs here rather than in the workers because the matrix workers execute

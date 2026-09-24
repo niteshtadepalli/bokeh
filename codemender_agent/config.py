@@ -99,6 +99,7 @@ class OrchestratorConfig:
   # Scheduled / Branch Scan Parameters
   target_branch: Optional[str] = None
   execution_url: Optional[str] = None
+  upload_empty_sarif: bool = False
 
   # BigQuery Analytics Telemetry (opt-in; unset dataset disables export
   # entirely).
@@ -301,6 +302,10 @@ class OrchestratorConfig:
     execution_url = (
         os.environ.get("CODEMENDER_EXECUTION_URL") or ""
     ).strip() or None
+    upload_empty_sarif = (
+        os.environ.get("CODEMENDER_UPLOAD_EMPTY_SARIF", "false").strip().lower()
+        in ("true", "1", "yes")
+    )
 
     # 8. Parse BigQuery Analytics Telemetry configuration.
     # An empty/unset dataset is the master off-switch: the exporter performs
@@ -363,6 +368,7 @@ class OrchestratorConfig:
         # Scheduled / branch scan parameters
         target_branch=target_branch,
         execution_url=execution_url,
+        upload_empty_sarif=upload_empty_sarif,
         # BigQuery analytics telemetry (opt-in)
         bq_dataset=bq_dataset,
         bq_project=bq_project,
