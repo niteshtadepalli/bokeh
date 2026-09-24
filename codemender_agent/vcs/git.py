@@ -575,3 +575,101 @@ def push_branch_to_remote(
   push_cmd.extend(["origin", branch_name])
   from codemender_agent.utils import run_command
   run_command(push_cmd, cwd=repo_dir, check=True)
+
+
+def parse_diff_hunks_to_review_comments(
+    diff_text: str,
+    default_relpath: str,
+    header_md: str,
+    fallback_line: int = 1,
+) -> List[dict]:
+  """Parses a unified diff into GitHub PR review suggestion comments anchored on RIGHT.
+
+  Trims leading/trailing unchanged context lines (' ') from each hunk so the
+  suggestion block stays tightly scoped to the modified lines, and falls back
+  to a raw diff block on `fallback_line` if no suggestion hunks are parsed.
+  """
+  comments: List[dict] = []
+  current_file = default_relpath
+  lines = (diff_text or "").splitlines()
+  i = 0
+  first_hunk = True
+  while i < len(lines):
+    line = lines[i]
+    if line.startswith("+++ b/"):
+      current_file = normalize_repo_relative_path(line[6:]) or default_relpath
+      i += 1
+      continue
+    m = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+    if not m:
+      i += 1
+      continue
+    old_start = int(m.group(1))
+    old_count = int(m.group(2) or "1")
+    i += 1
+    hunk_lines = []
+    while (
+        i < len(lines)
+        and not lines[i].startswith("@@ ")
+        and not lines[i].startswith("diff --git ")
+        and not lines[i].startswith("--- ")
+        and not lines[i].startswith("+++ ")
+    ):
+      if not lines[i].startswith("\\"):
+        hunk_lines.append(lines[i])
+      i += 1
+
+    while hunk_lines and hunk_lines[0].startswith(" "):
+      hunk_lines.pop(0)
+      old_start += 1
+      old_count = max(1, old_count - 1)
+    while hunk_lines and hunk_lines[-1].startswith(" "):
+      hunk_lines.pop()
+      old_count = max(1, old_count - 1)
+
+    replacement = []
+    removed_count = 0
+    for hl in hunk_lines:
+      if hl.startswith("+"):
+        replacement.append(hl[1:])
+      elif hl.startswith(" "):
+        replacement.append(hl[1:])
+        removed_count += 1
+      elif hl.startswith("-"):
+        removed_count += 1
+
+    old_end = max(old_start, old_start + max(1, removed_count) - 1)
+    suggestion_code = "\n".join(replacement)
+    prefix = f"{header_md}\n\n" if first_hunk else ""
+    first_hunk = False
+    body = (
+        f"{prefix}#### 💡 CodeMender One-Click Fix (`cm fix`)\n"
+        "Click **Commit suggestion** below to apply this security fix directly"
+        f" to the PR:\n```suggestion\n{suggestion_code}\n```"
+    )
+    c_obj: dict = {
+        "path": current_file or default_relpath,
+        "side": "RIGHT",
+        "line": old_end,
+        "body": body,
+    }
+    if old_start < old_end:
+      c_obj["start_line"] = old_start
+      c_obj["start_side"] = "RIGHT"
+    comments.append(c_obj)
+
+  if not comments:
+    body = header_md
+    if diff_text and diff_text.strip():
+      body += (
+          "\n\n#### 💡 Proposed CodeMender Patch (`cm fix`)\n"
+          f"```diff\n{diff_text[:4000]}\n```"
+      )
+    comments = [{
+        "path": default_relpath,
+        "side": "RIGHT",
+        "line": max(1, int(fallback_line or 1)),
+        "body": body,
+    }]
+  return comments
+
