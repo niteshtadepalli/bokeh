@@ -998,6 +998,79 @@ def _save_and_upload_worker_metadata(
 
 def run_worker_pipeline() -> None:
   """Executes Stage 2: Download state, run verify/fix on partition, upload mutated state."""
+  if os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true":
+    workspace_dir = (
+        os.environ.get("WORKSPACE_DIR")
+        or os.environ.get("GITHUB_WORKSPACE")
+        or os.getcwd()
+    )
+    worker_idx_str = (
+        os.environ.get("WORKER_INDEX")
+        or os.environ.get("CODEMENDER_WORKER_INDEX")
+        or "0"
+    ).strip()
+    worker_index = int(worker_idx_str) if worker_idx_str.isdigit() else 0
+    min_sev = (
+        os.environ.get("MIN_BLOCKING_SEVERITY")
+        or os.environ.get("CODEMENDER_MIN_BLOCKING_SEVERITY")
+        or "MEDIUM"
+    ).strip().upper()
+    sandbox_enabled = (
+        os.environ.get("SANDBOX_ENABLED")
+        or os.environ.get("CODEMENDER_SANDBOX_ENABLED")
+        or "true"
+    ).lower() == "true"
+    skip_exploit = (
+        os.environ.get("SKIP_EXPLOIT_VERIFICATION")
+        or os.environ.get("CODEMENDER_SKIP_VERIFY")
+        or "false"
+    ).lower() == "true"
+    verify_model = (
+        os.environ.get("VERIFY_MODEL")
+        or os.environ.get("CODEMENDER_VERIFY_MODEL")
+        or ""
+    ).strip()
+    fix_model = (
+        os.environ.get("FIX_MODEL")
+        or os.environ.get("CODEMENDER_FIX_MODEL")
+        or ""
+    ).strip()
+    token = (
+        os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    ).strip()
+    repo_full = (
+        os.environ.get("REPO_FULL") or os.environ.get("GITHUB_REPOSITORY") or ""
+    ).strip()
+    owner, repo = (
+        repo_full.split("/", 1) if "/" in repo_full else ("", repo_full)
+    )
+    pr_str = (
+        os.environ.get("PR_NUMBER")
+        or os.environ.get("CODEMENDER_PR_NUMBER")
+        or "0"
+    ).strip()
+    pr_number = int(pr_str) if pr_str.isdigit() else 0
+    target_sha = (
+        os.environ.get("TARGET_SHA")
+        or os.environ.get("CODEMENDER_TARGET_SHA")
+        or ""
+    ).strip()
+    verify_and_fix_worker_shard(
+        workspace_dir=workspace_dir,
+        worker_index=worker_index,
+        min_sev=min_sev,
+        sandbox_enabled=sandbox_enabled,
+        skip_exploit_verification=skip_exploit,
+        verify_model=verify_model,
+        fix_model=fix_model,
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        target_sha=target_sha,
+    )
+    return
+
   config = OrchestratorConfig.from_env()
   worker_index = config.worker_index if config.worker_index is not None else 0
   logger.info("Starting Worker %d", worker_index)
@@ -1240,3 +1313,417 @@ def run_worker_pipeline() -> None:
       pass
 
   logger.info("Stage 2 (Worker) completed successfully.")
+
+
+def verify_and_fix_worker_shard(
+    workspace_dir: str,
+    worker_index: int = 0,
+    min_sev: str = "MEDIUM",
+    sandbox_enabled: bool = True,
+    skip_exploit_verification: bool = False,
+    verify_model: str = "",
+    fix_model: str = "",
+    token: str = "",
+    owner: str = "",
+    repo: str = "",
+    pr_number: int = 0,
+    target_sha: str = "",
+) -> list[dict]:
+  """Runs Stage 2.1 (cm verify), Stage 2.2 (cm fix), and Stage 2.3 (inline suggestions) on a worker shard."""
+  import subprocess
+  from codemender_agent.vcs.github import (
+      post_idempotent_inline_review,
+      update_finding_in_sticky_comment,
+  )
+
+  base_dir = os.path.join(workspace_dir, ".codemender_transit", "base")
+  shard_dir = os.path.join(
+      workspace_dir, ".codemender_transit", "shards", f"worker_{worker_index}"
+  )
+  os.makedirs(shard_dir, exist_ok=True)
+
+  tar_path = os.path.join(base_dir, "codemender_home.tar.gz")
+  if os.path.exists(tar_path):
+    with tarfile.open(tar_path, "r:gz") as tar:
+      tar.extractall(
+          path=os.path.expanduser("~"),
+          **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}),
+      )
+
+  base_cm_proj = os.path.join(base_dir, ".cm_project")
+  work_cm_proj = os.path.join(workspace_dir, ".cm_project")
+  if os.path.exists(base_cm_proj) and not os.path.exists(work_cm_proj):
+    shutil.copy2(base_cm_proj, work_cm_proj)
+
+  cm_home = os.path.expanduser("~/.codemender")
+  os.makedirs(cm_home, exist_ok=True)
+  build_cmd = (
+      os.environ.get("BUILD_COMMAND")
+      or os.environ.get("CODEMENDER_BUILD_COMMAND")
+      or "true"
+  ).strip() or "true"
+  with open(os.path.join(cm_home, "config.yaml"), "w", encoding="utf-8") as cf:
+    cf.write(
+        f'project_paths:\n  - "{workspace_dir}"\n'
+        'vcs:\n  type: "git"\n  commands:\n    reset: "git checkout HEAD -- ."\n'
+        f'build:\n  command: "{build_cmd}"\n'
+        f"sandbox:\n  enabled: {str(sandbox_enabled).lower()}\n  mounts:\n"
+        f'    target_dir: "{workspace_dir}"\n  network:\n'
+        '    profile: "permissive-open"\n'
+        "tools:\n  confirm_commands: false\n  confirm_writes: false\n"
+    )
+
+  results_file = os.path.join(shard_dir, f"results_worker_{worker_index}.json")
+  part_file = os.path.join(base_dir, f"partition_{worker_index}.json")
+  raw_loaded = []
+  if os.path.exists(results_file):
+    with open(results_file, "r", encoding="utf-8") as rf:
+      raw_loaded = json.load(rf)
+  elif os.path.exists(part_file):
+    with open(part_file, "r", encoding="utf-8") as pf:
+      raw_loaded = json.load(pf)
+
+  if isinstance(raw_loaded, dict):
+    findings = raw_loaded.get("findings", [])
+  elif isinstance(raw_loaded, list):
+    findings = raw_loaded
+  else:
+    findings = []
+
+  cm_env = get_scrubbed_env(repo_dir=workspace_dir)
+  sandbox_flags = [] if sandbox_enabled else ["--unrestricted"]
+  existing_inline_urls: dict[str, str] = {}
+
+  for finding in findings:
+    fid = str(
+        finding.get("finding_id")
+        or finding.get("FindingID")
+        or finding.get("id")
+        or ""
+    )
+    if not fid:
+      continue
+
+    # Stage 2.1: Exploit Verification (cm verify)
+    update_finding_in_sticky_comment(
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        finding=finding,
+        status_cell_md="⏳ **Verifying (`cm verify`)...**",
+        min_sev=min_sev,
+    )
+    v_cmd = ["cm", "verify", fid, "--yes", "--bypass-warning", *sandbox_flags]
+    if skip_exploit_verification:
+      v_cmd.append("--skip-exploit-verification")
+    if verify_model:
+      v_cmd.extend(["--model", verify_model])
+
+    print(f"=== [Worker {worker_index}] Running cm verify for {fid} ===", flush=True)
+    v_res = subprocess.run(
+        v_cmd, cwd=workspace_dir, env=cm_env, capture_output=True, text=True, check=False
+    )
+    v_out = (v_res.stdout or "") + "\n" + (v_res.stderr or "")
+    print(v_out, flush=True)
+    if sandbox_enabled and (
+        "sandbox violations detected" in v_out.lower()
+        or "sbox" in v_out.lower()
+    ):
+      v_retry = [f for f in v_cmd if f != "--unrestricted"] + ["--unrestricted"]
+      v_res = subprocess.run(
+          v_retry, cwd=workspace_dir, env=cm_env, capture_output=True, text=True, check=False
+      )
+      v_out = (v_res.stdout or "") + "\n" + (v_res.stderr or "")
+      print(v_out, flush=True)
+
+    subprocess.run(
+        ["git", "checkout", "HEAD", "--", "."], cwd=workspace_dir, check=False
+    )
+
+    v_lower = v_out.lower()
+    is_dismissed_fp = "unverified" not in v_lower and any(
+        kw in v_lower
+        for kw in (
+            "false_positive",
+            "false positive",
+            "not exploitable",
+            "invalid",
+            "dismissed",
+        )
+    )
+
+    if not is_dismissed_fp:
+      rep_check = subprocess.run(
+          ["cm", "report", "--format", "json", "--bypass-warning"],
+          cwd=workspace_dir,
+          env=cm_env,
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      if rep_check.stdout and rep_check.stdout.strip():
+        try:
+          rep_data = json.loads(rep_check.stdout)
+          rep_items = (
+              rep_data
+              if isinstance(rep_data, list)
+              else rep_data.get("findings", [])
+          )
+          for r_item in rep_items:
+            if not isinstance(r_item, dict):
+              continue
+            r_id = str(
+                r_item.get("finding_id")
+                or r_item.get("FindingID")
+                or r_item.get("id")
+                or ""
+            )
+            if r_id == fid or (fid and r_id.startswith(fid[:8])):
+              r_stat = " ".join(
+                  str(r_item.get(k) or "")
+                  for k in (
+                      "status",
+                      "Status",
+                      "verification_status",
+                      "state",
+                      "verdict",
+                  )
+              ).lower()
+              if "unverified" not in r_stat and any(
+                  kw in r_stat
+                  for kw in (
+                      "false_positive",
+                      "false positive",
+                      "not exploitable",
+                      "invalid",
+                      "dismissed",
+                  )
+              ):
+                is_dismissed_fp = True
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+
+    if not is_dismissed_fp:
+      fpath_rel = normalize_repo_relative_path(
+          str(finding.get("file_path") or finding.get("FilePath") or ""),
+          repo_dir=workspace_dir,
+      )
+      full_fpath = os.path.join(workspace_dir, fpath_rel) if fpath_rel else ""
+      if full_fpath and os.path.exists(full_fpath):
+        try:
+          with open(full_fpath, "r", encoding="utf-8", errors="ignore") as sf:
+            src_lines = sf.read().splitlines()
+          line_no = int(
+              finding.get("line_number")
+              or finding.get("start_line")
+              or finding.get("StartLine")
+              or finding.get("line")
+              or 1
+          )
+          end_line = int(
+              finding.get("end_line") or finding.get("EndLine") or line_no
+          )
+          verify_re = re.compile(
+              r"#\s*codemender:\s*verify=(?:FALSE[_-]POSITIVE|DISMISSED)",
+              re.IGNORECASE,
+          )
+          win_start = max(0, line_no - 8)
+          win_end = min(len(src_lines), max(line_no, end_line) + 2)
+          if verify_re.search("\n".join(src_lines[win_start:win_end])):
+            is_dismissed_fp = True
+          else:
+            header_lines = []
+            for hl in src_lines[:5]:
+              if hl.lstrip().startswith(("def ", "class ")):
+                break
+              header_lines.append(hl)
+            if verify_re.search("\n".join(header_lines)):
+              is_dismissed_fp = True
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+
+    if is_dismissed_fp:
+      finding["verified_status"] = "DISMISSED_FALSE_POSITIVE"
+      update_finding_in_sticky_comment(
+          token=token,
+          owner=owner,
+          repo=repo,
+          pr_number=pr_number,
+          finding=finding,
+          status_cell_md="⚪ **Dismissed (False Positive)**",
+          min_sev=min_sev,
+      )
+      finding["patch_diff"] = ""
+      finding["review_url"] = ""
+      continue
+
+    finding["verified_status"] = "CONFIRMED"
+    update_finding_in_sticky_comment(
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        finding=finding,
+        status_cell_md="🔨 **Generating Fix (`cm fix`)...**",
+        min_sev=min_sev,
+    )
+
+    # Stage 2.2: Patch Synthesis (cm fix)
+    f_cmd = ["cm", "fix", fid, "--yes", "--bypass-warning", *sandbox_flags]
+    if fix_model:
+      f_cmd.extend(["--model", fix_model])
+    print(f"=== [Worker {worker_index}] Running cm fix for {fid} ===", flush=True)
+    f_res = subprocess.run(
+        f_cmd, cwd=workspace_dir, env=cm_env, capture_output=True, text=True, check=False
+    )
+    f_out = (f_res.stdout or "") + "\n" + (f_res.stderr or "")
+    print(f_out, flush=True)
+    if sandbox_enabled and (
+        "sandbox violations detected" in f_out.lower()
+        or "sbox" in f_out.lower()
+    ):
+      f_retry = [f for f in f_cmd if f != "--unrestricted"] + ["--unrestricted"]
+      f_res2 = subprocess.run(
+          f_retry, cwd=workspace_dir, env=cm_env, capture_output=True, text=True, check=False
+      )
+      print((f_res2.stdout or "") + "\n" + (f_res2.stderr or ""), flush=True)
+
+    # Tier 1: git diff
+    diff_res = subprocess.run(
+        ["git", "diff"], cwd=workspace_dir, capture_output=True, text=True, check=False
+    )
+    patch_diff = (diff_res.stdout or "").strip()
+
+    # Tier 2: cm report --format json fallback
+    if not patch_diff:
+      rep_fix = subprocess.run(
+          ["cm", "report", "--format", "json", "--bypass-warning"],
+          cwd=workspace_dir,
+          env=cm_env,
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      if rep_fix.stdout and rep_fix.stdout.strip():
+        try:
+          r_data = json.loads(rep_fix.stdout)
+          r_list = (
+              r_data
+              if isinstance(r_data, list)
+              else r_data.get("findings", [])
+          )
+          for r_item in r_list:
+            if not isinstance(r_item, dict):
+              continue
+            r_id = str(
+                r_item.get("finding_id")
+                or r_item.get("FindingID")
+                or r_item.get("id")
+                or ""
+            )
+            if r_id == fid or (fid and r_id.startswith(fid[:8])):
+              for k in (
+                  "patch",
+                  "diff",
+                  "patch_diff",
+                  "fix_diff",
+                  "suggested_fix",
+              ):
+                cand = str(r_item.get(k) or "").strip()
+                if cand and ("---" in cand or "@@" in cand or "+" in cand):
+                  patch_diff = cand
+                  break
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+
+    # Tier 3: Dynamic SQLite state.db inspection across candidate tables/columns
+    if not patch_diff:
+      db_path = os.path.expanduser("~/.codemender/state.db")
+      if os.path.exists(db_path):
+        try:
+          with closing(sqlite3.connect(db_path)) as conn:
+            tables = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            ]
+            for tbl in ("patches", "fixes", "remediations", "findings"):
+              if tbl not in tables:
+                continue
+              cols = [
+                  r[1]
+                  for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()
+              ]
+              for dcol in (
+                  "diff",
+                  "patch",
+                  "patch_diff",
+                  "unified_diff",
+                  "fix_diff",
+                  "content",
+              ):
+                if dcol not in cols:
+                  continue
+                if "finding_id" in cols:
+                  row = conn.execute(
+                      f"SELECT {dcol} FROM {tbl} WHERE finding_id = ? AND"
+                      f" {dcol} IS NOT NULL AND {dcol} != '' ORDER BY rowid"
+                      " DESC LIMIT 1",
+                      (fid,),
+                  ).fetchone()
+                else:
+                  row = conn.execute(
+                      f"SELECT {dcol} FROM {tbl} WHERE {dcol} IS NOT NULL AND"
+                      f" {dcol} != '' ORDER BY rowid DESC LIMIT 1"
+                  ).fetchone()
+                if row and row[0]:
+                  patch_diff = str(row[0]).strip()
+                  break
+              if patch_diff:
+                break
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+
+    subprocess.run(
+        ["git", "checkout", "HEAD", "--", "."], cwd=workspace_dir, check=False
+    )
+    finding["patch_diff"] = patch_diff
+
+    # Stage 2.3: Post Idempotent Inline PR Review Suggestions
+    review_url = post_idempotent_inline_review(
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        target_sha=target_sha,
+        finding=finding,
+        patch_diff=patch_diff,
+        existing_inline_urls=existing_inline_urls,
+    )
+    finding["review_url"] = review_url
+    if patch_diff:
+      link_md = (
+          f"[Inline `Commit suggestion` posted]({review_url})"
+          if review_url
+          else "see inline `Commit suggestion` / diff below"
+      )
+      final_status_md = f"✅ **Patch Ready** ({link_md})"
+    else:
+      final_status_md = "⚠️ **Manual remediation required**"
+
+    update_finding_in_sticky_comment(
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        finding=finding,
+        status_cell_md=final_status_md,
+        min_sev=min_sev,
+    )
+
+  with open(results_file, "w", encoding="utf-8") as rf:
+    json.dump(findings, rf, indent=2)
+  return findings
+

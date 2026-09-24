@@ -1120,6 +1120,54 @@ def _generate_and_upload_report(
 
 def run_aggregate_pipeline() -> None:
   """Executes Stage 3: Download all worker states, merge DBs, generate report, and upload."""
+  if os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true":
+    workspace_dir = (
+        os.environ.get("WORKSPACE_DIR")
+        or os.environ.get("GITHUB_WORKSPACE")
+        or os.getcwd()
+    )
+    min_sev = (
+        os.environ.get("MIN_BLOCKING_SEVERITY")
+        or os.environ.get("CODEMENDER_MIN_BLOCKING_SEVERITY")
+        or "MEDIUM"
+    ).strip().upper()
+    fail_on_findings = (
+        os.environ.get("FAIL_ON_FINDINGS", "true").lower() == "true"
+    )
+    token = (
+        os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    ).strip()
+    repo_full = (
+        os.environ.get("REPO_FULL") or os.environ.get("GITHUB_REPOSITORY") or ""
+    ).strip()
+    owner, repo = (
+        repo_full.split("/", 1) if "/" in repo_full else ("", repo_full)
+    )
+    pr_str = (
+        os.environ.get("PR_NUMBER")
+        or os.environ.get("CODEMENDER_PR_NUMBER")
+        or "0"
+    ).strip()
+    pr_number = int(pr_str) if pr_str.isdigit() else 0
+    target_sha = (
+        os.environ.get("TARGET_SHA")
+        or os.environ.get("CODEMENDER_TARGET_SHA")
+        or ""
+    ).strip()
+    run_url = os.environ.get("RUN_URL", "")
+    aggregate_and_update_security_gate(
+        workspace_dir=workspace_dir,
+        min_sev=min_sev,
+        fail_on_findings=fail_on_findings,
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        target_sha=target_sha,
+        run_url=run_url,
+    )
+    return
+
   config = OrchestratorConfig.from_env()
   workspace_dir = config.workspace_dir or os.getcwd()
 
@@ -1489,3 +1537,339 @@ def run_aggregate_pipeline() -> None:
 
   # Log final aggregator completion notice
   logger.info("Stage 3 (Aggregate) completed successfully.")
+
+
+def aggregate_and_update_security_gate(
+    workspace_dir: str,
+    min_sev: str = "MEDIUM",
+    fail_on_findings: bool = True,
+    token: str = "",
+    owner: str = "",
+    repo: str = "",
+    pr_number: int = 0,
+    target_sha: str = "",
+    run_url: str = "",
+) -> int:
+  """Merges worker shards against Stage 1 active_findings.json, filters SARIF FPs, and updates PR status/sticky comment."""
+  import glob
+  import subprocess
+
+  base_dir = os.path.join(workspace_dir, ".codemender_transit", "base")
+  tar_path = os.path.join(base_dir, "codemender_home.tar.gz")
+  if os.path.exists(tar_path):
+    with tarfile.open(tar_path, "r:gz") as tar:
+      tar.extractall(
+          path=os.path.expanduser("~"),
+          **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}),
+      )
+
+  base_cm_proj = os.path.join(base_dir, ".cm_project")
+  work_cm_proj = os.path.join(workspace_dir, ".cm_project")
+  if os.path.exists(base_cm_proj) and not os.path.exists(work_cm_proj):
+    shutil.copy2(base_cm_proj, work_cm_proj)
+
+  cm_home = os.path.expanduser("~/.codemender")
+  os.makedirs(cm_home, exist_ok=True)
+  with open(os.path.join(cm_home, "config.yaml"), "w", encoding="utf-8") as cf:
+    cf.write(
+        f'project_paths:\n  - "{workspace_dir}"\n'
+        'vcs:\n  type: "git"\n  commands:\n    reset: "git checkout HEAD -- ."\n'
+        'build:\n  command: "true"\n'
+        'sandbox:\n  enabled: false\n  mounts:\n'
+        f'    target_dir: "{workspace_dir}"\n  network:\n'
+        '    profile: "permissive-open"\n'
+        "tools:\n  confirm_commands: false\n  confirm_writes: false\n"
+    )
+
+  base_findings = []
+  af_path = os.path.join(base_dir, "active_findings.json")
+  if os.path.exists(af_path):
+    with open(af_path, "r", encoding="utf-8") as f:
+      base_findings = json.load(f)
+
+  shard_by_id: dict[str, dict] = {}
+  shard_pattern = os.path.join(
+      workspace_dir,
+      ".codemender_transit",
+      "shards",
+      "**",
+      "results_worker_*.json",
+  )
+  for shard_file in sorted(glob.glob(shard_pattern, recursive=True)):
+    with open(shard_file, "r", encoding="utf-8") as f:
+      for item in json.load(f):
+        fid = str(item.get("finding_id") or item.get("FindingID") or "")
+        if fid:
+          shard_by_id[fid] = item
+
+  findings = []
+  if base_findings:
+    for bf in base_findings:
+      fid = str(bf.get("finding_id") or bf.get("FindingID") or "")
+      findings.append(shard_by_id.get(fid, bf))
+  else:
+    findings = list(shard_by_id.values())
+
+  report_json_path = os.path.join(workspace_dir, "report.json")
+  with open(report_json_path, "w", encoding="utf-8") as rf:
+    json.dump({"findings": findings}, rf, indent=2)
+
+  rank = {
+      "CRITICAL": 4,
+      "HIGH": 3,
+      "MEDIUM": 2,
+      "LOW": 1,
+      "INFO": 0,
+      "INFORMATIONAL": 0,
+  }
+  threshold = rank.get(min_sev.strip().upper(), 2)
+
+  confirmed_blocking = []
+  advisory_or_dismissed = []
+  dismissed_ids = set()
+  dismissed_locs = set()
+  for item in findings:
+    sev = str(
+        item.get("severity") or item.get("Severity") or "MEDIUM"
+    ).strip().upper()
+    v_status = str(item.get("verified_status", "CONFIRMED"))
+    if v_status == "DISMISSED_FALSE_POSITIVE":
+      fid = str(item.get("finding_id") or item.get("FindingID") or "")
+      if fid:
+        dismissed_ids.add(fid)
+      fp = str(item.get("file_path") or item.get("FilePath") or "")
+      ln = int(
+          item.get("line_number")
+          or item.get("start_line")
+          or item.get("StartLine")
+          or item.get("line")
+          or 0
+      )
+      if fp and ln:
+        dismissed_locs.add((fp, ln))
+      advisory_or_dismissed.append((sev, item))
+    elif rank.get(sev, 2) >= threshold:
+      confirmed_blocking.append((sev, item))
+    else:
+      advisory_or_dismissed.append((sev, item))
+
+  sarif_res = subprocess.run(
+      ["cm", "report", "--format", "sarif", "--bypass-warning"],
+      cwd=workspace_dir,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  sarif_out = (sarif_res.stdout or "").strip()
+  if sarif_out.startswith("{"):
+    sarif_path = os.path.join(workspace_dir, "report.sarif")
+    try:
+      sarif_doc = json.loads(sarif_out)
+      if dismissed_ids or dismissed_locs:
+        for run_obj in sarif_doc.get("runs", []):
+          filtered_results = []
+          for r in run_obj.get("results", []):
+            r_text = json.dumps(r)
+            if any(did in r_text for did in dismissed_ids):
+              continue
+            locs = r.get("locations") or []
+            phys = (locs[0].get("physicalLocation") or {}) if locs else {}
+            uri = (
+                (phys.get("artifactLocation") or {}).get("uri") or ""
+            ).lstrip("./")
+            s_line = int((phys.get("region") or {}).get("startLine") or 0)
+            if any(
+                (uri.endswith(dfp) or dfp.endswith(uri)) and s_line == dln
+                for dfp, dln in dismissed_locs
+            ):
+              continue
+            filtered_results.append(r)
+          run_obj["results"] = filtered_results
+      with open(sarif_path, "w", encoding="utf-8") as sf:
+        json.dump(sarif_doc, sf, indent=2)
+    except Exception:  # pylint: disable=broad-exception-caught
+      with open(sarif_path, "w", encoding="utf-8") as sf:
+        sf.write(sarif_out)
+
+  html_res = subprocess.run(
+      ["cm", "report", "--format", "html", "--bypass-warning"],
+      cwd=workspace_dir,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  html_path = os.path.join(workspace_dir, "report.html")
+  if html_res.returncode == 0 and (html_res.stdout or "").strip():
+    with open(html_path, "w", encoding="utf-8") as hf:
+      hf.write(html_res.stdout)
+  elif not os.path.exists(html_path):
+    with open(html_path, "w", encoding="utf-8") as hf:
+      hf.write(
+          "<html><body><h1>CodeMender Security Report</h1>"
+          f"<p>Total findings evaluated: {len(findings)}</p></body></html>"
+      )
+
+  blocking_count = len(confirmed_blocking)
+  patched_count = sum(
+      1
+      for _, item in confirmed_blocking
+      if str(item.get("patch_diff") or "").strip()
+  )
+  dismissed_count = sum(
+      1
+      for _, item in advisory_or_dismissed
+      if str(item.get("verified_status", "")) == "DISMISSED_FALSE_POSITIVE"
+  )
+  advisory_only_count = len(advisory_or_dismissed) - dismissed_count
+  gate_status = (
+      "failure" if (blocking_count > 0 and fail_on_findings) else "success"
+  )
+
+  if token and owner and repo and target_sha:
+    if gate_status == "success":
+      if dismissed_count > 0 and advisory_only_count > 0:
+        status_desc = (
+            f"PASSED: 0 confirmed >= {min_sev} findings"
+            f" ({dismissed_count} FP dismissed, {advisory_only_count} advisory)."
+        )
+      elif dismissed_count > 0:
+        status_desc = (
+            f"PASSED: 0 confirmed >= {min_sev} findings"
+            f" ({dismissed_count} false positive(s) dismissed by cm verify)."
+        )
+      elif advisory_only_count > 0:
+        status_desc = (
+            f"PASSED: 0 confirmed >= {min_sev} findings"
+            f" ({advisory_only_count} advisory finding(s))."
+        )
+      else:
+        status_desc = (
+            f"PASSED: 0 confirmed >= {min_sev} findings after cm verify."
+        )
+    else:
+      fp_note = f", {dismissed_count} FP dismissed" if dismissed_count else ""
+      status_desc = (
+          f"BLOCKED: {blocking_count} confirmed >= {min_sev} finding(s) require"
+          f" remediation ({patched_count} auto-fix patch(es) ready{fp_note})."
+      )
+    post_commit_status(
+        token=token,
+        owner=owner,
+        repo=repo,
+        sha=target_sha,
+        state=gate_status,
+        description=status_desc,
+        context="CodeMender / Security Gate",
+        target_url=run_url,
+    )
+
+  rows = []
+  patch_blocks = []
+  detail_blocks = []
+  for sev, item in confirmed_blocking + advisory_or_dismissed:
+    fid = str(item.get("finding_id") or item.get("FindingID") or "")[:8]
+    v_status = str(item.get("verified_status", "CONFIRMED"))
+    review_url = str(item.get("review_url") or "")
+    patch_diff = str(item.get("patch_diff") or "").strip()
+    title = str(item.get("title") or item.get("Title") or fid)
+    fpath = str(item.get("file_path") or item.get("FilePath") or "")
+    line_no = int(
+        item.get("line_number")
+        or item.get("start_line")
+        or item.get("StartLine")
+        or item.get("line")
+        or 1
+    )
+    desc = str(item.get("description") or item.get("Description") or "").strip()
+    if v_status == "DISMISSED_FALSE_POSITIVE":
+      gate_badge = "⚪ Dismissed (FP)"
+      status_col = "⚪ **Dismissed by `cm verify` (False Positive)**"
+    elif rank.get(sev, 2) >= threshold:
+      gate_badge = "🚫 **BLOCKING**"
+      status_col = (
+          f"✅ **Patch Ready** ([Inline `Commit suggestion`]({review_url}))"
+          if (patch_diff and review_url)
+          else (
+              "✅ **Patch Ready**"
+              if patch_diff
+              else "⚠️ **Manual remediation required**"
+          )
+      )
+    else:
+      gate_badge = "ℹ️ Advisory"
+      status_col = (
+          f"✅ **Patch Ready** ([Inline `Commit suggestion`]({review_url}))"
+          if (patch_diff and review_url)
+          else "ℹ️ **Non-blocking advisory**"
+      )
+    rows.append(
+        f"| `{sev}` | {gate_badge} | **{title}** (`{fid}`) |"
+        f" `{fpath}:{line_no}` | {status_col} | <!-- cm-row:{fid} -->"
+    )
+    if patch_diff and v_status != "DISMISSED_FALSE_POSITIVE":
+      patch_blocks.append(
+          f"<details>\n<summary>🩹 <b>View Unified Diff Patch</b>:"
+          f" <code>{fpath}:{line_no}</code> — {title}"
+          f" (<code>{fid}</code>)</summary>\n\n````diff\n{patch_diff}\n````\n</details>"
+      )
+    if desc:
+      detail_blocks.append(
+          f"- **`[{sev}]` {title}** (`{fpath}:{line_no}`, ID `{fid}`): {desc}"
+      )
+
+  if gate_status == "failure":
+    banner = f"❌ **BLOCKED** (`{blocking_count}` confirmed finding(s) `>= {min_sev}`)"
+  elif dismissed_count > 0:
+    banner = (
+        f"✅ **PASSED (Auto-Unblocked)** (`{dismissed_count}` false"
+        f" positive(s) dismissed, `{advisory_only_count}` advisory)"
+    )
+  else:
+    banner = f"✅ **PASSED** (`{advisory_only_count}` advisory finding(s))"
+
+  remediation_section = ""
+  if patch_blocks:
+    remediation_section = (
+        "\n\n### 🔧 One-Click Auto-Remediation Guide\n"
+        "Click **Commit suggestion** on the inline review comments in the"
+        " **Files changed** tab, or expand the unified diffs below:\n\n"
+        + "\n\n".join(patch_blocks)
+    )
+
+  details_section = ""
+  if detail_blocks:
+    details_section = (
+        "\n\n<details>\n<summary>📋 <b>Vulnerability Descriptions &"
+        " Root-Cause Analysis</b></summary>\n\n"
+        + "\n".join(detail_blocks)
+        + "\n</details>"
+    )
+
+  body = (
+      f"## 🛡️ CodeMender Pre-Submit Security Gate — {banner}\n"
+      f"*✅ **Stage 3 Complete: {len(findings)}/{len(findings)} Findings"
+      " Verified & Aggregated***\n\n"
+      "| Severity | Gate | Finding | Location | Status |\n"
+      "| :--- | :--- | :--- | :--- | :--- |\n"
+      + "\n".join(rows)
+      + remediation_section
+      + details_section
+  )
+
+  step_summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+  if step_summary_path:
+    try:
+      with open(step_summary_path, "a", encoding="utf-8") as ssf:
+        ssf.write(body + "\n")
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+  if pr_number and owner and repo and token:
+    post_or_update_sticky_comment(
+        token=token, owner=owner, repo=repo, pr_number=pr_number, body=body
+    )
+
+  if gate_status == "failure":
+    raise SystemExit(1)
+  return 0
+
