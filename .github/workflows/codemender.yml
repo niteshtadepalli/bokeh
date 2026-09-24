@@ -10,7 +10,7 @@ name: CodeMender Pre-Submit Security Gate
 
 on:
   pull_request:
-    branches: [ "branch-*", "main", "master", "future" ]
+    branches: [ "branch-*", "main", "master", "future", "feat/*" ]
     types: [opened, reopened, synchronize, labeled]
   workflow_dispatch:
     inputs:
