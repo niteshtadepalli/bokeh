@@ -20,6 +20,7 @@ dist/
 # CodeMender Local Workspace Output
 .cm_project/
 .exploit/
+/cm
 
 # Terraform
 # Local .terraform directories

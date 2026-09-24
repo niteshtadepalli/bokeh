@@ -13,36 +13,52 @@
 # limitations under the License.
 
 steps:
-  # Step 1: Download the latest stable cm binary from official Google Artifact Registry
+  # Step 1: Download the latest stable cm binary from official Google Artifact Registry if not pre-staged
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        gcloud artifacts generic download \
-          --project=cmoc-prod \
-          --location=us \
-          --repository=codemender-cli-production \
-          --package=cm \
-          --version=stable \
-          --name=cm-linux-amd64.zip \
-          --destination=./
-        python3 -m zipfile -e cm-linux-amd64.zip ./
-        chmod +x cm
+        if [ ! -f ./cm ]; then
+          gcloud artifacts generic download \
+            --project=cmoc-prod \
+            --location=us \
+            --repository=codemender-cli-production \
+            --package=cm \
+            --version=stable \
+            --name=cm-linux-amd64.zip \
+            --destination=./
+          python3 -m zipfile -e cm-linux-amd64.zip ./
+        else
+          echo "Using pre-staged ./cm binary"
+        fi
+        chmod +x ./cm
 
-  # Step 2: Build the container image
+  # Step 2: Pull cached image and build the container image
   - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
     args:
-      - 'build'
-      - '-t'
-      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest'
-      - '.'
+      - '-c'
+      - |
+        docker pull ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest || true
+        docker build \
+          --cache-from ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest \
+          -t ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest \
+          -t ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/codemender-runner:latest \
+          .
 
   # Step 3: Push the container image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
-      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/codemender-runner'
 
   # Step 4: Update the runner Cloud Run Job with the newly pushed image
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
