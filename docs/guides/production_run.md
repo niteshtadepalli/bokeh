@@ -186,18 +186,31 @@ Compile and push the container image to Artifact Registry using Cloud Build
 (which fetches the stable `cm` CLI binary directly from Google Artifact Registry
 and packages it alongside your environment):
 
-1.  Create a Google Artifact Registry Docker repository (if one does not exist):
+1.  **If deploying via Terraform (`terraform/gcp`)**:
+    `terraform apply` automatically creates the `${resource_prefix}-runner` Artifact Registry repository and Cloud Run Jobs (`${resource_prefix}-runner` and `${resource_prefix}-worker`). Do **not** manually create a separate `codemender-runner` repository. Instead, run the exact command emitted by Terraform:
 
     ```bash
-    gcloud artifacts repositories create codemender-runner \
-        --repository-format=docker \
-        --location=us-central1
+    # Retrieve and run the pre-populated Cloud Build command from Terraform outputs:
+    $(terraform -chdir=terraform/gcp output -raw container_build_command)
+
+    # Or specify your resource_prefix and region directly:
+    gcloud builds submit --config=cloudbuild.yaml \
+        --substitutions=_RESOURCE_PREFIX=codemender,_REGION=us-central1 .
     ```
 
-2.  Compile and push the container image:
+2.  **If deploying manually via `gcloud` CLI (without Terraform)**:
+    Create the `${RESOURCE_PREFIX}-runner` Artifact Registry Docker repository (if it does not exist) and submit the build with matching substitutions:
 
     ```bash
-    gcloud builds submit --config=cloudbuild.yaml .
+    export RESOURCE_PREFIX="codemender"
+    export REGION="us-central1"
+
+    gcloud artifacts repositories create ${RESOURCE_PREFIX}-runner \
+        --repository-format=docker \
+        --location=${REGION}
+
+    gcloud builds submit --config=cloudbuild.yaml \
+        --substitutions=_RESOURCE_PREFIX=${RESOURCE_PREFIX},_REGION=${REGION} .
     ```
 
 --------------------------------------------------------------------------------

@@ -20,9 +20,10 @@ main:
           - default_empty_map: {}
           - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
           - region: ${default(map.get(args, "region"), "us-central1")}
-          - job_name: ${default(map.get(args, "job_name"), "cm-poc-runner")}
+          - resource_prefix: ${default(map.get(args, "resource_prefix"), "codemender")}
+          - job_name: ${default(map.get(args, "job_name"), resource_prefix + "-runner")}
           - worker_job_name: ${default(map.get(args, "worker_job_name"), text.replace_all(job_name, "-runner", "") + "-worker")}
-          - gcs_bucket: ${default(map.get(args, "gcs_bucket"), "cm-poc-reports-" + project_id)}
+          - gcs_bucket: ${default(map.get(args, "gcs_bucket"), resource_prefix + "-reports-" + project_id)}
           - repo_url: ${args.repo_url}
           - build_command: ${default(map.get(args, "build_command"), "")}
           - target_branch: ${default(map.get(args, "target_branch"), "")}
@@ -43,6 +44,12 @@ main:
           - find_model: ${if(raw_find_model != "", raw_find_model, model)}
           - verify_model: ${if(raw_verify_model != "", raw_verify_model, model)}
           - fix_model: ${if(raw_fix_model != "", raw_fix_model, model)}
+          - target_sha: ""
+          - num_workers: 0
+          - stage2_failed: false
+          - stage2_error_message: ""
+          - pipeline_error: {}
+          - failure_msg: "Workflow execution failed"
 
     - log_start:
         call: sys.log
@@ -103,13 +110,30 @@ main:
             initial_delay: 10
             max_delay: 60
             multiplier: 2
+        except:
+          as: err
+          steps:
+            - route_stage1_launch_error:
+                assign:
+                  - pipeline_error: ${err}
+                  - failure_msg: ${default(map.get(err, "message"), "Stage 1 job launch failed")}
+                next: handle_workflow_failure
 
     - wait_stage1:
-        call: wait_for_operation
-        args:
-          operation_name: ${stage1_operation.name}
-          timeout_seconds: ${timeout_seconds}
-        result: stage1_execution
+        try:
+          call: wait_for_operation
+          args:
+            operation_name: ${stage1_operation.name}
+            timeout_seconds: ${timeout_seconds}
+          result: stage1_execution
+        except:
+          as: err
+          steps:
+            - route_stage1_wait_error:
+                assign:
+                  - pipeline_error: ${err}
+                  - failure_msg: ${default(map.get(err, "message"), "Stage 1 job execution failed")}
+                next: handle_workflow_failure
 
     - read_manifest:
         try:
@@ -126,12 +150,20 @@ main:
             initial_delay: 5
             max_delay: 20
             multiplier: 2
+        except:
+          as: err
+          steps:
+            - route_manifest_error:
+                assign:
+                  - pipeline_error: ${err}
+                  - failure_msg: ${default(map.get(err, "message"), "Manifest download failed")}
+                next: handle_workflow_failure
 
     - parse_manifest:
         assign:
           - manifest: ${manifest_response}
           - findings_count: ${int(manifest.findings_count)}
-          - target_sha: ${manifest.target_sha}
+          - target_sha: ${default(map.get(manifest, "target_sha"), "")}
 
     - check_findings:
         switch:
@@ -156,131 +188,246 @@ main:
               - num_workers: ${total_partitions}
 
     - run_stage2_workers:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + worker_job_name}
-          body:
-            overrides:
-              taskCount: ${num_workers}
-              timeout: ${string(timeout_seconds) + "s"}
-              containerOverrides:
-                - env:
-                    - name: CODEMENDER_RUN_MODE
-                      value: "worker"
-                    - name: CODEMENDER_SCAN_ID
-                      value: ${scan_id}
-                    - name: CODEMENDER_GCS_BUCKET
-                      value: ${gcs_bucket}
-                    - name: GITHUB_REPO_URL
-                      value: ${repo_url}
-                    - name: CODEMENDER_BUILD_COMMAND
-                      value: ${build_command}
-                    - name: CODEMENDER_TARGET_BRANCH
-                      value: ${target_branch}
-                    - name: CODEMENDER_EXECUTION_URL
-                      value: ${execution_url}
-                    # Workers act on the partitions the manifest already
-                    # carved out, so they do not resolve the target
-                    # themselves. It is propagated anyway so all three stages
-                    # describe the same scan scope, and so any future
-                    # worker-side telemetry starts out attributable.
-                    - name: CODEMENDER_SCAN_TARGET
-                      value: ${scan_target}
-                    - name: CODEMENDER_TARGET_SHA
-                      value: ${target_sha}
-                    - name: CODEMENDER_BASE_WORKSPACE_URL
-                      value: ${base_workspace_url}
-                    - name: CODEMENDER_PARTITION_URLS
-                      value: ${partition_urls_str}
-                    - name: CODEMENDER_UPLOAD_URLS
-                      value: ${upload_urls_str}
-                    - name: CODEMENDER_METADATA_URLS
-                      value: ${metadata_urls_str}
-                    - name: CODEMENDER_CLI_VERSION
-                      value: ${cli_version}
-                    - name: CODEMENDER_MODEL
-                      value: ${model}
-                    - name: CODEMENDER_FIND_MODEL
-                      value: ${find_model}
-                    - name: CODEMENDER_VERIFY_MODEL
-                      value: ${verify_model}
-                    - name: CODEMENDER_FIX_MODEL
-                      value: ${fix_model}
-                    - name: CODEMENDER_SKIP_EXPLOIT_VERIFICATION
-                      value: ${string(skip_exploit_verification)}
-                    - name: CODEMENDER_SKIP_VERIFY
-                      value: ${string(skip_verify)}
-          connector_params:
-            skip_polling: true
-        result: stage2_operation
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + worker_job_name}
+            body:
+              overrides:
+                taskCount: ${num_workers}
+                timeout: ${string(timeout_seconds) + "s"}
+                containerOverrides:
+                  - env:
+                      - name: CODEMENDER_RUN_MODE
+                        value: "worker"
+                      - name: CODEMENDER_SCAN_ID
+                        value: ${scan_id}
+                      - name: CODEMENDER_GCS_BUCKET
+                        value: ${gcs_bucket}
+                      - name: GITHUB_REPO_URL
+                        value: ${repo_url}
+                      - name: CODEMENDER_BUILD_COMMAND
+                        value: ${build_command}
+                      - name: CODEMENDER_TARGET_BRANCH
+                        value: ${target_branch}
+                      - name: CODEMENDER_EXECUTION_URL
+                        value: ${execution_url}
+                      - name: CODEMENDER_SCAN_TARGET
+                        value: ${scan_target}
+                      - name: CODEMENDER_TARGET_SHA
+                        value: ${target_sha}
+                      - name: CODEMENDER_BASE_WORKSPACE_URL
+                        value: ${base_workspace_url}
+                      - name: CODEMENDER_PARTITION_URLS
+                        value: ${partition_urls_str}
+                      - name: CODEMENDER_UPLOAD_URLS
+                        value: ${upload_urls_str}
+                      - name: CODEMENDER_METADATA_URLS
+                        value: ${metadata_urls_str}
+                      - name: CODEMENDER_CLI_VERSION
+                        value: ${cli_version}
+                      - name: CODEMENDER_MODEL
+                        value: ${model}
+                      - name: CODEMENDER_FIND_MODEL
+                        value: ${find_model}
+                      - name: CODEMENDER_VERIFY_MODEL
+                        value: ${verify_model}
+                      - name: CODEMENDER_FIX_MODEL
+                        value: ${fix_model}
+                      - name: CODEMENDER_SKIP_EXPLOIT_VERIFICATION
+                        value: ${string(skip_exploit_verification)}
+                      - name: CODEMENDER_SKIP_VERIFY
+                        value: ${string(skip_verify)}
+            connector_params:
+              skip_polling: true
+          result: stage2_operation
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 10
+            max_delay: 60
+            multiplier: 2
+        except:
+          as: stage2_err
+          steps:
+            - record_stage2_launch_failure:
+                assign:
+                  - stage2_failed: true
+                  - stage2_error_message: ${default(map.get(stage2_err, "message"), "Stage 2 worker job launch failed")}
+            - log_stage2_launch_warning:
+                call: sys.log
+                args:
+                  text: '${"Stage 2 job launch encountered an error (" + stage2_error_message + "). Proceeding to Stage 3 aggregation to resolve GitHub commit status."}'
+                  severity: WARNING
+                next: run_stage3_aggregate
 
     - wait_stage2:
-        call: wait_for_operation
-        args:
-          operation_name: ${stage2_operation.name}
-          timeout_seconds: ${timeout_seconds}
-        result: stage2_execution
+        try:
+          call: wait_for_operation
+          args:
+            operation_name: ${stage2_operation.name}
+            timeout_seconds: ${timeout_seconds}
+          result: stage2_execution
+        except:
+          as: stage2_err
+          steps:
+            - record_stage2_failure:
+                assign:
+                  - stage2_failed: true
+                  - stage2_error_message: ${default(map.get(stage2_err, "message"), "Stage 2 worker pool had failed tasks")}
+            - log_stage2_warning:
+                call: sys.log
+                args:
+                  text: '${"Stage 2 encountered an error (" + stage2_error_message + "). Proceeding to Stage 3 aggregation to merge completed shards and resolve GitHub commit status."}'
+                  severity: WARNING
+                next: run_stage3_aggregate
 
     - run_stage3_aggregate:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + job_name}
-          body:
-            overrides:
-              taskCount: 1
-              timeout: ${string(timeout_seconds) + "s"}
-              containerOverrides:
-                - env:
-                    - name: CODEMENDER_RUN_MODE
-                      value: "aggregate"
-                    - name: CODEMENDER_SCAN_ID
-                      value: ${scan_id}
-                    - name: CODEMENDER_GCS_BUCKET
-                      value: ${gcs_bucket}
-                    - name: GITHUB_REPO_URL
-                      value: ${repo_url}
-                    - name: CODEMENDER_BUILD_COMMAND
-                      value: ${build_command}
-                    - name: CODEMENDER_TARGET_BRANCH
-                      value: ${target_branch}
-                    - name: CODEMENDER_EXECUTION_URL
-                      value: ${execution_url}
-                    # Stage 3 writes the scan_runs telemetry row for every run
-                    # that produced findings, so it needs the same scan target
-                    # Stage 1 was launched with. Without it the orchestrator
-                    # config falls back to its "." default and the recorded
-                    # target no longer identifies what was scanned.
-                    - name: CODEMENDER_SCAN_TARGET
-                      value: ${scan_target}
-                    - name: CODEMENDER_TOTAL_WORKERS
-                      value: ${string(num_workers)}
-                    - name: CODEMENDER_CLI_VERSION
-                      value: ${cli_version}
-                    - name: CODEMENDER_MODEL
-                      value: ${model}
-                    - name: CODEMENDER_FIND_MODEL
-                      value: ${find_model}
-                    - name: CODEMENDER_VERIFY_MODEL
-                      value: ${verify_model}
-                    - name: CODEMENDER_FIX_MODEL
-                      value: ${fix_model}
-                    - name: CODEMENDER_SKIP_EXPLOIT_VERIFICATION
-                      value: ${string(skip_exploit_verification)}
-                    - name: CODEMENDER_SKIP_VERIFY
-                      value: ${string(skip_verify)}
-          connector_params:
-            skip_polling: true
-        result: stage3_operation
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + job_name}
+            body:
+              overrides:
+                taskCount: 1
+                timeout: ${string(timeout_seconds) + "s"}
+                containerOverrides:
+                  - env:
+                      - name: CODEMENDER_RUN_MODE
+                        value: "aggregate"
+                      - name: CODEMENDER_SCAN_ID
+                        value: ${scan_id}
+                      - name: CODEMENDER_GCS_BUCKET
+                        value: ${gcs_bucket}
+                      - name: GITHUB_REPO_URL
+                        value: ${repo_url}
+                      - name: CODEMENDER_BUILD_COMMAND
+                        value: ${build_command}
+                      - name: CODEMENDER_TARGET_BRANCH
+                        value: ${target_branch}
+                      - name: CODEMENDER_EXECUTION_URL
+                        value: ${execution_url}
+                      - name: CODEMENDER_SCAN_TARGET
+                        value: ${scan_target}
+                      - name: CODEMENDER_TARGET_SHA
+                        value: ${target_sha}
+                      - name: CODEMENDER_TOTAL_WORKERS
+                        value: ${string(num_workers)}
+                      - name: CODEMENDER_CLI_VERSION
+                        value: ${cli_version}
+                      - name: CODEMENDER_MODEL
+                        value: ${model}
+                      - name: CODEMENDER_FIND_MODEL
+                        value: ${find_model}
+                      - name: CODEMENDER_VERIFY_MODEL
+                        value: ${verify_model}
+                      - name: CODEMENDER_FIX_MODEL
+                        value: ${fix_model}
+                      - name: CODEMENDER_SKIP_EXPLOIT_VERIFICATION
+                        value: ${string(skip_exploit_verification)}
+                      - name: CODEMENDER_SKIP_VERIFY
+                        value: ${string(skip_verify)}
+            connector_params:
+              skip_polling: true
+          result: stage3_operation
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 10
+            max_delay: 60
+            multiplier: 2
+        except:
+          as: err
+          steps:
+            - route_stage3_launch_error:
+                assign:
+                  - pipeline_error: ${err}
+                  - failure_msg: ${default(map.get(err, "message"), "Stage 3 job launch failed")}
+                next: handle_workflow_failure
 
     - wait_stage3:
-        call: wait_for_operation
-        args:
-          operation_name: ${stage3_operation.name}
-          timeout_seconds: ${timeout_seconds}
-        result: stage3_execution
+        try:
+          call: wait_for_operation
+          args:
+            operation_name: ${stage3_operation.name}
+            timeout_seconds: ${timeout_seconds}
+          result: stage3_execution
+        except:
+          as: err
+          steps:
+            - route_stage3_wait_error:
+                assign:
+                  - pipeline_error: ${err}
+                  - failure_msg: ${default(map.get(err, "message"), "Stage 3 job execution failed")}
+                next: handle_workflow_failure
 
     - finish_workflow:
         return: "Workflow completed successfully."
+
+    - handle_workflow_failure:
+        steps:
+          - assign_failure_msg:
+              assign:
+                - failure_msg: ${default(map.get(pipeline_error, "message"), "Workflow execution failed")}
+          - log_pipeline_error:
+              call: sys.log
+              args:
+                text: '${"Workflow failed for " + repo_url + " (Scan ID: " + scan_id + "): " + failure_msg + ". Running failure finalizer to ensure commit status is not stuck in pending."}'
+                severity: ERROR
+          - run_failure_finalizer:
+              try:
+                steps:
+                  - trigger_failure_finalize_job:
+                      call: googleapis.run.v2.projects.locations.jobs.run
+                      args:
+                        name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + job_name}
+                        body:
+                          overrides:
+                            taskCount: 1
+                            timeout: "600s"
+                            containerOverrides:
+                              - env:
+                                  - name: CODEMENDER_RUN_MODE
+                                    value: "aggregate"
+                                  - name: CODEMENDER_WORKFLOW_FAILED
+                                    value: "true"
+                                  - name: CODEMENDER_FAILURE_REASON
+                                    value: ${failure_msg}
+                                  - name: CODEMENDER_SCAN_ID
+                                    value: ${scan_id}
+                                  - name: CODEMENDER_GCS_BUCKET
+                                    value: ${gcs_bucket}
+                                  - name: GITHUB_REPO_URL
+                                    value: ${repo_url}
+                                  - name: CODEMENDER_TARGET_BRANCH
+                                    value: ${target_branch}
+                                  - name: CODEMENDER_TARGET_SHA
+                                    value: ${target_sha}
+                                  - name: CODEMENDER_EXECUTION_URL
+                                    value: ${execution_url}
+                                  - name: CODEMENDER_SCAN_TARGET
+                                    value: ${scan_target}
+                        connector_params:
+                          skip_polling: true
+                      result: finalize_op
+                  - wait_failure_finalize_job:
+                      call: wait_for_operation
+                      args:
+                        operation_name: ${finalize_op.name}
+                        timeout_seconds: 600
+                      result: finalize_res
+              except:
+                as: finalize_err
+                steps:
+                  - log_finalize_err:
+                      call: sys.log
+                      args:
+                        text: '${"Failure finalizer job also encountered an error: " + default(map.get(finalize_err, "message"), "unknown")}'
+                        severity: WARNING
+          - rethrow_pipeline_error:
+              raise: ${pipeline_error}
 
 wait_for_operation:
   params: [operation_name, timeout_seconds]
@@ -290,10 +437,18 @@ wait_for_operation:
           - elapsed: 0
           - sleep_interval: 60
     - get_operation:
-        call: googleapis.run.v2.projects.locations.operations.get
-        args:
-          name: ${operation_name}
-        result: operation
+        try:
+          call: googleapis.run.v2.projects.locations.operations.get
+          args:
+            name: ${operation_name}
+          result: operation
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 5
+          backoff:
+            initial_delay: 5
+            max_delay: 60
+            multiplier: 2
     - check_status:
         switch:
           - condition: ${default(map.get(operation, "done"), false) == true}

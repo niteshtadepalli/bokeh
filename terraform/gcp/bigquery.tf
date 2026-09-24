@@ -416,3 +416,135 @@ resource "google_bigquery_table" "vulnerability_findings" {
       },
   ] : []))
 }
+
+# ---------------------------------------------------------------------------
+# Pre-joined SQL Views for Conversational Analytics, Data Agents & Dashboards
+# ---------------------------------------------------------------------------
+
+resource "google_bigquery_table" "v_findings_enriched" {
+  count = var.enable_bigquery_telemetry ? 1 : 0
+
+  dataset_id          = google_bigquery_dataset.telemetry[0].dataset_id
+  table_id            = "v_findings_enriched"
+  project             = var.project_id
+  deletion_protection = false
+
+  description = "One row per vulnerability finding, enriched with scan metadata (branch, SHA, scan_target, models, scan status). Use scan_timestamp for time filters."
+
+  view {
+    use_legacy_sql = false
+    query          = <<-EOT
+      SELECT
+        f.finding_id,
+        f.scan_id,
+        f.scan_timestamp,
+        DATE(f.scan_timestamp)            AS scan_date,
+        f.repository,
+        s.scan_target,
+        s.target_branch,
+        s.target_sha,
+        f.title,
+        f.vuln_type,
+        f.cwe_id,
+        f.severity,
+        f.confidence_level,
+        f.file_path,
+        f.start_line,
+        f.end_line,
+        f.status                          AS finding_status,
+        f.source_stage,
+        f.verified,
+        f.muted,
+        f.mute_reason,
+        f.fingerprint,
+        f.fix_pr_url,
+        f.patch_status,
+        (f.fix_pr_url IS NOT NULL)        AS has_fix_pr,
+        s.status                          AS scan_status,
+        s.cm_version,
+        s.find_model,
+        s.verify_model,
+        s.fix_model,
+        s.report_uri,
+        s.execution_url
+      FROM `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.vulnerability_findings[0].table_id}` AS f
+      LEFT JOIN `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s
+        ON s.scan_id = f.scan_id
+    EOT
+  }
+}
+
+resource "google_bigquery_table" "v_scan_runs_flat" {
+  count = var.enable_bigquery_telemetry ? 1 : 0
+
+  dataset_id          = google_bigquery_dataset.telemetry[0].dataset_id
+  table_id            = "v_scan_runs_flat"
+  project             = var.project_id
+  deletion_protection = false
+
+  description = "One row per CodeMender scan with counts, auto-fix rates and token totals summed across models. Use scan_timestamp for time filters."
+
+  view {
+    use_legacy_sql = false
+    query          = <<-EOT
+      SELECT
+        s.scan_id,
+        s.scan_timestamp,
+        DATE(s.scan_timestamp)                                   AS scan_date,
+        s.repository,
+        s.target_branch,
+        s.target_sha,
+        s.scan_target,
+        s.status,
+        s.duration_seconds,
+        s.cm_version,
+        s.find_model,
+        s.verify_model,
+        s.fix_model,
+        s.total_findings_count,
+        s.active_findings_count,
+        s.skipped_duplicate_count,
+        s.fixed_count,
+        s.failed_fix_count,
+        SAFE_DIVIDE(s.fixed_count, s.active_findings_count)                AS auto_fix_rate,
+        SAFE_DIVIDE(s.fixed_count, s.fixed_count + s.failed_fix_count)     AS fix_attempt_success_rate,
+        (SELECT SUM(t.in_tokens)    FROM UNNEST(s.token_totals) AS t)      AS total_in_tokens,
+        (SELECT SUM(t.out_tokens)   FROM UNNEST(s.token_totals) AS t)      AS total_out_tokens,
+        (SELECT SUM(t.total_tokens) FROM UNNEST(s.token_totals) AS t)      AS total_tokens,
+        s.report_uri,
+        s.execution_url
+      FROM `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s
+    EOT
+  }
+}
+
+resource "google_bigquery_table" "v_token_usage" {
+  count = var.enable_bigquery_telemetry ? 1 : 0
+
+  dataset_id          = google_bigquery_dataset.telemetry[0].dataset_id
+  table_id            = "v_token_usage"
+  project             = var.project_id
+  deletion_protection = false
+
+  description = "One row per scan per model with input/output/total tokens. Use for token spend by model over time."
+
+  view {
+    use_legacy_sql = false
+    query          = <<-EOT
+      SELECT
+        s.scan_id,
+        s.scan_timestamp,
+        DATE(s.scan_timestamp)  AS scan_date,
+        s.repository,
+        s.scan_target,
+        s.status                AS scan_status,
+        t.model,
+        SUM(t.in_tokens)        AS in_tokens,
+        SUM(t.out_tokens)       AS out_tokens,
+        SUM(t.total_tokens)     AS total_tokens
+      FROM `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s,
+           UNNEST(s.token_totals) AS t
+      GROUP BY 1, 2, 3, 4, 5, 6, 7
+    EOT
+  }
+}

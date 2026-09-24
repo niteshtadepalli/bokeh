@@ -14,11 +14,12 @@
 
 # Unit tests for GCP IAM and Service Accounts
 mock_provider "google" {}
+mock_provider "random" {}
 
 variables {
-  project_id           = "test-project-123"
-  region               = "us-central1"
-  resource_prefix      = "test-iam"
+  project_id      = "test-project-123"
+  region          = "us-central1"
+  resource_prefix = "test-iam"
 }
 
 run "iam_resources_created_correctly" {
@@ -40,7 +41,7 @@ run "iam_resources_created_correctly" {
   }
 
   assert {
-    condition     = google_project_iam_custom_role.workflow_job_runner.role_id == "testiamWorkflowJobRunner"
-    error_message = "Workflow custom role ID does not match expected prefix (should have dashes removed)."
+    condition     = google_project_iam_custom_role.workflow_job_runner.title == "CodeMender Workflow Job Runner (test-iam)" && random_id.role_suffix.keepers["resource_prefix"] == "test-iam"
+    error_message = "Workflow custom role title and suffix keepers do not match expected prefix."
   }
 }

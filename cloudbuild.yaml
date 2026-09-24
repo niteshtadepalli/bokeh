@@ -87,6 +87,10 @@ steps:
           --image ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest \
           --region ${_REGION}
 
+options:
+  dynamicSubstitutions: true
+
 substitutions:
-  _REPO_NAME: 'codemender-runner'
+  _RESOURCE_PREFIX: 'codemender'
+  _REPO_NAME: '${_RESOURCE_PREFIX}-runner'
   _REGION: 'us-central1'

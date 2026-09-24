@@ -48,6 +48,15 @@ run "bigquery_enabled_by_default" {
     condition     = google_bigquery_table.vulnerability_findings[0].table_id == "vulnerability_findings"
     error_message = "vulnerability_findings table must be created."
   }
+
+  assert {
+    condition = (
+      google_bigquery_table.v_findings_enriched[0].table_id == "v_findings_enriched"
+      && google_bigquery_table.v_scan_runs_flat[0].table_id == "v_scan_runs_flat"
+      && google_bigquery_table.v_token_usage[0].table_id == "v_token_usage"
+    )
+    error_message = "All three analytics SQL views (v_findings_enriched, v_scan_runs_flat, v_token_usage) must be created when telemetry is enabled."
+  }
 }
 
 run "bigquery_tables_are_partitioned_and_clustered" {
@@ -206,8 +215,11 @@ run "bigquery_fully_absent_when_disabled" {
     condition = (
       length(google_bigquery_table.scan_runs) == 0
       && length(google_bigquery_table.vulnerability_findings) == 0
+      && length(google_bigquery_table.v_findings_enriched) == 0
+      && length(google_bigquery_table.v_scan_runs_flat) == 0
+      && length(google_bigquery_table.v_token_usage) == 0
     )
-    error_message = "No telemetry tables may be created when telemetry is disabled."
+    error_message = "No telemetry tables or views may be created when telemetry is disabled."
   }
 
   assert {

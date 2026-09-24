@@ -58,6 +58,11 @@ output "artifact_registry_repository" {
   value       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.docker_repo.repository_id}"
 }
 
+output "container_build_command" {
+  description = "Copy-paste Cloud Build command to build, push, and update the runner and worker Cloud Run Jobs."
+  value       = "gcloud builds submit --config=cloudbuild.yaml --project=${var.project_id} --substitutions=_RESOURCE_PREFIX=${var.resource_prefix},_REGION=${var.region} ."
+}
+
 output "workflow_id" {
   description = "Cloud Workflows workflow ID."
   value       = google_workflows_workflow.coordinator.id
@@ -78,6 +83,15 @@ output "bigquery_telemetry_tables" {
   value = var.enable_bigquery_telemetry ? {
     scan_runs              = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}"
     vulnerability_findings = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.vulnerability_findings[0].table_id}"
+  } : null
+}
+
+output "bigquery_telemetry_views" {
+  description = "Fully qualified BigQuery view IDs for enriched scan analytics."
+  value = var.enable_bigquery_telemetry ? {
+    v_findings_enriched = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.v_findings_enriched[0].table_id}"
+    v_scan_runs_flat    = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.v_scan_runs_flat[0].table_id}"
+    v_token_usage       = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.v_token_usage[0].table_id}"
   } : null
 }
 

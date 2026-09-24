@@ -45,7 +45,7 @@ resource "google_cloud_scheduler_job" "repo_scans" {
           (each.value.find_model != null && each.value.find_model != "") ||
           (each.value.verify_model != null && each.value.verify_model != "") ||
           (each.value.fix_model != null && each.value.fix_model != "")
-        ) ? {
+          ) ? {
           models = merge(
             (each.value.find_model != null && each.value.find_model != "") ? { find = each.value.find_model } : {},
             (each.value.verify_model != null && each.value.verify_model != "") ? { verify = each.value.verify_model } : {},
