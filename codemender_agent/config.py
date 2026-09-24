@@ -94,6 +94,8 @@ class OrchestratorConfig:
   is_fork_pr: bool = False
   pr_number: Optional[int] = None
   fail_on_findings: bool = False
+  min_blocking_severity: str = "MEDIUM"
+  diff_scoped_pr_scan: bool = True
   pr_remediation_mode: str = PR_MODE_REVIEW_SUGGESTION
 
   # Sandbox & Security Settings
@@ -223,6 +225,19 @@ class OrchestratorConfig:
     else:
       fail_on_findings = False
 
+    min_blocking_severity = (
+        os.environ.get("CODEMENDER_MIN_BLOCKING_SEVERITY")
+        or os.environ.get("MIN_BLOCKING_SEVERITY")
+        or os.environ.get("MIN_SEVERITY")
+        or "MEDIUM"
+    ).strip().upper()
+    diff_scoped_env = (
+        os.environ.get("CODEMENDER_DIFF_SCOPED_PR_SCAN")
+        or os.environ.get("DIFF_SCOPED")
+        or "true"
+    ).strip().lower()
+    diff_scoped_pr_scan = diff_scoped_env not in ("false", "0", "no", "off")
+
     # Parse PR remediation routing mode, falling back to the default when unset
     # or when an unrecognized value is supplied.
     mode_env = (os.environ.get("CODEMENDER_PR_REMEDIATION_MODE") or "").strip().lower()
@@ -314,6 +329,8 @@ class OrchestratorConfig:
         is_fork_pr=is_fork_pr,
         pr_number=pr_number,
         fail_on_findings=fail_on_findings,
+        min_blocking_severity=min_blocking_severity,
+        diff_scoped_pr_scan=diff_scoped_pr_scan,
         pr_remediation_mode=pr_remediation_mode,
         # Sandbox execution flags and network isolation profiles
         sandbox_enabled=sandbox_enabled,

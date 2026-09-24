@@ -25,6 +25,8 @@ import os
 import sys
 
 from codemender_agent.runners.aggregate import run_aggregate_pipeline
+from codemender_agent.runners.gate import resolve_pr_diff_targets
+from codemender_agent.runners.gate import run_security_gate_pipeline
 from codemender_agent.runners.scan import run_scan_pipeline
 from codemender_agent.runners.sequential import run_sequential_pipeline
 from codemender_agent.runners.worker import run_worker_pipeline
@@ -43,8 +45,44 @@ def main() -> None:
 
   if run_mode == "sequential":
     run_sequential_pipeline()
+  elif run_mode == "preflight":
+    workspace_dir = (
+        os.environ.get("WORKSPACE_DIR")
+        or os.environ.get("GITHUB_WORKSPACE")
+        or os.getcwd()
+    )
+    is_pr = (
+        os.environ.get("IS_PR")
+        or os.environ.get("CODEMENDER_IS_PR_SCAN")
+        or "true"
+    ).lower() == "true"
+    diff_scoped = (
+        os.environ.get("DIFF_SCOPED")
+        or os.environ.get("CODEMENDER_DIFF_SCOPED_PR_SCAN")
+        or "true"
+    ).lower() == "true"
+    base_ref = (
+        os.environ.get("BASE_REF")
+        or os.environ.get("CODEMENDER_PR_BASE_REF")
+        or ""
+    ).strip()
+    default_target = (
+        os.environ.get("DEFAULT_SCAN_TARGET")
+        or os.environ.get("CODEMENDER_SCAN_TARGET")
+        or "."
+    ).strip()
+    resolve_pr_diff_targets(
+        workspace_dir=workspace_dir,
+        is_pr=is_pr,
+        diff_scoped=diff_scoped,
+        base_ref=base_ref,
+        default_scan_target=default_target,
+        github_output=os.environ.get("GITHUB_OUTPUT", ""),
+    )
   elif run_mode == "scan":
     run_scan_pipeline()
+  elif run_mode in ("gate", "security_gate"):
+    run_security_gate_pipeline()
   elif run_mode == "worker":
     run_worker_pipeline()
   elif run_mode == "aggregate":

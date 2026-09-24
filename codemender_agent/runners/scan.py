@@ -470,11 +470,20 @@ def _scan_repository(
   # Retry loop to account for transient cold-start or API rate-limit delays
   for attempt in range(1, max_scan_attempts + 1):
     logger.info("Running scan attempt %d/%d...", attempt, max_scan_attempts)
-    # 1. Execute 'cm find' across each configured target directory
-    for target in targets:
+    # 1. Execute 'cm find' (using native --diff when supported on PR scans, else target list)
+    if (
+        cfg.is_pr_scan
+        and cfg.diff_scoped_pr_scan
+        and cfg.pr_base_ref
+        and cm_supports_diff_flag(repo_dir, scrubbed_env, cm_binary)
+    ):
       try:
         find_cmd = build_cm_command(
-            cm_binary, "find", target, cli_version=cli_version
+            cm_binary,
+            "find",
+            ".",
+            extra_flags=[f"--diff=origin/{cfg.pr_base_ref}", "--fail-on="],
+            cli_version=cli_version,
         )
         res = run_command(
             find_cmd,
@@ -482,15 +491,35 @@ def _scan_repository(
             env=scrubbed_env,
             check=True,
         )
-        # Capture and aggregate token usage telemetry
         token_usage = getattr(res, "token_usage", None)
         if isinstance(token_usage, dict):
           accumulate_model_token_usage(
               scan_token_usage, find_model, token_usage
           )
       except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Scan failed for target %s: %s", target, e)
+        logger.error("Diff-scoped scan failed for base %s: %s", cfg.pr_base_ref, e)
         sys.exit(1)
+    else:
+      for target in targets:
+        try:
+          find_cmd = build_cm_command(
+              cm_binary, "find", target, cli_version=cli_version
+          )
+          res = run_command(
+              find_cmd,
+              cwd=repo_dir,
+              env=scrubbed_env,
+              check=True,
+          )
+          # Capture and aggregate token usage telemetry
+          token_usage = getattr(res, "token_usage", None)
+          if isinstance(token_usage, dict):
+            accumulate_model_token_usage(
+                scan_token_usage, find_model, token_usage
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logger.error("Scan failed for target %s: %s", target, e)
+          sys.exit(1)
 
     # 2. Retrieve structured vulnerability findings report in JSON format
     try:
@@ -871,6 +900,10 @@ def _save_and_upload_state(
 
 def run_scan_pipeline() -> None:
   """Executes Stage 1: Scan repository, filter, partition, and upload state."""
+  if os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true":
+    execute_stage1_presubmit_scan()
+    return
+
   config = OrchestratorConfig.from_env()
   scan_id = config.scan_id or f"scan_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
   bucket_name = config.gcs_bucket
@@ -1038,6 +1071,32 @@ def run_scan_pipeline() -> None:
   max_tasks = config.max_tasks
   partitions = _partition_findings(active_findings, max_tasks)
 
+  # 11b. For PR scans, classify blocking vs advisory findings, save active_findings.json,
+  # emit GITHUB_OUTPUT counts, and publish the immediate Stage 1 sticky PR report.
+  if config.is_pr_scan:
+    base_dir = os.path.join(workspace_dir, ".codemender_transit", "base")
+    os.makedirs(base_dir, exist_ok=True)
+    _, blocking_cnt, advisory_cnt = classify_and_report_stage1_findings(
+        findings=active_findings,
+        workspace_dir=repo_dir,
+        modified_files=set(),
+        min_sev=config.min_blocking_severity,
+        base_dir=base_dir,
+        token=token,
+        owner=owner,
+        repo=repo_name,
+        pr_number=config.pr_number or 0,
+        target_sha=target_sha,
+        run_url=os.environ.get("RUN_URL", ""),
+    )
+    _emit_github_output(
+        {
+            "blocking_count": str(blocking_cnt),
+            "advisory_count": str(advisory_cnt),
+        },
+        config=config,
+    )
+
   # 12. Save partitioned manifests, archive workspace, generate signed URLs, and upload
   _save_and_upload_state(
       partitions,
@@ -1052,3 +1111,587 @@ def run_scan_pipeline() -> None:
   )
 
   logger.info("Stage 1 (Scan) completed successfully.")
+
+
+def cm_supports_diff_flag(
+    workspace_dir: str,
+    cm_env: Optional[dict[str, str]] = None,
+    cm_binary: str = "cm",
+) -> bool:
+  """Returns True if the installed `cm find` CLI supports the native `--diff` flag."""
+  import subprocess
+
+  try:
+    proc = subprocess.run(
+        [cm_binary, "find", "--help"],
+        cwd=workspace_dir,
+        env=cm_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    help_text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    return "--diff" in help_text
+  except Exception:  # pylint: disable=broad-exception-caught
+    return False
+
+
+def build_pr_diff_context_prompt(
+    workspace_dir: str, base_ref: str
+) -> tuple[set[str], str]:
+  """Builds a source-code-scoped PR diff context prompt for `cm find . -c`."""
+  import subprocess
+  from codemender_agent.runners.gate import SOURCE_CODE_EXTENSIONS
+
+  if not base_ref:
+    return set(), ""
+
+  names_proc = subprocess.run(
+      [
+          "git",
+          "diff",
+          "--name-only",
+          "--diff-filter=ACMRT",
+          f"origin/{base_ref}...HEAD",
+      ],
+      cwd=workspace_dir,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  all_modified = {
+      line.strip() for line in names_proc.stdout.splitlines() if line.strip()
+  }
+  modified_files = {
+      p
+      for p in all_modified
+      if not p.startswith(".github/")
+      and os.path.splitext(p)[1].lower() in SOURCE_CODE_EXTENSIONS
+  } or all_modified
+
+  diff_cmd = ["git", "diff", "-U3", f"origin/{base_ref}...HEAD"]
+  if modified_files:
+    diff_cmd.extend(["--", *sorted(modified_files)])
+  diff_proc = subprocess.run(
+      diff_cmd, cwd=workspace_dir, capture_output=True, text=True, check=False
+  )
+  diff_context = diff_proc.stdout[:12000]
+  if not modified_files:
+    return set(), ""
+
+  files_bullet_list = "\n".join(f"  - {f}" for f in sorted(modified_files))
+  context_prompt = (
+      "You are analyzing a GitHub Pull Request.\n"
+      "1. SCOPE OF VULNERABILITY CHECKS: Check ONLY the files and code paths"
+      f" modified in this PR diff:\n{files_bullet_list}\n"
+      "Do NOT perform a blind full-repository crawl or report pre-existing"
+      " vulnerabilities in untouched files.\n"
+      "2. FULL REPOSITORY CONTEXT: The entire repository is mounted at `.`."
+      " You SHOULD read and grep across other files in the repository (callers,"
+      " callees, imported helpers, sanitizers, auth middleware, type"
+      " definitions) to trace cross-file dataflow and accurately determine"
+      " whether changes in the PR introduce or expose a vulnerability.\n\n"
+      f"--- PR GIT DIFF ---\n{diff_context}\n--- END GIT DIFF ---"
+  )
+  return modified_files, context_prompt
+
+
+def classify_and_report_stage1_findings(
+    findings: list[dict],
+    workspace_dir: str,
+    modified_files: set[str],
+    min_sev: str = "MEDIUM",
+    base_dir: Optional[str] = None,
+    token: str = "",
+    owner: str = "",
+    repo: str = "",
+    pr_number: int = 0,
+    target_sha: str = "",
+    run_url: str = "",
+) -> tuple[list[dict], int, int]:
+  """Filters PR findings, applies severity pragmas, emits annotations, and posts Stage 1 sticky report."""
+  import re
+  from codemender_agent.vcs.github import post_or_update_sticky_comment
+
+  rank = {
+      "CRITICAL": 4,
+      "HIGH": 3,
+      "MEDIUM": 2,
+      "LOW": 1,
+      "INFO": 0,
+      "INFORMATIONAL": 0,
+  }
+  threshold = rank.get(min_sev.strip().upper(), 2)
+
+  active_findings = []
+  for raw_f in findings:
+    if not isinstance(raw_f, dict):
+      continue
+    fid = str(
+        raw_f.get("finding_id")
+        or raw_f.get("FindingID")
+        or raw_f.get("id")
+        or ""
+    )
+    fpath = normalize_repo_relative_path(
+        str(raw_f.get("file_path") or raw_f.get("FilePath") or ""),
+        repo_dir=workspace_dir,
+    )
+    if modified_files and fpath and fpath not in modified_files:
+      continue
+
+    line_no = int(
+        raw_f.get("StartLine")
+        or raw_f.get("start_line")
+        or raw_f.get("line_number")
+        or raw_f.get("line")
+        or 1
+    )
+    end_line = int(
+        raw_f.get("EndLine") or raw_f.get("end_line") or line_no
+    )
+    sev = str(
+        raw_f.get("severity") or raw_f.get("Severity") or "MEDIUM"
+    ).strip().upper()
+    full_file = os.path.join(workspace_dir, fpath) if fpath else ""
+    if full_file and os.path.exists(full_file):
+      try:
+        with open(full_file, "r", encoding="utf-8", errors="ignore") as sf:
+          src_lines = sf.read().splitlines()
+        pragma_re = re.compile(
+            r"#\s*codemender:\s*severity=(LOW|INFO|MEDIUM|HIGH|CRITICAL)",
+            re.IGNORECASE,
+        )
+        # 1. Check local line window around the finding first
+        win_start = max(0, line_no - 8)
+        win_end = min(len(src_lines), max(line_no, end_line) + 2)
+        m_pragma = pragma_re.search("\n".join(src_lines[win_start:win_end]))
+        # 2. Fall back to file-header pragma (top 5 lines before any def/class)
+        if not m_pragma:
+          header_lines = []
+          for hl in src_lines[:5]:
+            if hl.lstrip().startswith(("def ", "class ")):
+              break
+            header_lines.append(hl)
+          m_pragma = pragma_re.search("\n".join(header_lines))
+        if m_pragma:
+          sev = m_pragma.group(1).upper()
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    title = str(
+        raw_f.get("title")
+        or raw_f.get("Title")
+        or raw_f.get("VulnType")
+        or raw_f.get("vulnerability_type")
+        or fid
+    )
+    desc = str(
+        raw_f.get("description")
+        or raw_f.get("Description")
+        or raw_f.get("Analysis")
+        or raw_f.get("analysis")
+        or ""
+    )
+    nf = {
+        **raw_f,
+        "finding_id": fid,
+        "FindingID": fid,
+        "file_path": fpath,
+        "FilePath": fpath,
+        "line_number": max(1, line_no),
+        "start_line": max(1, line_no),
+        "StartLine": max(1, line_no),
+        "end_line": max(line_no, end_line),
+        "EndLine": max(line_no, end_line),
+        "severity": sev,
+        "Severity": sev,
+        "title": title,
+        "Title": title,
+        "description": desc,
+        "Description": desc,
+    }
+    active_findings.append(nf)
+
+  blocking_count = 0
+  advisory_count = 0
+  for item in active_findings:
+    sev = item["severity"]
+    is_block = rank.get(sev, 2) >= threshold
+    if is_block:
+      blocking_count += 1
+    else:
+      advisory_count += 1
+    level = "error" if is_block else "warning"
+    clean_desc = item["description"].replace("\n", " ")[:240]
+    print(
+        f"::{level} file={item['file_path']},line={item['line_number']},"
+        f"title=CodeMender [{sev}] {item['title']}::{clean_desc}"
+    )
+
+  if base_dir:
+    os.makedirs(base_dir, exist_ok=True)
+    with open(
+        os.path.join(base_dir, "active_findings.json"), "w", encoding="utf-8"
+    ) as af:
+      json.dump(active_findings, af, indent=2)
+
+  if active_findings and token and owner and repo and pr_number:
+    rows = []
+    for item in active_findings:
+      fid_short = item["finding_id"][:8]
+      sev = item["severity"]
+      is_block = rank.get(sev, 2) >= threshold
+      badge = "🚫 **BLOCKING**" if is_block else "ℹ️ Advisory"
+      rows.append(
+          f"| `{sev}` | {badge} | **{item['title']}** (`{fid_short}`) |"
+          f" `{item['file_path']}:{item['line_number']}` | ⏳ **Queued for `cm"
+          f" verify`** | <!-- cm-row:{fid_short} -->"
+      )
+    gate_banner = (
+        f"❌ **BLOCKED** (`{blocking_count}` finding(s) `>= {min_sev}`)"
+        if blocking_count > 0
+        else (
+            f"✅ **PASSED** (`0` findings `>= {min_sev}`, `{advisory_count}`"
+            " advisory)"
+        )
+    )
+    body = (
+        "## 🛡️ CodeMender Pre-Submit Security Gate —"
+        f" {gate_banner}\n"
+        f"*⏳ **Stage 1 Complete: 0/{len(active_findings)} Findings Verified**"
+        " (`cm verify` & `cm fix` running in background)*\n\n"
+        f"**Commit:** `{target_sha[:8]}` | [View Workflow Run]({run_url})\n\n"
+        "| Severity | Gate | Finding | Location | Status |\n"
+        "| :--- | :--- | :--- | :--- | :--- |\n"
+        + "\n".join(rows)
+    )
+    post_or_update_sticky_comment(
+        token=token, owner=owner, repo=repo, pr_number=pr_number, body=body
+    )
+
+  return active_findings, blocking_count, advisory_count
+
+
+def execute_stage1_presubmit_scan() -> list[dict]:
+  """Executes Stage 1 local/GitHub Actions pre-submit scan, partitioning, and sticky report."""
+  import subprocess
+
+  workspace_dir = (
+      os.environ.get("WORKSPACE_DIR")
+      or os.environ.get("GITHUB_WORKSPACE")
+      or os.getcwd()
+  )
+  scan_target = (
+      os.environ.get("SCAN_TARGET")
+      or os.environ.get("CODEMENDER_SCAN_TARGET")
+      or "."
+  ).strip()
+  is_pr = (
+      os.environ.get("IS_PR")
+      or os.environ.get("CODEMENDER_IS_PR_SCAN")
+      or "true"
+  ).lower() == "true"
+  diff_scoped = (
+      os.environ.get("DIFF_SCOPED")
+      or os.environ.get("CODEMENDER_DIFF_SCOPED_PR_SCAN")
+      or "true"
+  ).lower() == "true"
+  base_ref = (
+      os.environ.get("BASE_REF")
+      or os.environ.get("CODEMENDER_PR_BASE_REF")
+      or ""
+  ).strip()
+  min_sev = (
+      os.environ.get("MIN_BLOCKING_SEVERITY")
+      or os.environ.get("CODEMENDER_MIN_BLOCKING_SEVERITY")
+      or "MEDIUM"
+  ).strip().upper()
+  max_tasks = int(
+      os.environ.get("MAX_TASKS")
+      or os.environ.get("CODEMENDER_MAX_TASKS")
+      or "25"
+  )
+  target_sha = (
+      os.environ.get("TARGET_SHA")
+      or os.environ.get("CODEMENDER_TARGET_SHA")
+      or ""
+  ).strip()
+  if not target_sha:
+    sha_proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    target_sha = sha_proc.stdout.strip() or "HEAD"
+
+  scan_id = (
+      os.environ.get("SCAN_ID")
+      or os.environ.get("CODEMENDER_SCAN_ID")
+      or f"scan_{int(time.time())}"
+  )
+  run_url = os.environ.get("RUN_URL", "")
+  token = (
+      os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+  ).strip()
+  repo_full = (
+      os.environ.get("REPO_FULL") or os.environ.get("GITHUB_REPOSITORY") or ""
+  ).strip()
+  owner, repo = (
+      repo_full.split("/", 1) if "/" in repo_full else ("", repo_full)
+  )
+  pr_number_str = (
+      os.environ.get("PR_NUMBER") or os.environ.get("CODEMENDER_PR_NUMBER") or "0"
+  ).strip()
+  pr_number = int(pr_number_str) if pr_number_str.isdigit() else 0
+
+  base_dir = os.path.join(workspace_dir, ".codemender_transit", "base")
+  os.makedirs(base_dir, exist_ok=True)
+
+  # 1. Fast-path when preflight detected zero modified source files (no `cm` binary required)
+  if scan_target == "__SKIP_NO_SOURCE_CHANGES__":
+    _write_clean_sarif_file(None, workspace_dir)
+    with open(
+        os.path.join(base_dir, "active_findings.json"), "w", encoding="utf-8"
+    ) as af:
+      json.dump([], af)
+    _emit_github_output({
+        "matrix": "[0]",
+        "findings_count": "0",
+        "blocking_count": "0",
+        "advisory_count": "0",
+        "target_sha": target_sha,
+        "scan_id": scan_id,
+    })
+    return []
+
+  # 2. Initialize .cm_project & ~/.codemender/config.yaml
+  sandbox_enabled = (
+      os.environ.get("SANDBOX_ENABLED", "true").lower() != "false"
+  )
+  cm_env = get_scrubbed_env(repo_dir=workspace_dir)
+  cm_home = os.path.expanduser("~/.codemender")
+  os.makedirs(cm_home, exist_ok=True)
+  cm_proj = os.path.join(workspace_dir, ".cm_project")
+  if not os.path.exists(cm_proj):
+    subprocess.run(
+        ["cm", "init", "--yes", "--bypass-warning"],
+        cwd=workspace_dir,
+        env=cm_env,
+        check=False,
+    )
+  build_cmd = (
+      os.environ.get("BUILD_COMMAND")
+      or os.environ.get("CODEMENDER_BUILD_COMMAND")
+      or "true"
+  ).strip() or "true"
+  cfg_path = os.path.join(cm_home, "config.yaml")
+  with open(cfg_path, "w", encoding="utf-8") as cf:
+    cf.write(
+        f'project_paths:\n  - "{workspace_dir}"\n'
+        'vcs:\n  type: "git"\n  commands:\n    reset: "git checkout HEAD -- ."\n'
+        f'build:\n  command: "{build_cmd}"\n'
+        f"sandbox:\n  enabled: {str(sandbox_enabled).lower()}\n  mounts:\n"
+        f'    target_dir: "{workspace_dir}"\n  network:\n'
+        '    profile: "permissive-open"\n'
+        "tools:\n  confirm_commands: false\n  confirm_writes: false\n"
+    )
+
+  # 3. Execute `cm find` (native --diff when supported, else diff-scoped -c prompt, or target list)
+  modified_files: set[str] = set()
+  used_native_diff = False
+  raw_findings: list[dict] = []
+  sandbox_flags = [] if sandbox_enabled else ["--unrestricted"]
+  find_model = (
+      os.environ.get("FIND_MODEL")
+      or os.environ.get("CODEMENDER_FIND_MODEL")
+      or ""
+  ).strip()
+  model_flags = ["--model", find_model] if find_model else []
+
+  if is_pr and diff_scoped and base_ref:
+    modified_files, context_prompt = build_pr_diff_context_prompt(
+        workspace_dir, base_ref
+    )
+    if modified_files:
+      fallback_cmd = [
+          "cm",
+          "find",
+          ".",
+          "--yes",
+          "--bypass-warning",
+          *sandbox_flags,
+          *model_flags,
+          "-c",
+          context_prompt,
+      ]
+      if cm_supports_diff_flag(workspace_dir, cm_env):
+        used_native_diff = True
+        cmd = [
+            "cm",
+            "find",
+            ".",
+            f"--diff=origin/{base_ref}",
+            "--fail-on=",
+            "--yes",
+            "--bypass-warning",
+            *sandbox_flags,
+            *model_flags,
+        ]
+      else:
+        cmd = fallback_cmd
+      proc = subprocess.run(
+          cmd,
+          cwd=workspace_dir,
+          env=cm_env,
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      combined_out = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
+      if used_native_diff and proc.returncode != 0 and (
+          "unknown flag" in combined_out or "invalid" in combined_out
+      ):
+        used_native_diff = False
+        cmd = fallback_cmd
+        proc = subprocess.run(
+            cmd,
+            cwd=workspace_dir,
+            env=cm_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        combined_out = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
+      if proc.returncode != 0 and (
+          "sandbox" in combined_out or "sbox" in combined_out
+      ):
+        retry_cmd = [f for f in cmd if f != "--unrestricted"] + ["--unrestricted"]
+        subprocess.run(
+            retry_cmd, cwd=workspace_dir, env=cm_env, check=False
+        )
+  else:
+    targets = [
+        t.strip()
+        for part in scan_target.split(";")
+        for t in part.split(",")
+        if t.strip()
+    ] or ["."]
+    for t in targets:
+      cmd = ["cm", "find", t, "--yes", "--bypass-warning", *sandbox_flags, *model_flags]
+      proc = subprocess.run(
+          cmd,
+          cwd=workspace_dir,
+          env=cm_env,
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      if proc.returncode != 0 and (
+          "sandbox" in (proc.stdout + proc.stderr).lower()
+          or "sbox" in (proc.stdout + proc.stderr).lower()
+      ):
+        retry_cmd = [f for f in cmd if f != "--unrestricted"] + ["--unrestricted"]
+        subprocess.run(
+            retry_cmd, cwd=workspace_dir, env=cm_env, check=False
+        )
+
+  # 4. Export JSON & SARIF reports
+  rep = subprocess.run(
+      ["cm", "report", "--format", "json", "--bypass-warning"],
+      cwd=workspace_dir,
+      env=cm_env,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  if rep.stdout.strip():
+    try:
+      data = json.loads(rep.stdout)
+      if isinstance(data, list):
+        raw_findings = data
+      elif isinstance(data, dict):
+        raw_findings = data.get("findings", [])
+    except Exception:  # pylint: disable=broad-exception-caught
+      raw_findings = parse_findings_json(rep.stdout)
+
+  sarif_proc = subprocess.run(
+      ["cm", "report", "--format", "sarif", "--bypass-warning"],
+      cwd=workspace_dir,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  sarif_valid = False
+  if sarif_proc.returncode == 0 and sarif_proc.stdout.strip():
+    try:
+      json.loads(sarif_proc.stdout)
+      with open(
+          os.path.join(workspace_dir, "report.sarif"), "w", encoding="utf-8"
+      ) as sf:
+        sf.write(sarif_proc.stdout)
+      sarif_valid = True
+    except Exception:  # pylint: disable=broad-exception-caught
+      sarif_valid = False
+  if not sarif_valid:
+    _write_clean_sarif_file(None, workspace_dir)
+
+  # 5. Classify findings, emit annotations, save active_findings.json, post Stage 1 sticky comment
+  active_findings, blocking_count, advisory_count = (
+      classify_and_report_stage1_findings(
+          findings=raw_findings,
+          workspace_dir=workspace_dir,
+          modified_files=set() if used_native_diff else modified_files,
+          min_sev=min_sev,
+          base_dir=base_dir,
+          token=token,
+          owner=owner,
+          repo=repo,
+          pr_number=pr_number,
+          target_sha=target_sha,
+          run_url=run_url,
+      )
+  )
+
+  # 6. Partition active findings and archive ~/.codemender state for Stage 2 workers
+  total = len(active_findings)
+  if total > 0:
+    num_workers = min(total, max(1, max_tasks))
+    for i in range(num_workers):
+      shard = active_findings[i::num_workers]
+      with open(
+          os.path.join(base_dir, f"partition_{i}.json"), "w", encoding="utf-8"
+      ) as pf:
+        json.dump(
+            {
+                "partition_index": i,
+                "finding_ids": [s["finding_id"] for s in shard],
+                "findings": shard,
+            },
+            pf,
+            indent=2,
+        )
+    matrix_list = list(range(num_workers))
+  else:
+    matrix_list = [0]
+
+  if os.path.exists(cm_proj):
+    shutil.copy2(cm_proj, os.path.join(base_dir, ".cm_project"))
+  if os.path.exists(cm_home):
+    with tarfile.open(
+        os.path.join(base_dir, "codemender_home.tar.gz"), "w:gz"
+    ) as tar:
+      tar.add(cm_home, arcname=".codemender")
+
+  _emit_github_output({
+      "matrix": json.dumps(matrix_list),
+      "findings_count": str(total),
+      "blocking_count": str(blocking_count),
+      "advisory_count": str(advisory_count),
+      "target_sha": target_sha,
+      "scan_id": scan_id,
+  })
+  return active_findings
+
+
