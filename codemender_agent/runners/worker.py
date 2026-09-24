@@ -1003,6 +1003,29 @@ def run_worker_pipeline() -> None:
   """Executes Stage 2: Download state, run verify/fix on partition, upload mutated state."""
   config = OrchestratorConfig.from_env()
   worker_index = config.worker_index if config.worker_index is not None else 0
+  if os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true":
+    repo_full = (
+        os.environ.get("REPO_FULL") or os.environ.get("GITHUB_REPOSITORY") or ""
+    ).strip()
+    owner, repo = (
+        repo_full.split("/", 1) if "/" in repo_full else ("", repo_full)
+    )
+    verify_and_fix_worker_shard(
+        workspace_dir=config.workspace_dir or os.getcwd(),
+        worker_index=worker_index,
+        min_sev=config.min_blocking_severity,
+        sandbox_enabled=config.sandbox_enabled,
+        skip_exploit_verification=config.skip_verify,
+        verify_model=(config.verify_model or "").strip(),
+        fix_model=(config.fix_model or "").strip(),
+        token=(config.github_token or "").strip(),
+        owner=owner,
+        repo=repo,
+        pr_number=config.pr_number or 0,
+        target_sha=(config.target_sha or "").strip(),
+    )
+    return
+
   logger.info("Starting Worker %d", worker_index)
 
   # Initialize active storage adapter (GCS or GitHub Actions transit adapter)
@@ -1243,3 +1266,322 @@ def run_worker_pipeline() -> None:
       pass
 
   logger.info("Stage 2 (Worker) completed successfully.")
+
+
+_FP_VERDICT_KEYWORDS = (
+    "false_positive",
+    "false positive",
+    "not exploitable",
+    "invalid",
+    "dismissed",
+)
+
+
+def _is_false_positive_verdict(text: str) -> bool:
+  """Returns True when verification output or status explicitly dismisses a finding as a false positive."""
+  lowered = (text or "").lower()
+  return "unverified" not in lowered and any(
+      kw in lowered for kw in _FP_VERDICT_KEYWORDS
+  )
+
+
+def verify_and_fix_worker_shard(
+    workspace_dir: str,
+    worker_index: int = 0,
+    min_sev: str = "MEDIUM",
+    sandbox_enabled: bool = True,
+    skip_exploit_verification: bool = False,
+    verify_model: str = "",
+    fix_model: str = "",
+    token: str = "",
+    owner: str = "",
+    repo: str = "",
+    pr_number: int = 0,
+    target_sha: str = "",
+) -> list[dict]:
+  """Runs Stage 2.1 (cm verify), Stage 2.2 (cm fix), and Stage 2.3 (inline suggestions) on a worker shard."""
+  import subprocess
+  from codemender_agent.runners.scan import (
+      restore_presubmit_transit_workspace,
+      run_cm_with_sandbox_fallback,
+  )
+  from codemender_agent.vcs.git import find_source_pragma
+  from codemender_agent.vcs.github import (
+      extract_finding_fields,
+      post_idempotent_inline_review,
+      update_finding_in_sticky_comment,
+  )
+
+  base_dir = os.path.join(workspace_dir, ".codemender_transit", "base")
+  shard_dir = os.path.join(
+      workspace_dir, ".codemender_transit", "shards", f"worker_{worker_index}"
+  )
+  os.makedirs(shard_dir, exist_ok=True)
+
+  build_cmd = (OrchestratorConfig.from_env().build_command or "true").strip() or "true"
+  restore_presubmit_transit_workspace(
+      workspace_dir=workspace_dir,
+      sandbox_enabled=sandbox_enabled,
+      build_cmd=build_cmd,
+  )
+
+  results_file = os.path.join(shard_dir, f"results_worker_{worker_index}.json")
+  part_file = os.path.join(base_dir, f"partition_{worker_index}.json")
+  raw_loaded = []
+  if os.path.exists(results_file):
+    with open(results_file, "r", encoding="utf-8") as rf:
+      raw_loaded = json.load(rf)
+  elif os.path.exists(part_file):
+    with open(part_file, "r", encoding="utf-8") as pf:
+      raw_loaded = json.load(pf)
+
+  if isinstance(raw_loaded, dict):
+    findings = raw_loaded.get("findings", [])
+  elif isinstance(raw_loaded, list):
+    findings = raw_loaded
+  else:
+    findings = []
+
+  cm_env = get_scrubbed_env(repo_dir=workspace_dir)
+  sandbox_flags = [] if sandbox_enabled else ["--unrestricted"]
+  existing_inline_urls: dict[str, str] = {}
+  verify_re = re.compile(
+      r"#\s*codemender:\s*verify=(?:FALSE[_-]POSITIVE|DISMISSED)",
+      re.IGNORECASE,
+  )
+
+  for finding in findings:
+    fields = extract_finding_fields(finding, repo_dir=workspace_dir)
+    fid = fields["finding_id"]
+    if not fid:
+      continue
+
+    # Stage 2.1: Exploit Verification (cm verify)
+    update_finding_in_sticky_comment(
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        finding=finding,
+        status_cell_md="⏳ **Verifying (`cm verify`)...**",
+        min_sev=min_sev,
+    )
+    v_cmd = ["cm", "verify", fid, "--yes", "--bypass-warning", *sandbox_flags]
+    if skip_exploit_verification:
+      v_cmd.append("--skip-exploit-verification")
+    if verify_model:
+      v_cmd.extend(["--model", verify_model])
+
+    print(f"=== [Worker {worker_index}] Running cm verify for {fid} ===", flush=True)
+    _, v_lower = run_cm_with_sandbox_fallback(
+        v_cmd,
+        workspace_dir=workspace_dir,
+        cm_env=cm_env,
+        sandbox_enabled=sandbox_enabled,
+        print_output=True,
+    )
+
+    subprocess.run(
+        ["git", "checkout", "HEAD", "--", "."], cwd=workspace_dir, check=False
+    )
+
+    is_dismissed_fp = _is_false_positive_verdict(v_lower)
+
+    if not is_dismissed_fp:
+      rep_check = subprocess.run(
+          ["cm", "report", "--format", "json", "--bypass-warning"],
+          cwd=workspace_dir,
+          env=cm_env,
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      if rep_check.stdout and rep_check.stdout.strip():
+        for r_item in parse_findings_json(rep_check.stdout):
+          r_id = extract_finding_fields(r_item)["finding_id"]
+          if r_id == fid or (fid and r_id.startswith(fid[:8])):
+            r_stat = " ".join(
+                str(r_item.get(k) or "")
+                for k in (
+                    "status",
+                    "Status",
+                    "verification_status",
+                    "state",
+                    "verdict",
+                )
+            )
+            if _is_false_positive_verdict(r_stat):
+              is_dismissed_fp = True
+
+    if not is_dismissed_fp:
+      if find_source_pragma(
+          workspace_dir=workspace_dir,
+          relpath=fields["file_path"],
+          start_line=fields["line_number"],
+          end_line=fields["end_line"],
+          pattern=verify_re,
+      ):
+        is_dismissed_fp = True
+
+    if is_dismissed_fp:
+      finding["verified_status"] = "DISMISSED_FALSE_POSITIVE"
+      update_finding_in_sticky_comment(
+          token=token,
+          owner=owner,
+          repo=repo,
+          pr_number=pr_number,
+          finding=finding,
+          status_cell_md="⚪ **Dismissed (False Positive)**",
+          min_sev=min_sev,
+      )
+      finding["patch_diff"] = ""
+      finding["review_url"] = ""
+      continue
+
+    finding["verified_status"] = "CONFIRMED"
+    update_finding_in_sticky_comment(
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        finding=finding,
+        status_cell_md="🔨 **Generating Fix (`cm fix`)...**",
+        min_sev=min_sev,
+    )
+
+    # Stage 2.2: Patch Synthesis (cm fix)
+    f_cmd = ["cm", "fix", fid, "--yes", "--bypass-warning", *sandbox_flags]
+    if fix_model:
+      f_cmd.extend(["--model", fix_model])
+    print(f"=== [Worker {worker_index}] Running cm fix for {fid} ===", flush=True)
+    run_cm_with_sandbox_fallback(
+        f_cmd,
+        workspace_dir=workspace_dir,
+        cm_env=cm_env,
+        sandbox_enabled=sandbox_enabled,
+        print_output=True,
+    )
+
+    # Tier 1: git diff
+    diff_res = subprocess.run(
+        ["git", "diff"], cwd=workspace_dir, capture_output=True, text=True, check=False
+    )
+    patch_diff = (diff_res.stdout or "").strip()
+
+    # Tier 2: cm report --format json fallback
+    if not patch_diff:
+      rep_fix = subprocess.run(
+          ["cm", "report", "--format", "json", "--bypass-warning"],
+          cwd=workspace_dir,
+          env=cm_env,
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      if rep_fix.stdout and rep_fix.stdout.strip():
+        for r_item in parse_findings_json(rep_fix.stdout):
+          r_id = extract_finding_fields(r_item)["finding_id"]
+          if r_id == fid or (fid and r_id.startswith(fid[:8])):
+            for k in (
+                "patch",
+                "diff",
+                "patch_diff",
+                "fix_diff",
+                "suggested_fix",
+            ):
+              cand = str(r_item.get(k) or "").strip()
+              if cand and ("---" in cand or "@@" in cand or "+" in cand):
+                patch_diff = cand
+                break
+
+    # Tier 3: Dynamic SQLite state.db inspection across candidate tables/columns
+    if not patch_diff:
+      db_path = os.path.expanduser("~/.codemender/state.db")
+      if os.path.exists(db_path):
+        try:
+          with closing(sqlite3.connect(db_path)) as conn:
+            tables = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            ]
+            for tbl in ("patches", "fixes", "remediations", "findings"):
+              if tbl not in tables:
+                continue
+              cols = [
+                  r[1]
+                  for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()
+              ]
+              for dcol in (
+                  "diff",
+                  "patch",
+                  "patch_diff",
+                  "unified_diff",
+                  "fix_diff",
+                  "content",
+              ):
+                if dcol not in cols:
+                  continue
+                if "finding_id" in cols:
+                  row = conn.execute(
+                      f"SELECT {dcol} FROM {tbl} WHERE finding_id = ? AND"
+                      f" {dcol} IS NOT NULL AND {dcol} != '' ORDER BY rowid"
+                      " DESC LIMIT 1",
+                      (fid,),
+                  ).fetchone()
+                else:
+                  row = conn.execute(
+                      f"SELECT {dcol} FROM {tbl} WHERE {dcol} IS NOT NULL AND"
+                      f" {dcol} != '' ORDER BY rowid DESC LIMIT 1"
+                  ).fetchone()
+                if row and row[0]:
+                  patch_diff = str(row[0]).strip()
+                  break
+              if patch_diff:
+                break
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+
+    subprocess.run(
+        ["git", "checkout", "HEAD", "--", "."], cwd=workspace_dir, check=False
+    )
+    finding["patch_diff"] = patch_diff
+
+    # Stage 2.3: Post Idempotent Inline PR Review Suggestions
+    review_url = post_idempotent_inline_review(
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        target_sha=target_sha,
+        finding=finding,
+        patch_diff=patch_diff,
+        existing_inline_urls=existing_inline_urls,
+        repo_dir=workspace_dir,
+    )
+    finding["review_url"] = review_url
+    if patch_diff:
+      link_md = (
+          f"[Inline `Commit suggestion` posted]({review_url})"
+          if review_url
+          else "see inline `Commit suggestion` / diff below"
+      )
+      final_status_md = f"✅ **Patch Ready** ({link_md})"
+    else:
+      final_status_md = "⚠️ **Manual remediation required**"
+
+    update_finding_in_sticky_comment(
+        token=token,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        finding=finding,
+        status_cell_md=final_status_md,
+        min_sev=min_sev,
+    )
+
+  with open(results_file, "w", encoding="utf-8") as rf:
+    json.dump(findings, rf, indent=2)
+  return findings
+
