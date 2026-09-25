@@ -208,12 +208,12 @@ class TestCommandBuilder(unittest.TestCase):
       fake_cm = os.path.join(tmpdir, "cm")
       with open(fake_cm, "w", encoding="utf-8") as f:
         f.write(
-            '#!/bin/sh\necho \'      --model string     LLM model to use (default "gemini-3.8-flash")\'\n'
+            '#!/bin/sh\necho \'      --model string     LLM model to use (default "cm-cli-default-model")\'\n'
         )
       os.chmod(fake_cm, 0o755)
 
-      detected = get_cm_default_model(fake_cm)
-      self.assertEqual(detected, "gemini-3.8-flash")
+      detected = get_cm_default_model(fake_cm, cwd=os.path.join(tmpdir, "nonexistent_cwd"))
+      self.assertEqual(detected, "cm-cli-default-model")
 
       cm_home = os.path.join(tmpdir, ".codemender")
       staged = stage_cm_binary_for_archive(cm_home, fake_cm)
@@ -224,6 +224,147 @@ class TestCommandBuilder(unittest.TestCase):
       restored = restore_staged_cm_binary(cm_home, install_path=install_dest)
       self.assertEqual(restored, install_dest)
       self.assertTrue(os.path.isfile(install_dest))
+
+  def test_ensure_cm_updated_default_false_and_opt_in(self):
+    """Verify ensure_cm_updated defaults to false (backward-compatible) and runs `cm update` when enabled."""
+    import tempfile
+    from codemender_agent.codemender.cli import (
+        _CM_DEFAULT_MODEL_CACHE,
+        ensure_cm_updated,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      fake_cm = os.path.join(tmpdir, "cm")
+      marker_file = os.path.join(tmpdir, "updated.marker")
+      with open(fake_cm, "w", encoding="utf-8") as f:
+        f.write(
+            f'#!/bin/sh\nif [ "$1" = "update" ]; then\n  echo "updated" > "{marker_file}"\n  echo "Updated to v0.9.0"\nfi\n'
+        )
+      os.chmod(fake_cm, 0o755)
+
+      # 1. Default (unset or empty CODEMENDER_AUTO_UPDATE) -> does not run `cm update`
+      with patch.dict(os.environ, {"CODEMENDER_AUTO_UPDATE": ""}, clear=True):
+        res_path = ensure_cm_updated(fake_cm, cwd=tmpdir)
+        self.assertEqual(res_path, fake_cm)
+        self.assertFalse(os.path.exists(marker_file))
+
+      # 2. Explicit CODEMENDER_AUTO_UPDATE=true via os.environ -> runs `cm update` and clears model cache
+      _CM_DEFAULT_MODEL_CACHE[fake_cm] = "cached-model"
+      with patch.dict(os.environ, {"CODEMENDER_AUTO_UPDATE": "true"}, clear=True):
+        res_path = ensure_cm_updated(fake_cm, cwd=tmpdir)
+        self.assertEqual(res_path, fake_cm)
+        self.assertTrue(os.path.exists(marker_file))
+        self.assertNotIn(fake_cm, _CM_DEFAULT_MODEL_CACHE)
+
+      # 3. Explicit CODEMENDER_AUTO_UPDATE=true via env dict when os.environ is empty
+      os.remove(marker_file)
+      with patch.dict(os.environ, {"CODEMENDER_AUTO_UPDATE": ""}, clear=True):
+        res_path = ensure_cm_updated(
+            fake_cm, env={"CODEMENDER_AUTO_UPDATE": "true"}, cwd=tmpdir
+        )
+        self.assertEqual(res_path, fake_cm)
+        self.assertTrue(os.path.exists(marker_file))
+
+      # 4. Non-zero exit code during `cm update` falls back cleanly without raising
+      fail_cm = os.path.join(tmpdir, "cm_fail")
+      with open(fail_cm, "w", encoding="utf-8") as f:
+        f.write('#!/bin/sh\necho "network unreachable" >&2\nexit 1\n')
+      os.chmod(fail_cm, 0o755)
+      with patch.dict(os.environ, {"CODEMENDER_AUTO_UPDATE": "1"}, clear=True):
+        res_fail = ensure_cm_updated(fail_cm, cwd=tmpdir)
+        self.assertEqual(res_fail, fail_cm)
+
+  def test_parallel_scan_uses_dynamic_default_model(self):
+    """Verify Stage 1 _scan_repository records token usage under get_cm_default_model when find_model is unset."""
+    from unittest.mock import MagicMock
+    from codemender_agent.config import OrchestratorConfig
+    from codemender_agent.runners.scan import _scan_repository
+
+    fake_find_res = MagicMock()
+    fake_find_res.token_usage = {"in_tokens": 1000, "out_tokens": 200, "total_tokens": 1200}
+    fake_report_res = MagicMock()
+    fake_report_res.stdout = '[{"FindingID": "f-1", "FilePath": "app.py"}]'
+
+    with patch.dict(os.environ, {"CODEMENDER_MODEL": "", "CODEMENDER_FIND_MODEL": ""}, clear=True):
+      cfg = OrchestratorConfig.from_env()
+      with patch("codemender_agent.runners.scan.get_cm_default_model", return_value="detected-default-model") as mock_default_model, \
+           patch("codemender_agent.runners.scan.run_command", side_effect=[fake_find_res, fake_report_res]):
+        findings, token_usage = _scan_repository(
+            repo_dir="/tmp/repo",
+            scrubbed_env={},
+            cm_binary="/usr/local/bin/cm",
+            targets=["/tmp/repo"],
+            config=cfg,
+        )
+        mock_default_model.assert_called_once()
+        self.assertEqual(len(findings), 1)
+        self.assertIn("detected-default-model", token_usage)
+        self.assertEqual(token_usage["detected-default-model"]["total_tokens"], 1200)
+
+  def test_parallel_worker_and_aggregate_dynamic_models(self):
+    """Verify Stage 2 _process_finding uses get_cm_default_model and Stage 3 HTML banner renders multi-model labels."""
+    import tempfile
+    from unittest.mock import MagicMock
+    from codemender_agent.config import OrchestratorConfig
+    from codemender_agent.runners.aggregate import _inject_token_metrics_into_html
+    from codemender_agent.runners.worker import _process_finding
+
+    fake_verify_res = MagicMock(returncode=0, stdout="", token_usage={"in_tokens": 300, "out_tokens": 50, "total_tokens": 350})
+    fake_fix_res = MagicMock(returncode=0, stdout="", token_usage={"in_tokens": 700, "out_tokens": 150, "total_tokens": 850})
+    fake_git_res = MagicMock(returncode=0, stdout="")
+
+    def side_effect(cmd, *_args, **_kwargs):
+      if "verify" in cmd:
+        return fake_verify_res
+      if "fix" in cmd:
+        return fake_fix_res
+      return fake_git_res
+
+    worker_tokens = {}
+    with tempfile.TemporaryDirectory() as tmpdir:
+      with patch.dict(os.environ, {"CODEMENDER_SKIP_VERIFY": "false"}, clear=True):
+        cfg = OrchestratorConfig.from_env()
+        with patch("codemender_agent.runners.worker.get_cm_default_model", return_value="detected-worker-model") as mock_worker_model, \
+             patch("codemender_agent.runners.worker.clean_workspace"), \
+             patch("codemender_agent.runners.worker.sanitize_exploit_and_artifacts"), \
+             patch("codemender_agent.runners.worker.check_remote_branch_exists", return_value=False), \
+             patch("codemender_agent.runners.worker.is_duplicate_pr", return_value=False), \
+             patch("codemender_agent.runners.worker.is_finding_verified", return_value=True), \
+             patch("codemender_agent.runners.worker.get_finding_status", return_value="FIXED"), \
+             patch("codemender_agent.runners.worker.run_command", side_effect=side_effect):
+          _process_finding(
+              finding_id="f-1",
+              finding={"FindingID": "f-1", "FilePath": "app.py", "VulnType": "XSS"},
+              repo_dir=tmpdir,
+              cm_binary="/usr/local/bin/cm",
+              scrubbed_env={},
+              clean_repo_url="https://github.com/org/repo.git",
+              token="fake-token",
+              owner="org",
+              repo_name="repo",
+              default_branch="main",
+              working_base_ref="main",
+              state_db_path=os.path.join(tmpdir, "nonexistent.db"),
+              worker_token_usage=worker_tokens,
+              config=cfg,
+          )
+          mock_worker_model.assert_called_once()
+          self.assertIn("detected-worker-model", worker_tokens)
+          self.assertEqual(worker_tokens["detected-worker-model"]["total_tokens"], 1200)
+
+      html_path = os.path.join(tmpdir, "report.html")
+      with open(html_path, "w", encoding="utf-8") as f:
+        f.write("<html><body><h1>CodeMender Security Report</h1></body></html>")
+      _inject_token_metrics_into_html(
+          html_path,
+          {
+              "stage-find-model": {"in_tokens": 1000, "out_tokens": 200, "total_tokens": 1200},
+              "detected-worker-model": worker_tokens["detected-worker-model"],
+          },
+      )
+      with open(html_path, "r", encoding="utf-8") as f:
+        html_content = f.read()
+      self.assertIn("(Models: <code>detected-worker-model</code>, <code>stage-find-model</code>)", html_content)
 
 
 if __name__ == "__main__":

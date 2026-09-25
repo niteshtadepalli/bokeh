@@ -265,13 +265,13 @@ class TestConfig(unittest.TestCase):
     with unittest.mock.patch.dict(
         os.environ,
         {
-            "CODEMENDER_TARGET_BRANCH": "refs/heads/branch-4.0",
+            "CODEMENDER_TARGET_BRANCH": "refs/heads/release/v1.0",
             "CODEMENDER_EXECUTION_URL": "https://console.cloud.google.com/workflows",
         },
         clear=True,
     ):
       cfg = OrchestratorConfig.from_env()
-      self.assertEqual(cfg.target_branch, "branch-4.0")
+      self.assertEqual(cfg.target_branch, "release/v1.0")
       self.assertEqual(
           cfg.execution_url, "https://console.cloud.google.com/workflows"
       )
@@ -315,7 +315,7 @@ class TestConfig(unittest.TestCase):
         cm_dir = os.path.join(temp_home, ".codemender")
         os.makedirs(cm_dir, exist_ok=True)
         with open(os.path.join(cm_dir, "config.yaml"), "w") as f:
-          yaml.dump({"model": "gemini-3.7-flash"}, f)
+          yaml.dump({"model": "stale-configured-model"}, f)
 
         with unittest.mock.patch.dict(
             os.environ,

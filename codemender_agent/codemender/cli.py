@@ -217,8 +217,8 @@ def get_cm_default_model(
   """Detects the CodeMender CLI's built-in default model at runtime via `cm find --help`.
 
   Avoids hardcoding model names in the orchestrator so that whenever the CLI's
-  built-in default model updates (e.g. `gemini-3.8-flash`), telemetry and HTML
-  reports automatically reflect the active native default model.
+  built-in default model updates across releases, telemetry and HTML reports
+  automatically reflect the active native default model.
   """
   candidates: List[str] = []
   if cm_binary:
@@ -234,6 +234,7 @@ def get_cm_default_model(
     if os.path.isfile(fallback_path) and fallback_path not in candidates:
       candidates.append(fallback_path)
 
+  effective_cwd = cwd if (cwd and os.path.isdir(cwd)) else None
   for bin_path in candidates:
     if bin_path in _CM_DEFAULT_MODEL_CACHE:
       return _CM_DEFAULT_MODEL_CACHE[bin_path]
@@ -244,11 +245,13 @@ def get_cm_default_model(
       bin_path = resolved
       if bin_path in _CM_DEFAULT_MODEL_CACHE:
         return _CM_DEFAULT_MODEL_CACHE[bin_path]
+      if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+        continue
 
     try:
       res = subprocess.run(
           [bin_path, "find", "--help"],
-          cwd=cwd,
+          cwd=effective_cwd,
           env=env,
           capture_output=True,
           text=True,
@@ -277,18 +280,20 @@ def ensure_cm_updated(
     env: Optional[Dict[str, str]] = None,
     cwd: Optional[str] = None,
 ) -> str:
-  """Executes `cm update` when CODEMENDER_AUTO_UPDATE is enabled (default: true).
+  """Executes `cm update` when CODEMENDER_AUTO_UPDATE is enabled (default: false).
 
-  Ensures headless Cloud Run / CI containers self-update to the latest stable
-  CodeMender CLI release before starting Stage 1 (`scan.py`) or `sequential.py`.
-  If running inside an air-gapped VPC-SC perimeter where update servers are
-  unreachable, logs a warning and continues cleanly with the existing binary.
+  When opted in via `CODEMENDER_AUTO_UPDATE=true`, headless Cloud Run / CI
+  containers self-update to the latest stable CodeMender CLI release before
+  starting Stage 1 (`scan.py`) or `sequential.py`. If running inside an
+  air-gapped VPC-SC perimeter where update servers are unreachable, logs a
+  warning and continues cleanly with the existing binary.
   """
   bin_path = cm_binary or shutil.which("cm") or "cm"
-  auto_update_env = (
-      os.environ.get("CODEMENDER_AUTO_UPDATE", "true").strip().lower()
-  )
-  if auto_update_env in ("false", "0", "no", "off"):
+  env_val = (os.environ.get("CODEMENDER_AUTO_UPDATE") or "").strip()
+  if not env_val and env:
+    env_val = (env.get("CODEMENDER_AUTO_UPDATE") or "").strip()
+  auto_update_env = (env_val or "false").lower()
+  if auto_update_env not in ("true", "1", "yes", "on"):
     logger.info(
         "CODEMENDER_AUTO_UPDATE=%s; skipping cm auto-update check.",
         auto_update_env,
@@ -299,11 +304,12 @@ def ensure_cm_updated(
   if not resolved_bin or not os.path.isfile(resolved_bin):
     return bin_path
 
+  effective_cwd = cwd if (cwd and os.path.isdir(cwd)) else None
   try:
     logger.info("Checking for CodeMender CLI updates via '%s update'...", resolved_bin)
     res = subprocess.run(
         [resolved_bin, "update"],
-        cwd=cwd,
+        cwd=effective_cwd,
         env=env,
         capture_output=True,
         text=True,
