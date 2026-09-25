@@ -110,10 +110,186 @@ class TestVcsGithub(unittest.TestCase):
         start_line=10,
         head_branch="codemender/fix-sql_injection-abc12345",
     )
-    self.assertTrue(is_dup)
+    # No html_url in the API response falls back to a plain True.
+    self.assertIs(is_dup, True)
     mock_get.assert_called_once()
     call_args = mock_get.call_args
     self.assertIn("head=org:codemender/fix-sql_injection-abc12345", call_args[0][0])
+
+  @patch("requests.get")
+  def test_is_duplicate_pr_with_head_branch_returns_pr_url(self, mock_get):
+    """Verify targeted head_branch lookup returns the existing PR's html_url."""
+    from codemender_agent.vcs.github import is_duplicate_pr
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = [{
+        "title": "Fix SQL Injection",
+        "state": "open",
+        "html_url": "https://github.com/org/repo/pull/7",
+    }]
+    mock_get.return_value = mock_resp
+
+    result = is_duplicate_pr(
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        file_path="db.py",
+        vuln_type="SQL_INJECTION",
+        start_line=10,
+        head_branch="codemender/fix-sql_injection-abc12345",
+    )
+    self.assertEqual(result, "https://github.com/org/repo/pull/7")
+    mock_get.assert_called_once()
+
+  @patch("requests.Session")
+  @patch("requests.get")
+  def test_is_duplicate_pr_paginated_head_ref_returns_pr_url(
+      self, mock_get, mock_session_cls
+  ):
+    """Verify paginated scan returns html_url when a PR head ref matches."""
+    from codemender_agent.vcs.github import is_duplicate_pr
+
+    # Targeted lookup finds nothing, forcing the paginated scan.
+    targeted_resp = MagicMock()
+    targeted_resp.status_code = 200
+    targeted_resp.json.return_value = []
+    mock_get.return_value = targeted_resp
+
+    page_resp = MagicMock()
+    page_resp.status_code = 200
+    page_resp.json.return_value = [
+        {
+            "head": {"ref": "codemender/other-branch"},
+            "body": "",
+            "html_url": "https://github.com/org/repo/pull/1",
+        },
+        {
+            "head": {"ref": "codemender/fix-sql_injection-abc12345"},
+            "body": "",
+            "html_url": "https://github.com/org/repo/pull/9",
+        },
+    ]
+    page_resp.links = {}
+    session = mock_session_cls.return_value.__enter__.return_value
+    session.get.return_value = page_resp
+
+    result = is_duplicate_pr(
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        file_path="db.py",
+        vuln_type="SQL_INJECTION",
+        start_line=10,
+        head_branch="codemender/fix-sql_injection-abc12345",
+    )
+    self.assertEqual(result, "https://github.com/org/repo/pull/9")
+
+  @patch("requests.Session")
+  def test_is_duplicate_pr_body_match_returns_pr_url_across_pages(
+      self, mock_session_cls
+  ):
+    """Verify body signature match on a later page returns that PR's html_url."""
+    from codemender_agent.vcs.github import is_duplicate_pr
+
+    first_page = MagicMock()
+    first_page.status_code = 200
+    first_page.json.return_value = [{
+        "head": {"ref": "feature/unrelated"},
+        "body": "Unrelated change",
+        "html_url": "https://github.com/org/repo/pull/2",
+    }]
+    first_page.links = {
+        "next": {"url": "https://api.github.com/repos/org/repo/pulls?page=2"}
+    }
+
+    second_page = MagicMock()
+    second_page.status_code = 200
+    second_page.json.return_value = [{
+        "head": {"ref": "codemender/fix-sql_injection-def67890"},
+        "body": (
+            "## CodeMender Security Fix\n"
+            "**File**: db.py\n"
+            "**Type**: SQL_INJECTION\n"
+            "**Start Line**: 20\n"
+        ),
+        "html_url": "https://github.com/org/repo/pull/11",
+    }]
+    second_page.links = {}
+
+    session = mock_session_cls.return_value.__enter__.return_value
+    session.get.side_effect = [first_page, second_page]
+
+    result = is_duplicate_pr(
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        file_path="db.py",
+        vuln_type="SQL_INJECTION",
+        start_line=10,
+    )
+    self.assertEqual(result, "https://github.com/org/repo/pull/11")
+    self.assertEqual(session.get.call_count, 2)
+    self.assertIn("page=2", session.get.call_args_list[1][0][0])
+
+  @patch("requests.Session")
+  def test_is_duplicate_pr_no_match_returns_false(self, mock_session_cls):
+    """Verify no URL is returned when no open PR matches within 15 lines."""
+    from codemender_agent.vcs.github import is_duplicate_pr
+
+    page_resp = MagicMock()
+    page_resp.status_code = 200
+    page_resp.json.return_value = [{
+        "head": {"ref": "codemender/fix-sql_injection-def67890"},
+        "body": (
+            "## CodeMender Security Fix\n"
+            "db.py SQL_INJECTION\n"
+            "**Start Line**: 100\n"
+        ),
+        "html_url": "https://github.com/org/repo/pull/11",
+    }]
+    page_resp.links = {}
+    session = mock_session_cls.return_value.__enter__.return_value
+    session.get.return_value = page_resp
+
+    result = is_duplicate_pr(
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        file_path="db.py",
+        vuln_type="SQL_INJECTION",
+        start_line=10,
+    )
+    self.assertIs(result, False)
+
+  def test_is_duplicate_pr_fake_token_returns_false(self):
+    """Verify fake-token short-circuits without returning a URL."""
+    from codemender_agent.vcs.github import is_duplicate_pr
+
+    result = is_duplicate_pr(
+        repo_url="https://github.com/org/repo.git",
+        token="fake-token",
+        file_path="db.py",
+        vuln_type="SQL_INJECTION",
+        start_line=10,
+    )
+    self.assertIs(result, False)
+
+  @patch("codemender_agent.utils.time.sleep")
+  @patch("requests.get")
+  def test_is_duplicate_pr_api_error_returns_false(self, mock_get, _mock_sleep):
+    """Verify API failures after retries return False rather than a URL."""
+    import requests
+    from codemender_agent.vcs.github import is_duplicate_pr
+
+    mock_get.side_effect = requests.exceptions.ConnectionError("boom")
+
+    result = is_duplicate_pr(
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        file_path="db.py",
+        vuln_type="SQL_INJECTION",
+        start_line=10,
+        head_branch="codemender/fix-sql_injection-abc12345",
+    )
+    self.assertIs(result, False)
+    self.assertEqual(mock_get.call_count, 3)
 
   @patch("requests.post")
   def test_post_commit_status_success(self, mock_post):
