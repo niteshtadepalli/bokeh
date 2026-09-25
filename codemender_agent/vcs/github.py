@@ -14,15 +14,20 @@
 
 """GitHub REST API integration for CodeMender Agent."""
 
+import base64
+import gzip
 import logging
 import re
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import requests
 from codemender_agent.utils import retry_on_exception, run_command
 from codemender_agent.vcs.git import get_git_auth_header, parse_repo_owner_and_name, sanitize_git_url
 
 logger = logging.getLogger("codemender-orchestrator")
+
+STATUS_CONTEXT_PR = "CodeMender / Security Gate"
+STATUS_CONTEXT_SCHEDULED = "CodeMender / Nightly Scan"
 
 
 @retry_on_exception(max_tries=3)
@@ -228,8 +233,13 @@ def _check_duplicate_pr_api(
     vuln_type: str,
     start_line: int,
     head_branch: Optional[str] = None,
-) -> bool:
-  """Checks GitHub API for existing duplicate PRs traversing pagination headers."""
+) -> Any:
+  """Checks GitHub API for existing duplicate PRs traversing pagination headers.
+
+  Returns:
+    The existing PR's html_url string (or True if html_url is absent) when a
+    duplicate open PR is found, or False otherwise.
+  """
   if token == "fake-token":
     return False
   sanitized_url = sanitize_git_url(repo_url)
@@ -252,12 +262,13 @@ def _check_duplicate_pr_api(
     if resp.status_code == 200:
       prs = resp.json()
       if isinstance(prs, list) and len(prs) > 0:
+        pr_html_url = prs[0].get("html_url")
         logger.info(
             "Found existing open PR targeting head branch %s: %s",
             head_branch,
-            prs[0].get("html_url"),
+            pr_html_url,
         )
-        return True
+        return pr_html_url or True
 
   # 2. Paginate over open pull requests to check finding descriptions
   url: Optional[str] = (
@@ -281,7 +292,7 @@ def _check_duplicate_pr_api(
       # 3. Check each open PR for matching vulnerability signatures
       for pr in prs:
         if head_branch and pr.get("head", {}).get("ref") == head_branch:
-          return True
+          return pr.get("html_url") or True
         body = pr.get("body") or ""
         # Match PR body against vulnerability metadata and target file path
         if "CodeMender Security Fix" in body and file_path in body and vuln_type in body:
@@ -290,14 +301,15 @@ def _check_duplicate_pr_api(
             existing_line = int(match.group(1))
             # Match within 15 lines of original vulnerability location
             if abs(existing_line - start_line) <= 15:
+              pr_html_url = pr.get("html_url")
               logger.info(
                   "Found existing PR (%s) covering %s in %s near line %d.",
-                  pr.get("html_url"),
+                  pr_html_url,
                   vuln_type,
                   file_path,
                   start_line,
               )
-              return True
+              return pr_html_url or True
 
       # 4. Traverse next page link if present in Link header
       url = resp.links.get("next", {}).get("url")
@@ -312,7 +324,7 @@ def is_duplicate_pr(
     vuln_type: str,
     start_line: int,
     head_branch: Optional[str] = None,
-) -> bool:
+) -> Any:
   """Checks if an open PR already exists for the same vulnerability near the same line."""
   try:
     return _check_duplicate_pr_api(
@@ -936,3 +948,79 @@ def list_reviewed_finding_ids(
     return set()
 
   return finding_ids
+
+
+def _sarif_payload(
+    sarif_path: str, commit_sha: str, ref: str
+) -> Optional[Dict[str, Any]]:
+  """Builds the gzip+base64 payload the GitHub Code Scanning API expects."""
+  try:
+    with open(sarif_path, "rb") as fh:
+      raw = fh.read()
+  except OSError as e:
+    logger.warning("Could not read SARIF file %s: %s", sarif_path, e)
+    return None
+
+  encoded = base64.b64encode(gzip.compress(raw)).decode("ascii")
+  return {
+      "commit_sha": commit_sha,
+      "ref": ref,
+      "sarif": encoded,
+      "tool_name": "CodeMender",
+  }
+
+
+def upload_sarif_to_code_scanning(
+    token: str,
+    owner: str,
+    repo: str,
+    sarif_path: str,
+    commit_sha: str,
+    ref: str,
+    checkout_uri: Optional[str] = None,
+) -> Optional[str]:
+  """Uploads a SARIF report to GitHub Code Scanning."""
+  if token == "fake-token":
+    logger.info(
+        "Mock GitHub token detected ('fake-token'), simulating SARIF upload."
+    )
+    return "mock-sarif-id"
+
+  payload = _sarif_payload(sarif_path, commit_sha, ref)
+  if payload is None:
+    return None
+  if checkout_uri:
+    payload["checkout_uri"] = checkout_uri
+
+  headers = {
+      "Authorization": f"Bearer {token}",
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+  }
+  url = f"https://api.github.com/repos/{owner}/{repo}/code-scanning/sarifs"
+  try:
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    if resp.status_code == 202:
+      sarif_id = ""
+      try:
+        sarif_id = (resp.json() or {}).get("id", "")
+      except ValueError:
+        pass
+      logger.info(
+          "Uploaded SARIF to GitHub code scanning for %s/%s @ %s (id=%s).",
+          owner,
+          repo,
+          commit_sha[:8],
+          sarif_id or "unknown",
+      )
+      return sarif_id or "accepted"
+    logger.warning(
+        "SARIF upload returned HTTP %d: %s",
+        resp.status_code,
+        (resp.text or "")[:300],
+    )
+    return None
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Failed to upload SARIF to GitHub code scanning: %s", e)
+    return None
+
