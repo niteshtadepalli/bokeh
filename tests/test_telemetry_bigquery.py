@@ -290,6 +290,49 @@ class TestSchemaMapping(unittest.TestCase):
     self.assertEqual(counts["skipped_duplicate"], 1)
     self.assertEqual(counts["total"], 4)
 
+  def test_verified_but_unfixed_counts_as_failed_fix(self):
+    # The worker leaves a finding VERIFIED when every `cm fix` attempt fails.
+    counts = bq.summarize_remediation([
+        {"finding_id": "a", "status": "VERIFIED"},
+        {"finding_id": "b", "status": "FIXED"},
+        {"finding_id": "c", "status": "OPEN"},
+        {"finding_id": "d", "status": "DISMISSED"},
+    ])
+    self.assertEqual(counts["fixed"], 1)
+    self.assertEqual(counts["failed_fix"], 1)
+
+  def _verified(self, status, *, skip_verify=None, wiz=False, raw=None):
+    ctx = bq.ScanRunContext(scan_id="s", repository="a/b", skip_verify=skip_verify,
+                            wiz_imported_ids=["f1"] if wiz else [])
+    finding = {"finding_id": "f1", "status": status}
+    if raw is not None:
+      finding["verified"] = raw
+    return bq.build_finding_rows(ctx, [finding], with_snippets=False)[0]["verified"]
+
+  def test_verified_status_marks_row_verified_even_when_cm_column_is_zero(self):
+    self.assertIs(self._verified("VERIFIED", raw=0), True)
+    self.assertIs(self._verified("verified"), True)
+
+  def test_fixed_implies_verified_only_when_verification_was_mandatory(self):
+    self.assertIs(self._verified("FIXED", skip_verify=False, raw=0), True)
+    self.assertIs(self._verified("PR_CREATION_FAILED", skip_verify=False), True)
+    self.assertIs(self._verified("FIXED", wiz=True, skip_verify=True, raw=0), True)
+    # skip_verify on (or unknown): a fix proves nothing about verification.
+    self.assertIs(self._verified("FIXED", skip_verify=True, raw=0), False)
+    self.assertIsNone(self._verified("FIXED"))
+
+  def test_unverified_statuses_stay_unverified(self):
+    for status in ("OPEN", "DISMISSED", "DETECTED", "SKIPPED_DUPLICATE"):
+      self.assertIs(self._verified(status, skip_verify=False, raw=0), False, status)
+      self.assertIsNone(self._verified(status, skip_verify=False), status)
+
+  def test_apply_config_copies_skip_verify(self):
+    class Cfg:
+      skip_verify = False
+    ctx = bq.ScanRunContext().apply_config(Cfg())
+    self.assertIs(ctx.skip_verify, False)
+    self.assertIsNone(bq.ScanRunContext().apply_config(object()).skip_verify)
+
 
 class TestSnippetGating(unittest.TestCase):
   """Source code and LLM prose must stay out of the warehouse by default."""

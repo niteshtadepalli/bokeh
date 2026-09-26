@@ -127,6 +127,13 @@ SENSITIVE_FINDING_COLUMNS = ("analysis", "snippet")
 # Finding statuses that count as successfully remediated / failed to remediate.
 _FIXED_STATUSES = frozenset({"FIXED", "REMEDIATED", "PATCHED"})
 _FAILED_FIX_STATUSES = frozenset({"FIX_FAILED", "PR_CREATION_FAILED", "PATCH_FAILED"})
+# Statuses a finding can only hold after `cm verify` confirmed it. The worker's
+# own verify gate is status-based, and cm does not reliably set a `verified`
+# column, so these statuses also mark a row as verified.
+_VERIFY_PASSED_STATUSES = frozenset({"VERIFIED", "CONFIRMED"}) | _FIXED_STATUSES | _FAILED_FIX_STATUSES
+# A finding still VERIFIED at aggregate time passed verification but never
+# reached FIXED: every fix attempt failed (the worker leaves the status as is).
+_VERIFIED_UNFIXED_STATUSES = frozenset({"VERIFIED", "CONFIRMED"})
 
 _CWE_PATTERN = re.compile(r"(CWE-\d+)", re.IGNORECASE)
 
@@ -378,6 +385,11 @@ class ScanRunContext:
   # CodeMender IDs of findings imported from Wiz, used to label finding rows.
   wiz_imported_ids: Optional[List[str]] = None
 
+  # Whether the worker ran with skip_verify. Only when it is explicitly False
+  # does a FIXED / patch-failed status prove the finding passed `cm verify`
+  # (with skip_verify the worker goes straight to fix).
+  skip_verify: Optional[bool] = None
+
   # Absolute path of the checkout this run scanned. Not itself exported; it is
   # the reference point that turns the container-absolute paths recorded in
   # `state.db` into repository-relative paths that join across runs.
@@ -415,6 +427,9 @@ class ScanRunContext:
     self.verify_model = self.verify_model or getattr(config, "verify_model", None)
     self.fix_model = self.fix_model or getattr(config, "fix_model", None)
     self.execution_url = self.execution_url or getattr(config, "execution_url", None)
+    if self.skip_verify is None:
+      value = getattr(config, "skip_verify", None)
+      self.skip_verify = value if isinstance(value, bool) else None
     return self
 
   def apply_default_model(self, default_model: Optional[str]) -> "ScanRunContext":
@@ -569,6 +584,7 @@ def build_finding_rows(
       continue
 
     title = _as_str(finding.get("title"))
+    status = (_as_str(finding.get("status")) or "DETECTED").upper()
     vuln_type = _as_str(finding.get("vuln_type"))
     severity = _as_str(finding.get("severity"))
     confidence_level = _as_str(
@@ -588,9 +604,9 @@ def build_finding_rows(
         "file_path": repo_relative_path(finding.get("file_path"), repo_dir),
         "start_line": _as_int(finding.get("start_line")),
         "end_line": _as_int(finding.get("end_line")),
-        "status": (_as_str(finding.get("status")) or "DETECTED").upper(),
+        "status": status,
         "source_stage": _as_str(finding.get("source_stage")),
-        "verified": _as_bool(finding.get("verified")),
+        "verified": _row_verified(finding, status, finding_id in wiz_ids, ctx.skip_verify),
         "muted": _as_bool(finding.get("muted")),
         "mute_reason": _as_str(finding.get("mute_reason"))
         or _as_str(finding.get("dismiss_reason")),
@@ -611,10 +627,36 @@ def build_finding_rows(
   return rows
 
 
+def _row_verified(
+    finding: Dict[str, Any], status: str, force_verified: bool,
+    skip_verify: Optional[bool],
+) -> Optional[bool]:
+  """Whether `cm verify` confirmed this finding.
+
+  cm's own `verified` column is honoured when truthy, but it is not reliably
+  set, so the answer is also derived the way the worker gates fixes: a
+  VERIFIED status can only come from `cm verify`, and when verification was
+  mandatory (skip_verify explicitly off, or an imported finding that is always
+  force-verified) a fixed or fix-failed status implies verification passed.
+  """
+  if _as_bool(finding.get("verified")):
+    return True
+  if status in _VERIFIED_UNFIXED_STATUSES:
+    return True
+  if status in _VERIFY_PASSED_STATUSES and (force_verified or skip_verify is False):
+    return True
+  return _as_bool(finding.get("verified"))
+
+
 def summarize_remediation(
     findings: Optional[Iterable[Dict[str, Any]]],
 ) -> Dict[str, int]:
-  """Counts fixed / failed-fix / skipped-duplicate findings in a snapshot."""
+  """Counts fixed / failed-fix / skipped-duplicate findings in a snapshot.
+
+  A finding still VERIFIED here passed verification but never reached FIXED
+  (the worker leaves the status untouched when every fix attempt fails), so
+  it counts as a failed fix rather than silently disappearing.
+  """
   counts = {"fixed": 0, "failed_fix": 0, "skipped_duplicate": 0, "total": 0}
   for finding in findings or []:
     if not isinstance(finding, dict):
@@ -624,7 +666,8 @@ def summarize_remediation(
     patch_status = (_as_str(finding.get("patch_status")) or "").upper()
     if status in _FIXED_STATUSES or patch_status in _FIXED_STATUSES:
       counts["fixed"] += 1
-    elif status in _FAILED_FIX_STATUSES or patch_status in _FAILED_FIX_STATUSES:
+    elif (status in _FAILED_FIX_STATUSES or patch_status in _FAILED_FIX_STATUSES
+          or status in _VERIFIED_UNFIXED_STATUSES):
       counts["failed_fix"] += 1
     if status == "SKIPPED_DUPLICATE":
       counts["skipped_duplicate"] += 1
