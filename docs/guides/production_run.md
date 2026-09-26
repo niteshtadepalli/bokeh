@@ -86,8 +86,11 @@ cd codemender-agent
 
 In CodeMender Public Preview, the official stable CLI binary is distributed via
 Google Artifact Registry (`cmoc-prod/codemender-cli-production`). Cloud Build
-automatically fetches and extracts the stable `cm` binary during the container
-build step (`cloudbuild.yaml`). No manual binary download or storage bucket upload is required.
+automatically fetches and extracts the `cm` binary during the container build
+step (`cloudbuild.yaml`), pinned by `_CM_VERSION` and `_CM_SHA256`. No manual
+binary download or storage bucket upload is required. See the
+[Terraform deployment guide](terraform_deployment_guide.md) for how to trial a
+newer release under its own image tag.
 
 ### Step 3: Create a GCS Bucket for Summary Reports
 
@@ -183,7 +186,7 @@ gcloud iam service-accounts create ${SA_NAME} \
 ### Step 6: Build and Push the Docker Container
 
 Compile and push the container image to Artifact Registry using Cloud Build
-(which fetches the stable `cm` CLI binary directly from Google Artifact Registry
+(which fetches the pinned `cm` CLI binary directly from Google Artifact Registry
 and packages it alongside your environment):
 
 1.  **If deploying via Terraform (`terraform/gcp`)**:

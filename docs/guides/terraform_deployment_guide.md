@@ -157,8 +157,25 @@ terraform apply -auto-approve
 
 In CodeMender Public Preview, the official stable CLI binary is distributed via
 Google Artifact Registry (`cmoc-prod/codemender-cli-production`). Cloud Build
-automatically fetches and extracts the stable `cm` binary during the container
-build step (`cloudbuild.yaml`). No manual binary download or storage bucket upload is required.
+fetches and extracts the `cm` binary during the container build step
+(`cloudbuild.yaml`). No manual binary download or storage bucket upload is required.
+
+The binary is pinned: `_CM_VERSION` selects the release and `_CM_SHA256` must
+match the downloaded (or pre-staged `./cm`) binary, otherwise the build fails.
+Running containers never self-update, so the pinned version is the version
+that runs. A default build tags the image `latest` and points the scheduled
+Cloud Run jobs at it, so the default pin in `cloudbuild.yaml` should only move
+to a release you have already evaluated. To trial a newer release without
+touching the scheduled jobs, override both substitutions and also set
+`_IMAGE_TAG` to a new tag and `_UPDATE_JOBS=false`:
+
+```bash
+gcloud builds submit --config=cloudbuild.yaml \
+    --substitutions=_REPO_NAME="${REPO_NAME}",_REGION="${REGION}",_CM_VERSION="<version>",_CM_SHA256="<sha256>",_IMAGE_TAG="cm-<version>",_UPDATE_JOBS=false .
+```
+
+Clearing both `_CM_VERSION` and `_CM_SHA256` restores the old behaviour of
+building with the latest stable release.
 
 --------------------------------------------------------------------------------
 
