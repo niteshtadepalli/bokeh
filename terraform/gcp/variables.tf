@@ -120,6 +120,12 @@ variable "target_repositories" {
     find_model    = optional(string, "")
     verify_model  = optional(string, "")
     fix_model     = optional(string, "")
+    # Extra cm flags per command, as shell-style strings (for example
+    # find_flags = "--deep --deep-workers 4"). Flags the installed cm does not
+    # support are dropped at run time with a warning.
+    find_flags   = optional(string, "")
+    verify_flags = optional(string, "")
+    fix_flags    = optional(string, "")
     # Opt-in Wiz SAST bridge. Disabled unless `enabled = true` is set for the
     # repository; configuring the Wiz secrets alone never enables it.
     wiz = optional(object({

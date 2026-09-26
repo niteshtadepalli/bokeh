@@ -12,6 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+locals {
+  # Non-empty per-command cm flag strings for each repository. coalesce(v, " ")
+  # maps both null and "" to a blank string that trimspace() then empties.
+  repo_cm_flags = {
+    for key, repo in var.target_repositories : key => {
+      for cmd, flags in {
+        find   = repo.find_flags
+        verify = repo.verify_flags
+        fix    = repo.fix_flags
+      } : cmd => trimspace(coalesce(flags, " ")) if trimspace(coalesce(flags, " ")) != ""
+    }
+  }
+}
+
 resource "google_cloud_scheduler_job" "repo_scans" {
   for_each    = var.target_repositories
   name        = "${var.resource_prefix}-scan-${each.key}"
@@ -59,6 +73,10 @@ resource "google_cloud_scheduler_job" "repo_scans" {
             enabled      = true
             min_severity = upper(coalesce(try(each.value.wiz.min_severity, null), "HIGH"))
           }
+        } : {},
+        # Extra cm flags: only emitted for repositories that set any.
+        length(local.repo_cm_flags[each.key]) > 0 ? {
+          cm_flags = local.repo_cm_flags[each.key]
         } : {}
       ))
     }))

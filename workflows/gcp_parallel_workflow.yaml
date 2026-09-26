@@ -49,6 +49,12 @@ main:
           - wiz: ${default(map.get(args, "wiz"), default_empty_map)}
           - wiz_enabled: ${default(map.get(wiz, "enabled"), false)}
           - wiz_min_severity: ${default(map.get(wiz, "min_severity"), "HIGH")}
+          # Optional extra cm flags per command (shell-style strings); the
+          # orchestrator drops any flag the installed cm does not support.
+          - cm_flags: ${default(map.get(args, "cm_flags"), default_empty_map)}
+          - find_flags: ${default(map.get(cm_flags, "find"), "")}
+          - verify_flags: ${default(map.get(cm_flags, "verify"), "")}
+          - fix_flags: ${default(map.get(cm_flags, "fix"), "")}
           - target_sha: ""
           - num_workers: 0
           - stage2_failed: false
@@ -109,6 +115,8 @@ main:
                         value: ${string(wiz_enabled)}
                       - name: CODEMENDER_WIZ_MIN_SEVERITY
                         value: ${wiz_min_severity}
+                      - name: CODEMENDER_FIND_FLAGS
+                        value: ${find_flags}
             connector_params:
               skip_polling: true
           result: stage1_operation
@@ -247,6 +255,10 @@ main:
                         value: ${string(skip_exploit_verification)}
                       - name: CODEMENDER_SKIP_VERIFY
                         value: ${string(skip_verify)}
+                      - name: CODEMENDER_VERIFY_FLAGS
+                        value: ${verify_flags}
+                      - name: CODEMENDER_FIX_FLAGS
+                        value: ${fix_flags}
             connector_params:
               skip_polling: true
           result: stage2_operation
