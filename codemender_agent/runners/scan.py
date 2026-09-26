@@ -548,8 +548,13 @@ def _filter_findings(
     force_overwrite: bool,
     is_pr_scan: bool = False,
     pr_base_ref: Optional[str] = None,
+    dry_run: bool = False,
 ) -> tuple[list[dict[str, any]], list[str], list[str]]:
-  """Filters findings against PR modified hunks (if PR scan) and remote duplicates."""
+  """Filters findings against PR modified hunks (if PR scan) and remote duplicates.
+
+  A dry run skips the remote duplicate checks (and never prunes a dead remote
+  branch), so every run against the same commit keeps the same findings.
+  """
   active_findings = []
   skipped_finding_ids = []
   ignored_finding_ids = []
@@ -642,7 +647,8 @@ def _filter_findings(
     vuln_type = finding.get("VulnType") or "vulnerability"
     branch_name = get_finding_branch_name(file_path, vuln_type, start_line)
 
-    if not force_overwrite and check_remote_branch_exists(
+    check_remote = not force_overwrite and not dry_run
+    if check_remote and check_remote_branch_exists(
         clean_repo_url, token, branch_name, cwd=repo_dir
     ):
       has_active_pr = is_duplicate_pr(
@@ -673,7 +679,7 @@ def _filter_findings(
         )
         delete_remote_branch(clean_repo_url, token, branch_name, cwd=repo_dir)
 
-    elif not force_overwrite:
+    elif check_remote:
       dup_pr = is_duplicate_pr(
           clean_repo_url,
           token,
@@ -1219,6 +1225,7 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
       force_overwrite,
       is_pr_scan=config.is_pr_scan,
       pr_base_ref=config.pr_base_ref,
+      dry_run=config.dry_run,
   )
 
   # 9. Soft-delete skipped & ignored findings in local state.db for telemetry before archiving

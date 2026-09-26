@@ -39,6 +39,7 @@ from codemender_agent.storage import upload_and_sign_report
 from codemender_agent.utils import accumulate_model_token_usage
 from codemender_agent.utils import build_cm_command
 from codemender_agent.utils import free_port
+from codemender_agent.utils import is_dry_run
 from codemender_agent.utils import resolve_command_model
 from codemender_agent.utils import run_command
 from codemender_agent.vcs.git import clean_workspace
@@ -297,7 +298,9 @@ def run_sequential_pipeline() -> None:
     force_overwrite = (
         os.environ.get("CODEMENDER_FORCE_OVERWRITE", "false").lower() == "true"
     )
-    if not force_overwrite:
+    dry_run = is_dry_run()
+    # A dry run skips remote duplicate checks, like the parallel runners.
+    if not force_overwrite and not dry_run:
       is_branch_dup = check_remote_branch_exists(
           clean_repo_url, token, branch_name, cwd=repo_dir
       )
@@ -492,6 +495,15 @@ def run_sequential_pipeline() -> None:
       run_command(["git", "add", "-u"], cwd=repo_dir)
       commit_msg = f"fix(security): resolve {vuln_type} in {file_path}"
       run_command(["git", "commit", "-m", commit_msg], cwd=repo_dir)
+
+      if dry_run:
+        logger.info(
+            "Dry run (CODEMENDER_DRY_RUN): fix for finding %s is ready; not"
+            " pushing %s or opening a pull request.",
+            finding_id,
+            branch_name,
+        )
+        continue
 
       logger.info("Pushing branch %s to remote...", branch_name)
       push_cmd = [

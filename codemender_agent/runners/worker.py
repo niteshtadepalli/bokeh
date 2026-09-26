@@ -517,7 +517,10 @@ def _process_finding(
           state_db_path, finding_id, "Suggestion already posted on this PR"
       )
       return
-  elif not force_overwrite:
+  elif not force_overwrite and not config.dry_run:
+    # A dry run skips remote duplicate checks so that repeated runs against
+    # the same commit (for example the arms of an A/B comparison) all process
+    # the same findings.
     if _skip_if_duplicate_branch_or_pr(
         clean_repo_url,
         token,
@@ -766,6 +769,16 @@ def _process_finding(
 
   # 5. Route the remediation to the reviewer
   try:
+    if config.dry_run:
+      # Leave the finding's state as cm recorded it (FIXED, with its patch)
+      # rather than marking a routing failure; the finally block below resets
+      # the workspace.
+      logger.info(
+          "Dry run (CODEMENDER_DRY_RUN): fix for finding %s is ready; not"
+          " creating a branch, pull request, review or comment on GitHub.",
+          finding_id,
+      )
+      return None
     if suggestion_mode:
       fallback_route = "patch comment" if config.is_fork_pr else "Child PR"
       # Suggestions must be derived before committing: the parser reads the

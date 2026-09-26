@@ -28,6 +28,7 @@ from codemender_agent.runners.aggregate import run_aggregate_pipeline
 from codemender_agent.runners.scan import run_scan_pipeline
 from codemender_agent.runners.sequential import run_sequential_pipeline
 from codemender_agent.runners.worker import run_worker_pipeline
+from codemender_agent.utils import is_dry_run
 
 # Configure global root logger for all package submodules
 logging.basicConfig(
@@ -40,6 +41,12 @@ logging.basicConfig(
 def main() -> None:
   """Main execution entrypoint for CodeMender Orchestrator."""
   run_mode = os.environ.get("CODEMENDER_RUN_MODE", "sequential").lower()
+  if is_dry_run():
+    logging.warning(
+        "CODEMENDER_DRY_RUN is set: this run makes no GitHub writes (no fix"
+        " pull requests, branch pushes, SARIF upload or commit status) and"
+        " skips remote duplicate checks."
+    )
 
   if run_mode == "sequential":
     run_sequential_pipeline()

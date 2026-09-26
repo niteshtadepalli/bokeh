@@ -34,6 +34,22 @@ when running in Docker or Cloud Run.
 *   `CODEMENDER_FORCE_OVERWRITE`: If set to `true`, bypasses the "PR Spam
     Prevention" check. The orchestrator will attempt to recreate and force-push
     verify/fix branches even if they already exist on the remote.
+*   `CODEMENDER_DRY_RUN`: Set to `"true"` (or `1`, `yes`, `on`) to run scan,
+    verify and fix as usual while making **no GitHub writes**: no fix pull
+    requests, branch pushes, review suggestions or comments, SARIF upload,
+    commit status or remote branch deletion. It also skips the remote duplicate
+    checks (existing `codemender/fix-...` branches and open pull requests), so
+    repeated runs against the same commit, such as the arms of an A/B
+    comparison, all process the same findings. Fixes stay recorded as `FIXED`
+    in the report and telemetry, with no pull request link. Reports, GCS
+    artifacts and BigQuery telemetry are written as usual. Defaults to off;
+    unset, empty or any other value changes nothing.
+    *   *Cloud Workflows / Terraform*: pass `dry_run: true` in the workflow
+        arguments, or set `dry_run = true` on a repository in
+        `target_repositories`.
+    *   *GitHub Actions*: the reusable workflow's own SARIF upload step is
+        controlled by its `upload_sarif` input, not by this variable; set
+        `upload_sarif: false` as well for a run with no GitHub writes.
 *   `CODEMENDER_PR_REMEDIATION_MODE`: How fixes are delivered on Pull Request
     scans.
     *   `review_suggestion` (*default*): posts the patch as one-click inline

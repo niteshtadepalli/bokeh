@@ -23,7 +23,7 @@ import re
 import shutil
 from typing import Any, List, Optional, Tuple
 
-from codemender_agent.utils import retry_on_exception
+from codemender_agent.utils import is_dry_run, retry_on_exception
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -568,7 +568,15 @@ def push_branch_to_remote(
     branch_name: str,
     force: bool = False,
 ) -> None:
-  """Pushes a local branch to origin with exponential backoff retries."""
+  """Pushes a local branch to origin with exponential backoff retries.
+
+  Does nothing in a dry run (CODEMENDER_DRY_RUN).
+  """
+  if is_dry_run():
+    logger.info(
+        "Dry run (CODEMENDER_DRY_RUN): skipping push of branch %s.", branch_name
+    )
+    return
   push_cmd = ["git", "-c", get_git_auth_header(token), "push"]
   if force:
     push_cmd.append("-f")

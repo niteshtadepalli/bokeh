@@ -21,13 +21,26 @@ import re
 from typing import Any, Dict, List, Optional, Set
 
 import requests
-from codemender_agent.utils import retry_on_exception, run_command
+from codemender_agent.utils import is_dry_run, retry_on_exception, run_command
 from codemender_agent.vcs.git import get_git_auth_header, parse_repo_owner_and_name, sanitize_git_url
 
 logger = logging.getLogger("codemender-orchestrator")
 
 STATUS_CONTEXT_PR = "CodeMender / Security Gate"
 STATUS_CONTEXT_SCHEDULED = "CodeMender / Nightly Scan"
+
+
+def _skip_for_dry_run(action: str) -> bool:
+  """Logs and returns True when CODEMENDER_DRY_RUN forbids this GitHub call.
+
+  Every helper in this module that writes to GitHub, or that looks up remote
+  branches and pull requests to deduplicate findings, checks this first, so a
+  dry run makes no GitHub writes whichever runner calls it.
+  """
+  if not is_dry_run():
+    return False
+  logger.info("Dry run (CODEMENDER_DRY_RUN): skipping %s.", action)
+  return True
 
 
 @retry_on_exception(max_tries=3)
@@ -61,7 +74,12 @@ def _get_branch_via_api(
 def check_remote_branch_exists(
     repo_url: str, token: str, branch_name: str, cwd: Optional[str] = None
 ) -> bool:
-  """Checks if a branch already exists on the remote repository."""
+  """Checks if a branch already exists on the remote repository.
+
+  Always False in a dry run, which skips remote duplicate checks.
+  """
+  if _skip_for_dry_run(f"remote branch check for {branch_name}"):
+    return False
   sanitized_url = sanitize_git_url(repo_url)
   # 1. Attempt O(1) branch existence check via GitHub REST API
   try:
@@ -143,7 +161,10 @@ def delete_remote_branch(
 
   Enforces a strict security prefix check (branch_name must start with 'codemender/')
   to prevent deleting critical or protected branches (e.g., main, master).
+  Does nothing and returns False in a dry run.
   """
+  if _skip_for_dry_run(f"deletion of remote branch {branch_name}"):
+    return False
   if not branch_name or not branch_name.startswith("codemender/"):
     logger.error(
         "Refusing to delete non-CodeMender branch '%s' for safety.", branch_name
@@ -325,7 +346,12 @@ def is_duplicate_pr(
     start_line: int,
     head_branch: Optional[str] = None,
 ) -> Any:
-  """Checks if an open PR already exists for the same vulnerability near the same line."""
+  """Checks if an open PR already exists for the same vulnerability near the same line.
+
+  Always False in a dry run, which skips remote duplicate checks.
+  """
+  if _skip_for_dry_run(f"open pull request check for {file_path}"):
+    return False
   try:
     return _check_duplicate_pr_api(
         repo_url, token, file_path, vuln_type, start_line, head_branch=head_branch
@@ -347,6 +373,8 @@ def create_pr_comment(
     body: str,
 ) -> Optional[str]:
   """Posts a Markdown review comment on a Pull Request (or Issue)."""
+  if _skip_for_dry_run(f"comment on pull request #{pr_number}"):
+    return None
   # 1. Handle mock GitHub token in test environments
   if token == "fake-token":
     logger.info("Mock GitHub token detected ('fake-token'), simulating PR comment.")
@@ -389,6 +417,8 @@ def create_pull_request(
     base_branch: str,
 ) -> Optional[str]:
   """Creates a Pull Request on GitHub using REST API."""
+  if _skip_for_dry_run(f"pull request creation for {head_branch}"):
+    return None
   # 1. Handle mock token in test suites
   if token == "fake-token":
     logger.info("Mock GitHub token detected ('fake-token'), simulating PR creation.")
@@ -451,6 +481,8 @@ def _post_commit_status_api(
     target_url: Optional[str] = None,
 ) -> bool:
   """Posts a commit status check to GitHub REST API."""
+  if _skip_for_dry_run(f"commit status '{context}' ({state})"):
+    return False
   # 1. Handle mock token in test suites
   if token == "fake-token":
     logger.info("Mock GitHub token detected ('fake-token'), simulating commit status creation.")
@@ -741,6 +773,8 @@ def _create_pr_review_api(
     comments: List[Dict],
 ) -> Optional[str]:
   """Posts a Pull Request review carrying inline suggestion comments."""
+  if _skip_for_dry_run(f"suggestion review on pull request #{pr_number}"):
+    return None
   # 1. Handle mock token in test suites
   if token == "fake-token":
     logger.info("Mock GitHub token detected ('fake-token'), simulating PR review.")
@@ -825,6 +859,8 @@ def _post_or_update_sticky_comment_api(
     token: str, owner: str, repo: str, pr_number: int, body: str
 ) -> Optional[str]:
   """Creates or updates the single marker-tagged summary comment on a PR."""
+  if _skip_for_dry_run(f"summary comment on pull request #{pr_number}"):
+    return None
   # 1. Handle mock token in test suites
   if token == "fake-token":
     logger.info("Mock GitHub token detected ('fake-token'), simulating sticky comment.")
@@ -911,7 +947,10 @@ def list_reviewed_finding_ids(
   Suggestion mode pushes no remote branch, so the remote-branch duplicate check
   used by Child PR mode cannot apply. The marker embedded in each suggestion
   comment provides the equivalent idempotency signal across re-runs.
+  Always empty in a dry run, which skips remote duplicate checks.
   """
+  if _skip_for_dry_run(f"existing suggestion lookup on pull request #{pr_number}"):
+    return set()
   if token == "fake-token":
     return set()
 
@@ -980,6 +1019,8 @@ def upload_sarif_to_code_scanning(
     checkout_uri: Optional[str] = None,
 ) -> Optional[str]:
   """Uploads a SARIF report to GitHub Code Scanning."""
+  if _skip_for_dry_run(f"SARIF upload for {owner}/{repo}"):
+    return None
   if token == "fake-token":
     logger.info(
         "Mock GitHub token detected ('fake-token'), simulating SARIF upload."

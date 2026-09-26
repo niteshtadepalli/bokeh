@@ -38,6 +38,9 @@ main:
           - models: ${default(map.get(args, "models"), default_empty_map)}
           - skip_exploit_verification: ${default(map.get(args, "skip_exploit_verification"), false)}
           - skip_verify: ${default(map.get(args, "skip_verify"), true)}
+          # Dry run: no GitHub writes and no remote duplicate checks. Off
+          # unless the payload sets dry_run = true.
+          - dry_run: ${default(map.get(args, "dry_run"), false)}
           - raw_find_model: ${default(map.get(models, "find"), "")}
           - raw_verify_model: ${default(map.get(models, "verify"), "")}
           - raw_fix_model: ${default(map.get(models, "fix"), "")}
@@ -111,6 +114,8 @@ main:
                         value: ${string(skip_exploit_verification)}
                       - name: CODEMENDER_SKIP_VERIFY
                         value: ${string(skip_verify)}
+                      - name: CODEMENDER_DRY_RUN
+                        value: ${string(dry_run)}
                       - name: CODEMENDER_WIZ_ENABLED
                         value: ${string(wiz_enabled)}
                       - name: CODEMENDER_WIZ_MIN_SEVERITY
@@ -255,6 +260,8 @@ main:
                         value: ${string(skip_exploit_verification)}
                       - name: CODEMENDER_SKIP_VERIFY
                         value: ${string(skip_verify)}
+                      - name: CODEMENDER_DRY_RUN
+                        value: ${string(dry_run)}
                       - name: CODEMENDER_VERIFY_FLAGS
                         value: ${verify_flags}
                       - name: CODEMENDER_FIX_FLAGS
@@ -349,6 +356,8 @@ main:
                         value: ${string(skip_exploit_verification)}
                       - name: CODEMENDER_SKIP_VERIFY
                         value: ${string(skip_verify)}
+                      - name: CODEMENDER_DRY_RUN
+                        value: ${string(dry_run)}
             connector_params:
               skip_polling: true
           result: stage3_operation
@@ -430,6 +439,8 @@ main:
                                     value: ${execution_url}
                                   - name: CODEMENDER_SCAN_TARGET
                                     value: ${scan_target}
+                                  - name: CODEMENDER_DRY_RUN
+                                    value: ${string(dry_run)}
                         connector_params:
                           skip_polling: true
                       result: finalize_op

@@ -77,7 +77,9 @@ resource "google_cloud_scheduler_job" "repo_scans" {
         # Extra cm flags: only emitted for repositories that set any.
         length(local.repo_cm_flags[each.key]) > 0 ? {
           cm_flags = local.repo_cm_flags[each.key]
-        } : {}
+        } : {},
+        # Dry run: only emitted for repositories that enable it.
+        each.value.dry_run == true ? { dry_run = true } : {}
       ))
     }))
 

@@ -316,6 +316,7 @@ the Cloud Run jobs:
 | `skip_exploit_verification` | No | `CODEMENDER_SKIP_EXPLOIT_VERIFICATION` | Set to `true` to skip exploit compilation/execution during verify phase. |
 | `skip_verify` | No | `CODEMENDER_SKIP_VERIFY` | Set to `false` to run `cm verify` before `cm fix` (default is `true`, which skips verify). |
 | `cm_flags` | No | `CODEMENDER_FIND_FLAGS`, `CODEMENDER_VERIFY_FLAGS`, `CODEMENDER_FIX_FLAGS` | Extra cm flags per command: `{"find": "--deep --deep-workers 4", "verify": "...", "fix": "..."}`. In Terraform, set `find_flags`, `verify_flags` and `fix_flags` on a repository in `target_repositories`. Flags the installed cm does not support are dropped at run time with a warning. |
+| `dry_run` | No | `CODEMENDER_DRY_RUN` | Set to `true` to run scan, verify and fix without any GitHub writes (no fix PRs, branch pushes, SARIF upload or commit status) and without remote duplicate checks. Defaults to `false`. In Terraform, set `dry_run = true` on a repository in `target_repositories`. Passed to every job stage, including the failure finalizer. |
 | `pr_remediation_mode` | No | `CODEMENDER_PR_REMEDIATION_MODE` | How PR fixes are delivered: `"review_suggestion"` (default, one-click inline suggestions) or `"child_pr"` (push branch & open Child PR). |
 | `cleanup_ports`* | No | `CODEMENDER_CLEANUP_PORTS` | Comma-separated ports to kill before testing. |
 | `force_overwrite`* | No | `CODEMENDER_FORCE_OVERWRITE` | Pass `"true"` to bypass PR spam prevention and force re-run fixes and push PRs. |

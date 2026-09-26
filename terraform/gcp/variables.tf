@@ -126,6 +126,10 @@ variable "target_repositories" {
     find_flags   = optional(string, "")
     verify_flags = optional(string, "")
     fix_flags    = optional(string, "")
+    # Dry run: the scan, verify and fix stages run as usual, but the run makes
+    # no GitHub writes (no fix pull requests, branch pushes, SARIF upload or
+    # commit status) and skips remote duplicate checks.
+    dry_run = optional(bool, false)
     # Opt-in Wiz SAST bridge. Disabled unless `enabled = true` is set for the
     # repository; configuring the Wiz secrets alone never enables it.
     wiz = optional(object({

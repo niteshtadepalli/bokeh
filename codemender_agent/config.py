@@ -23,6 +23,8 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
+from codemender_agent.utils import is_dry_run
+
 logger = logging.getLogger("codemender-orchestrator")
 
 SENSITIVE_ENV_VARS = [
@@ -89,6 +91,11 @@ class OrchestratorConfig:
   scan_target: str = "."
   max_tasks: int = 20
   force_overwrite: bool = False
+  # Dry run (CODEMENDER_DRY_RUN): no GitHub writes and no remote duplicate
+  # checks. The GitHub helpers in `codemender_agent/vcs/` read the same
+  # variable directly via `utils.is_dry_run()`, so the guarantee holds even
+  # for a code path that is not handed this config.
+  dry_run: bool = False
 
   # Pull Request Scoped Parameters
   is_pr_scan: bool = False
@@ -203,6 +210,7 @@ class OrchestratorConfig:
     force_overwrite = (
         os.environ.get("CODEMENDER_FORCE_OVERWRITE", "false").lower() == "true"
     )
+    dry_run = is_dry_run()
 
     # 6. Parse Pull Request Detection Parameters
     is_pr_env = os.environ.get("CODEMENDER_IS_PR_SCAN")
@@ -360,6 +368,7 @@ class OrchestratorConfig:
         scan_target=scan_target,
         max_tasks=max_tasks,
         force_overwrite=force_overwrite,
+        dry_run=dry_run,
         # Pull request detection and routing coordinates
         is_pr_scan=is_pr_scan,
         pr_base_ref=pr_base_ref,

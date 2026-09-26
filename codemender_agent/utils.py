@@ -95,6 +95,25 @@ def resolve_command_model(command_name: str) -> Optional[str]:
   return model or None
 
 
+DRY_RUN_ENV = "CODEMENDER_DRY_RUN"
+
+
+def is_dry_run() -> bool:
+  """Reports whether CODEMENDER_DRY_RUN asks for a run without GitHub writes.
+
+  Read from the environment on every call, so the GitHub helpers can enforce
+  it without being handed a config object. Only "true", "1", "yes" and "on"
+  (case-insensitive) enable it; unset, empty or any other value leaves normal
+  behaviour untouched.
+  """
+  return (os.environ.get(DRY_RUN_ENV) or "").strip().lower() in (
+      "true",
+      "1",
+      "yes",
+      "on",
+  )
+
+
 def accumulate_model_token_usage(
     usage_dict: dict[str, dict[str, int]],
     model_name: str,
