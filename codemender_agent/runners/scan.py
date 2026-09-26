@@ -28,8 +28,10 @@ import uuid
 # CodeMender CLI JSON parser, version logging, and binary auto-update helpers
 from codemender_agent.codemender.cli import ensure_cm_updated
 from codemender_agent.codemender.cli import get_cm_default_model
+from codemender_agent.codemender.cli import is_ci_gate_exit
 from codemender_agent.codemender.cli import is_closed_finding_status
 from codemender_agent.codemender.cli import log_cm_version
+from codemender_agent.codemender.cli import parse_deep_scan_summary
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.cli import stage_cm_binary_for_archive
 from codemender_agent.runners.aggregate import _build_automation_details_id
@@ -409,8 +411,14 @@ def _scan_repository(
     cm_binary: str,
     targets: list[str],
     config: Optional[OrchestratorConfig] = None,
+    deep_summaries: Optional[list[dict[str, any]]] = None,
 ) -> tuple[list[dict[str, any]], dict[str, dict[str, int]]]:
-  """Runs scan on targets with retries if no findings are found."""
+  """Runs scan on targets with retries if no findings are found.
+
+  Args:
+    deep_summaries: When given, receives one parsed `cm find --deep` summary
+      per target that ran in deep mode (files, failed files, total tokens).
+  """
   cfg = config or OrchestratorConfig.from_env()
   cli_version = cfg.cli_version
   max_scan_attempts = int(os.environ.get("CODEMENDER_MAX_SCAN_ATTEMPTS", "1"))
@@ -444,8 +452,31 @@ def _scan_repository(
           accumulate_model_token_usage(
               scan_token_usage, find_model, token_usage
           )
+        find_stdout = getattr(res, "stdout", "")
+        if not isinstance(find_stdout, str):
+          find_stdout = ""
+        deep_summary = parse_deep_scan_summary(find_stdout)
+        if deep_summary:
+          logger.info("Deep scan summary for %s: %s", target, deep_summary)
+          if deep_summary.get("failed"):
+            logger.warning(
+                "Deep scan could not analyse %d of %d batches for %s; their"
+                " files were not scanned.",
+                deep_summary["failed"],
+                deep_summary["batches"],
+                target,
+            )
+          if deep_summaries is not None:
+            deep_summaries.append({"target": target, **deep_summary})
         rc = getattr(res, "returncode", 0)
-        if isinstance(rc, int) and rc != 0:
+        if isinstance(rc, int) and is_ci_gate_exit(rc, find_stdout):
+          logger.info(
+              "cm find exited 1 for target %s because its CI gate matched"
+              " blocking findings; treating this as findings present, not as"
+              " a failed scan.",
+              target,
+          )
+        elif isinstance(rc, int) and rc != 0:
           had_find_error = True
           logger.warning(
               "cm find returned non-zero exit code (%d) for target %s on attempt %d; checking state.db via cm report for incrementally saved findings...",
@@ -732,6 +763,7 @@ def _save_and_upload_state(
     finding_prs: Optional[dict[str, str]] = None,
     started_at: Optional[str] = None,
     wiz_metadata: Optional[dict] = None,
+    deep_summaries: Optional[list[dict]] = None,
 ) -> None:
   """Saves partitions and manifest, generates signed URLs, and uploads to GCS."""
   # Resolve active configuration instance
@@ -754,6 +786,9 @@ def _save_and_upload_state(
   # Wiz bridge outcome, read by the aggregator for the report and telemetry.
   if wiz_metadata:
     scan_metadata["wiz"] = wiz_metadata
+  # Per-target deep-scan summaries (only present for `cm find --deep`).
+  if deep_summaries:
+    scan_metadata["deep_scan"] = deep_summaries
   force_verify = set((wiz_metadata or {}).get("force_verify_ids") or [])
   scan_meta_path = os.path.join(workspace_dir, "scan_metadata.json")
   with open(scan_meta_path, "w", encoding="utf-8") as f:
@@ -1042,8 +1077,14 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
     targets = [os.path.abspath(repo_dir)]
 
   # 6. Execute repository scan and accumulate token usage metrics
+  deep_summaries: list[dict] = []
   findings, scan_token_usage = _scan_repository(
-      repo_dir, scrubbed_env, cm_binary, targets, config=config
+      repo_dir,
+      scrubbed_env,
+      cm_binary,
+      targets,
+      config=config,
+      deep_summaries=deep_summaries,
   )
 
   # 6b. Opt-in Wiz SAST bridge: import eligible Wiz findings for mandatory
@@ -1391,6 +1432,7 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
       finding_prs=skipped_finding_prs,
       started_at=ctx.started_at,
       wiz_metadata=wiz_metadata,
+      deep_summaries=deep_summaries,
   )
 
   logger.info("Stage 1 (Scan) completed successfully.")

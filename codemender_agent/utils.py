@@ -520,8 +520,20 @@ def run_command(
           "total_tokens": total_tokens,
       }
     else:
-      # Default zero-value token metric payload
-      token_usage = {"in_tokens": 0, "out_tokens": 0, "total_tokens": 0}
+      # No per-session token lines. A deep scan still prints its own total
+      # ("Total tokens consumed"), which has no input/output split and counts
+      # only successful batches; use it rather than reporting zero. It is
+      # never added to per-session lines, which already cover every session.
+      consumed = re.findall(
+          r"Total tokens consumed:\s*([0-9.]+[kKmMgG]?)", full_stdout
+      )
+      total_tokens = 0
+      if consumed:
+        try:
+          total_tokens = parse_token_metric(consumed[-1])
+        except ValueError:
+          total_tokens = 0
+      token_usage = {"in_tokens": 0, "out_tokens": 0, "total_tokens": total_tokens}
 
   # 2. Package subprocess completed result with attached token metrics
   res = subprocess.CompletedProcess(cmd, return_code, full_stdout, "")

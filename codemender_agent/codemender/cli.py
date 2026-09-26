@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from codemender_agent.utils import (
     build_cm_command,
     extract_json_from_output,
+    parse_token_metric,
     run_command,
 )
 
@@ -175,6 +176,78 @@ def extract_session_id(find_stdout: str) -> Optional[str]:
   if match:
     return match.group(1)
   return None
+
+
+# `cm find --deep` prints one of two summary lines: the normal one after the
+# per-file batches run, and a shorter one when Tier-0 pruning left nothing to
+# send to the model.
+_DEEP_SUMMARY_NORMAL = re.compile(
+    r"Deep Scan Sifter Complete:\s*(?P<files>\d+) files in (?P<batches>\d+)"
+    r" batches \((?P<pruned>\d+) pruned at Tier 0, (?P<succeeded>\d+)"
+    r" succeeded, (?P<failed>\d+) failed\) in (?P<elapsed>\S+)"
+)
+_DEEP_SUMMARY_ALL_PRUNED = re.compile(
+    r"Deep Scan Sifter Complete:\s*(?P<examined>\d+)/(?P<files>\d+) files"
+    r" examined \((?P<pruned>\d+) pruned at Tier 0\)"
+)
+_DEEP_TOTAL_TOKENS = re.compile(r"Total tokens consumed:\s*([0-9.]+[kKmMgG]?)")
+_CI_GATE_BLOCKING = re.compile(r"CI Gate Failure:\s*\d+ blocking finding")
+
+
+def parse_deep_scan_summary(find_stdout: str) -> Optional[Dict[str, Any]]:
+  """Parses the `cm find --deep` summary, or returns None for other scans.
+
+  Returns files, batches, pruned, succeeded, failed, elapsed and, when
+  printed, total_tokens. cm prints "Total tokens consumed" only for batches
+  that succeeded, so it undercounts when files fail; per-session token lines
+  remain the primary token source.
+  """
+  if not find_stdout:
+    return None
+  summary: Optional[Dict[str, Any]] = None
+  match = None
+  for match in _DEEP_SUMMARY_NORMAL.finditer(find_stdout):
+    pass
+  if match:
+    summary = {
+        "files": int(match.group("files")),
+        "batches": int(match.group("batches")),
+        "pruned": int(match.group("pruned")),
+        "succeeded": int(match.group("succeeded")),
+        "failed": int(match.group("failed")),
+        "elapsed": match.group("elapsed"),
+    }
+  else:
+    for match in _DEEP_SUMMARY_ALL_PRUNED.finditer(find_stdout):
+      pass
+    if match:
+      summary = {
+          "files": int(match.group("files")),
+          "batches": 0,
+          "pruned": int(match.group("pruned")),
+          "succeeded": 0,
+          "failed": 0,
+          "elapsed": "0s",
+      }
+  if summary is None:
+    return None
+  tokens = _DEEP_TOTAL_TOKENS.findall(find_stdout)
+  if tokens:
+    try:
+      summary["total_tokens"] = parse_token_metric(tokens[-1])
+    except ValueError:
+      pass
+  return summary
+
+
+def is_ci_gate_exit(returncode: int, find_stdout: str) -> bool:
+  """Whether `cm find` exited 1 only because its CI gate found blocking findings.
+
+  With `--diff`, cm exits 1 when findings match `--fail-on`. For a scheduled
+  scan that means "findings present", not a failed scan. A gate exit caused
+  by truncated impact expansion is not treated as success.
+  """
+  return returncode == 1 and bool(_CI_GATE_BLOCKING.search(find_stdout or ""))
 
 
 def log_cm_version(
