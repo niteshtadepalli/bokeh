@@ -37,6 +37,9 @@ SENSITIVE_ENV_VARS = [
     "GOOGLE_CREDENTIALS",
 ]
 
+# Every variable starting with one of these prefixes is removed as well.
+SENSITIVE_ENV_PREFIXES = ("WIZ_",)
+
 # Pull Request remediation routing modes.
 #   review_suggestion: Post inline GitHub ```suggestion review comments enabling
 #                      one-click "Commit suggestion" application on the PR.
@@ -402,6 +405,10 @@ def get_scrubbed_env(repo_dir: Optional[str] = None) -> Dict[str, str]:
   for var in SENSITIVE_ENV_VARS:
     if var in env:
       del env[var]
+  # Wiz credentials (and any other WIZ_* setting) are only ever handed to
+  # wizcli itself, never to CodeMender or the code it executes.
+  for var in [k for k in env if k.upper().startswith(SENSITIVE_ENV_PREFIXES)]:
+    del env[var]
 
   if env.get("CODEMENDER_SANDBOX_ENABLED", "true").strip().lower() in (
       "false",
