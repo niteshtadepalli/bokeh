@@ -369,6 +369,15 @@ class ScanRunContext:
   execution_url: Optional[str] = None
   token_totals: Optional[Dict[str, Dict[str, Any]]] = None
 
+  # Outcome of the opt-in Wiz SAST bridge for this repository: "enabled",
+  # "not_enabled" or "failed" (NULL when the run died before it was decided).
+  wiz_status: Optional[str] = None
+  wiz_status_detail: Optional[str] = None
+  wiz_reported_count: Optional[int] = None
+  wiz_imported_count: Optional[int] = None
+  # CodeMender IDs of findings imported from Wiz, used to label finding rows.
+  wiz_imported_ids: Optional[List[str]] = None
+
   # Absolute path of the checkout this run scanned. Not itself exported; it is
   # the reference point that turns the container-absolute paths recorded in
   # `state.db` into repository-relative paths that join across runs.
@@ -428,6 +437,18 @@ class ScanRunContext:
     self.find_model = self.find_model or resolved
     self.verify_model = self.verify_model or resolved
     self.fix_model = self.fix_model or resolved
+    return self
+
+  def apply_wiz(self, wiz: Optional[Dict[str, Any]]) -> "ScanRunContext":
+    """Copies the Wiz bridge outcome recorded in scan metadata."""
+    if not isinstance(wiz, dict):
+      return self
+    self.wiz_status = _as_str(wiz.get("status")) or self.wiz_status
+    self.wiz_status_detail = _as_str(wiz.get("detail")) or None
+    self.wiz_reported_count = _as_int(wiz.get("reported_count"))
+    self.wiz_imported_count = _as_int(wiz.get("imported_count"))
+    ids = wiz.get("force_verify_ids") or wiz.get("imported_ids") or []
+    self.wiz_imported_ids = [str(i) for i in ids] if isinstance(ids, list) else []
     return self
 
 
@@ -510,6 +531,10 @@ def build_scan_run_row(
       "report_uri": _as_str(ctx.report_uri),
       "execution_url": _as_str(ctx.execution_url),
       "token_totals": flatten_token_totals(ctx.token_totals),
+      "wiz_status": _as_str(ctx.wiz_status),
+      "wiz_status_detail": _as_str(ctx.wiz_status_detail),
+      "wiz_reported_count": _as_int(ctx.wiz_reported_count),
+      "wiz_imported_count": _as_int(ctx.wiz_imported_count),
   }
 
 
@@ -532,6 +557,7 @@ def build_finding_rows(
   emit_sensitive = (
       include_snippets() if with_snippets is None else bool(with_snippets)
   )
+  wiz_ids = {str(i) for i in (ctx.wiz_imported_ids or [])}
 
   rows: List[Dict[str, Any]] = []
   for finding in findings:
@@ -571,6 +597,7 @@ def build_finding_rows(
         "fingerprint": _as_str(finding.get("fingerprint")),
         "fix_pr_url": _as_str(prs.get(finding_id)),
         "patch_status": _as_str(finding.get("patch_status")),
+        "finding_source": "wiz" if finding_id in wiz_ids else "codemender",
     }
 
     # Compliance gate: prose and verbatim source never leave the scanner

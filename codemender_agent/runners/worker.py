@@ -71,8 +71,27 @@ from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import get_pr_diff_line_ranges
 from codemender_agent.vcs.github import is_duplicate_pr
 from codemender_agent.vcs.github import list_reviewed_finding_ids
+from codemender_agent.wiz.settings import take_wiz_credentials
 
 logger = logging.getLogger("codemender-orchestrator")
+
+# Verdicts after which re-running `cm verify` on an imported finding is pointless.
+_NOT_EXPLOITABLE_STATUSES = frozenset({"DISMISSED", "FALSE_POSITIVE"})
+
+
+def _read_force_verify_ids(partition_path: str) -> set[str]:
+  """IDs in this partition that must be verified regardless of skip_verify.
+
+  Stage 1 lists findings imported from an external scanner here. Older
+  partition files have no such key, which yields an empty set.
+  """
+  try:
+    with open(partition_path, "r", encoding="utf-8") as f:
+      data = json.load(f)
+  except (OSError, ValueError, TypeError):
+    return set()
+  ids = data.get("force_verify_ids") if isinstance(data, dict) else None
+  return {str(i) for i in ids} if isinstance(ids, list) else set()
 
 
 def _setup_git_and_checkout(
@@ -416,8 +435,14 @@ def _process_finding(
     config: OrchestratorConfig,
     pr_diff_line_ranges: Optional[dict[str, set[int]]] = None,
     already_suggested: Optional[set[str]] = None,
+    force_verify: bool = False,
 ) -> Optional[str]:
   """Handles verification, surgical staging, and PR routing for a single finding.
+
+  Args:
+    force_verify: Run ``cm verify`` even when verification is otherwise
+      skipped. Set for findings imported from an external scanner, which must
+      never reach a fix or pull request without CodeMender's own verdict.
 
   Returns:
     The URL of the remediation that was delivered — an inline suggestion
@@ -493,11 +518,20 @@ def _process_finding(
       return
 
   # 2. Verification Retry Loop (Executes 'cm verify' with port cleanup)
-  effective_skip_verify = config.skip_verify or (
-      bool(config.execution_url)
-      and os.environ.get("CODEMENDER_FORCE_VERIFY", "false").strip().lower()
-      != "true"
+  effective_skip_verify = not force_verify and (
+      config.skip_verify
+      or (
+          bool(config.execution_url)
+          and os.environ.get("CODEMENDER_FORCE_VERIFY", "false").strip().lower()
+          != "true"
+      )
   )
+  if force_verify:
+    logger.info(
+        "Finding %s was imported from an external scanner; verification is"
+        " mandatory.",
+        finding_id,
+    )
   if not effective_skip_verify:
     max_verify_attempts = int(
         os.environ.get("CODEMENDER_MAX_VERIFY_ATTEMPTS", "3")
@@ -545,6 +579,16 @@ def _process_finding(
       ):
         logger.info("Successfully verified finding %s.", finding_id)
         verified = True
+        break
+      elif force_verify and verify_res.returncode == 0 and (
+          get_finding_status(state_db_path, finding_id)
+          in _NOT_EXPLOITABLE_STATUSES
+      ):
+        # A definitive "not exploitable" verdict; retrying cannot change it.
+        logger.info(
+            "Imported finding %s was not confirmed by verification.",
+            finding_id,
+        )
         break
       else:
         logger.warning(
@@ -1026,6 +1070,9 @@ def _save_and_upload_worker_metadata(
 
 def run_worker_pipeline() -> None:
   """Executes Stage 2: Download state, run verify/fix on partition, upload mutated state."""
+  # Workers never run Wiz; drop any Wiz credentials before a subprocess could
+  # inherit them.
+  take_wiz_credentials()
   config = OrchestratorConfig.from_env()
   worker_index = config.worker_index if config.worker_index is not None else 0
   logger.info("Starting Worker %d", worker_index)
@@ -1133,13 +1180,19 @@ def run_worker_pipeline() -> None:
 
   # 7. Restore base workspace and download partition slice
   codemender_home = os.path.expanduser("~/.codemender")
-  _, finding_ids = _restore_state(
+  partition_path, finding_ids = _restore_state(
       base_workspace_url,
       partition_url,
       workspace_dir,
       worker_index,
       codemender_home,
   )
+  force_verify_ids = _read_force_verify_ids(partition_path)
+  if force_verify_ids:
+    logger.info(
+        "%d finding(s) in this partition require mandatory verification.",
+        len(force_verify_ids),
+    )
 
   state_db_path = os.path.join(codemender_home, "state.db")
   worker_token_usage: dict[str, dict[str, int]] = {}
@@ -1235,6 +1288,7 @@ def run_worker_pipeline() -> None:
         config=config,
         pr_diff_line_ranges=pr_diff_line_ranges,
         already_suggested=already_suggested,
+        force_verify=finding_id in force_verify_ids,
     )
     # Track generated Pull Request URL for Step Summary linking
     if pr_url and isinstance(pr_url, str) and pr_url.startswith("http"):

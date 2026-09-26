@@ -247,6 +247,30 @@ resource "google_bigquery_table" "scan_runs" {
         },
       ]
     },
+    {
+      name        = "wiz_status"
+      type        = "STRING"
+      mode        = "NULLABLE"
+      description = "Outcome of the optional Wiz SAST import for this repository: 'enabled' (Wiz findings were imported for verification, possibly zero), 'not_enabled' (the repository has not opted in), or 'failed' (the Wiz step failed and the scan continued with CodeMender findings only). NULL for runs recorded before this column existed or runs that failed before the step was reached."
+    },
+    {
+      name        = "wiz_status_detail"
+      type        = "STRING"
+      mode        = "NULLABLE"
+      description = "Short reason when wiz_status is 'failed'. Never contains credentials."
+    },
+    {
+      name        = "wiz_reported_count"
+      type        = "INTEGER"
+      mode        = "NULLABLE"
+      description = "Number of SAST findings the Wiz scan reported, before the severity threshold and de-duplication were applied."
+    },
+    {
+      name        = "wiz_imported_count"
+      type        = "INTEGER"
+      mode        = "NULLABLE"
+      description = "Number of Wiz findings newly imported into the scan for mandatory verification. Imported findings are only remediated after CodeMender verifies them."
+    },
   ])
 }
 
@@ -414,7 +438,16 @@ resource "google_bigquery_table" "vulnerability_findings" {
         mode        = "NULLABLE"
         description = "Verbatim excerpt of the vulnerable source code. Contains real application source."
       },
-  ] : []))
+    ] : [],
+    # Appended last so existing column order is never disturbed.
+    [
+      {
+        name        = "finding_source"
+        type        = "STRING"
+        mode        = "NULLABLE"
+        description = "Which scanner reported the finding: 'codemender' for CodeMender's own discovery, or 'wiz' for a finding imported from a Wiz SAST scan and routed to mandatory verification. NULL for rows recorded before this column existed."
+      },
+  ]))
 }
 
 # ---------------------------------------------------------------------------
@@ -466,7 +499,8 @@ resource "google_bigquery_table" "v_findings_enriched" {
         s.verify_model,
         s.fix_model,
         s.report_uri,
-        s.execution_url
+        s.execution_url,
+        f.finding_source
       FROM `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.vulnerability_findings[0].table_id}` AS f
       LEFT JOIN `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s
         ON s.scan_id = f.scan_id
@@ -512,7 +546,10 @@ resource "google_bigquery_table" "v_scan_runs_flat" {
         (SELECT SUM(t.out_tokens)   FROM UNNEST(s.token_totals) AS t)      AS total_out_tokens,
         (SELECT SUM(t.total_tokens) FROM UNNEST(s.token_totals) AS t)      AS total_tokens,
         s.report_uri,
-        s.execution_url
+        s.execution_url,
+        s.wiz_status,
+        s.wiz_reported_count,
+        s.wiz_imported_count
       FROM `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s
     EOT
   }

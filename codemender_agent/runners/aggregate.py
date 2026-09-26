@@ -17,6 +17,7 @@
 from contextlib import closing
 import datetime
 import hashlib
+import html
 import json
 import logging
 import os
@@ -61,6 +62,9 @@ from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import post_commit_status
 from codemender_agent.vcs.github import post_or_update_sticky_comment
 from codemender_agent.vcs.github import upload_sarif_to_code_scanning
+from codemender_agent.wiz.bridge import STATUS_NOT_ENABLED as WIZ_NOT_ENABLED
+from codemender_agent.wiz.bridge import summary_line as wiz_summary_line
+from codemender_agent.wiz.settings import take_wiz_credentials
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -571,6 +575,68 @@ def _inject_token_metrics_into_html(
     logger.warning("Failed to inject token usage into HTML report: %s", e)
 
 
+def _load_wiz_metadata(workspace_dir: str) -> Dict[str, Any]:
+  """Reads the Wiz bridge block Stage 1 recorded in scan_metadata.json.
+
+  Scan metadata written before the bridge existed has no block, which is
+  reported as "not_enabled".
+  """
+  for path in (
+      os.path.join(workspace_dir, "scan_metadata.json"),
+      os.path.join(workspace_dir, ".codemender_transit", "base", "scan_metadata.json"),
+  ):
+    if not os.path.exists(path):
+      continue
+    try:
+      with open(path, "r", encoding="utf-8") as f:
+        wiz = json.load(f).get("wiz")
+      if isinstance(wiz, dict) and wiz.get("status"):
+        return wiz
+      break
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to read the Wiz block from scan metadata: %s", e)
+      break
+  return {"status": WIZ_NOT_ENABLED}
+
+
+def _wiz_finding_ids(wiz: Optional[Dict[str, Any]]) -> Set[str]:
+  ids = (wiz or {}).get("force_verify_ids") or (wiz or {}).get("imported_ids") or []
+  return {str(i) for i in ids} if isinstance(ids, list) else set()
+
+
+def _inject_wiz_status_into_html(
+    html_path: str, wiz: Optional[Dict[str, Any]]
+) -> None:
+  """Adds a one-line Wiz SAST banner to the HTML report when the bridge ran."""
+  note = wiz_summary_line(wiz)
+  if not note or not os.path.exists(html_path):
+    return
+  banner_html = (
+      '\n  <div id="codemender-wiz-banner" style="background: white;'
+      " border-radius: 8px; padding: 14px 20px; margin-bottom: 25px;"
+      " box-shadow: 0 2px 4px rgba(0,0,0,0.1); font-family: -apple-system,"
+      " BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #16213e;\">"
+      "<strong>Wiz SAST:</strong> "
+      + html.escape(note)
+      + " Imported findings are only remediated after CodeMender verifies"
+      " them.</div>\n"
+  )
+  try:
+    with open(html_path, "r", encoding="utf-8") as f:
+      content = f.read()
+    match = re.search(r"<div\s+class=[\"']cards[\"'][^>]*>", content, re.IGNORECASE)
+    if match:
+      content = content[: match.start()] + banner_html + content[match.start() :]
+    else:
+      body = re.search(r"<body[^>]*>", content, re.IGNORECASE)
+      pos = body.end() if body else 0
+      content = content[:pos] + banner_html + content[pos:]
+    with open(html_path, "w", encoding="utf-8") as f:
+      f.write(content)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Failed to add the Wiz banner to the HTML report: %s", e)
+
+
 def _render_step_summary(
     base_db_path: str,
     config: OrchestratorConfig,
@@ -580,6 +646,7 @@ def _render_step_summary(
     token_totals: Optional[dict[str, dict[str, int]]] = None,
     repo_dir: Optional[str] = None,
     finding_prs: Optional[dict[str, str]] = None,
+    wiz: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, int]:
   """Renders a comprehensive GitHub Actions Step Summary Markdown dashboard."""
   if not repo_dir and config.workspace_dir and repo_name:
@@ -676,6 +743,10 @@ def _render_step_summary(
       f"- **Target Commit:** `{commit_desc}`",
       f"- **Execution Mode:** `{mode_desc}`",
   ]
+  wiz_note = wiz_summary_line(wiz)
+  if wiz_note:
+    lines.append(f"- **Wiz SAST:** {wiz_note}")
+  wiz_ids = _wiz_finding_ids(wiz)
 
   if config.is_pr_scan:
     if findings_stats["total"] > 0:
@@ -754,6 +825,8 @@ def _render_step_summary(
       # Location formatting: evaluate file_path:start_line directly (start_line=None/0 evaluates as file:None/0 for whole-file findings by design)
       loc = f"{f['file_path']}:{f['start_line']}" if f["file_path"] else "N/A"
       title_clean = f["title"].replace("|", "\\|") if f["title"] else "-"
+      if fid in wiz_ids:
+        title_clean += " _(reported by Wiz)_"
       status = f["status"]
 
       # Format Status with remediation hyperlinking if available
@@ -1755,6 +1828,7 @@ def _generate_and_upload_report(
     storage_mode: str = "gcs",
     config: Optional[OrchestratorConfig] = None,
     finding_prs: Optional[Dict[str, str]] = None,
+    wiz: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
   """Generates final HTML and SARIF reports using cm CLI and uploads to GCS or publishes locally.
 
@@ -1784,6 +1858,7 @@ def _generate_and_upload_report(
   if report_res.returncode == 0 or os.path.exists(local_report_path):
     # 2. Inject aggregated LLM token usage metrics into HTML report header
     _inject_token_metrics_into_html(local_report_path, token_totals)
+    _inject_wiz_status_into_html(local_report_path, wiz)
 
     # 3. Copy HTML report to workspace/repo_dir for artifact capture
     workspace_dir = cfg.workspace_dir or os.getcwd()
@@ -2182,6 +2257,9 @@ def run_aggregate_pipeline() -> None:
 
 def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   """Stage 3 implementation. See `run_aggregate_pipeline` for the telemetry wrapper."""
+  # This stage never runs Wiz; drop any Wiz credentials before a subprocess
+  # could inherit them.
+  take_wiz_credentials()
   config = OrchestratorConfig.from_env()
   workspace_dir = config.workspace_dir or os.getcwd()
   ctx.apply_config(config)
@@ -2510,6 +2588,8 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
     )
   except Exception as e:  # pylint: disable=broad-exception-caught
     logger.warning("Failed to aggregate worker metadata: %s", e)
+  wiz_meta = _load_wiz_metadata(workspace_dir)
+  ctx.apply_wiz(wiz_meta)
 
   # 8. Render Step Summary before DB cleanup (preserves differential statistics)
   summary_md, active_findings_count = _render_step_summary(
@@ -2521,6 +2601,7 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
       token_totals=token_totals,
       repo_dir=repo_dir,
       finding_prs=finding_prs,
+      wiz=wiz_meta,
   )
 
   # 9. Collect SKIPPED_DUPLICATE IDs for Nightly SARIF suppression
@@ -2612,6 +2693,7 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
       storage_mode=config.storage_mode,
       config=config,
       finding_prs=finding_prs,
+      wiz=wiz_meta,
   )
 
   # 12. Publish Commit Status Check and SARIF to GitHub (both PR Security Gate and Scheduled Nightly Scan)

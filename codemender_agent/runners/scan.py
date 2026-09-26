@@ -68,6 +68,12 @@ from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import is_duplicate_pr
 from codemender_agent.vcs.github import post_commit_status
 from codemender_agent.vcs.github import upload_sarif_to_code_scanning
+# Opt-in Wiz SAST bridge (hard no-op unless enabled for this repository)
+from codemender_agent.wiz.bridge import STATUS_NOT_ENABLED as WIZ_NOT_ENABLED
+from codemender_agent.wiz.bridge import run_wiz_bridge
+from codemender_agent.wiz.bridge import summary_line as wiz_summary_line
+from codemender_agent.wiz.settings import WizBridgeSettings
+from codemender_agent.wiz.settings import take_wiz_credentials
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -171,6 +177,7 @@ def _render_zero_findings_summary(
     config: Optional[OrchestratorConfig] = None,
     filtered_reasons: Optional[str] = None,
     token_totals: Optional[dict[str, dict[str, int]]] = None,
+    wiz_note: Optional[str] = None,
 ) -> None:
   """Renders a reassuring Step Summary when zero findings are detected or all are ignored."""
   cfg = config or OrchestratorConfig.from_env()
@@ -192,12 +199,13 @@ def _render_zero_findings_summary(
 
   token_md = render_token_usage_markdown(token_totals)
   token_section = f"\n{token_md}" if token_md else ""
+  wiz_line = f"\n- **Wiz SAST:** {wiz_note}" if wiz_note else ""
 
   summary_md = f"""# 🛡️ CodeMender Security Remediation Summary
 
 - **Repository:** `{owner}/{repo_name}`
 - **Target Commit:** `{commit_desc}`
-- **Execution Mode:** `{mode_desc}`{reason_note}
+- **Execution Mode:** `{mode_desc}`{reason_note}{wiz_line}
 
 ### 📊 Remediation Overview
 
@@ -723,6 +731,7 @@ def _save_and_upload_state(
     cm_binary: Optional[str] = None,
     finding_prs: Optional[dict[str, str]] = None,
     started_at: Optional[str] = None,
+    wiz_metadata: Optional[dict] = None,
 ) -> None:
   """Saves partitions and manifest, generates signed URLs, and uploads to GCS."""
   # Resolve active configuration instance
@@ -742,6 +751,10 @@ def _save_and_upload_state(
   # rather than just its own stage runtime.
   if started_at:
     scan_metadata["started_at"] = started_at
+  # Wiz bridge outcome, read by the aggregator for the report and telemetry.
+  if wiz_metadata:
+    scan_metadata["wiz"] = wiz_metadata
+  force_verify = set((wiz_metadata or {}).get("force_verify_ids") or [])
   scan_meta_path = os.path.join(workspace_dir, "scan_metadata.json")
   with open(scan_meta_path, "w", encoding="utf-8") as f:
     json.dump(scan_metadata, f, indent=2)
@@ -783,6 +796,11 @@ def _save_and_upload_state(
   # 6. Save each worker partition slice, upload it, and generate signed URLs
   for i, part_ids in enumerate(partitions):
     partition_data = {"partition_index": i, "finding_ids": part_ids}
+    # Imported findings in this partition must be verified by the worker even
+    # when verification is otherwise skipped.
+    part_force_verify = [fid for fid in part_ids if fid in force_verify]
+    if part_force_verify:
+      partition_data["force_verify_ids"] = part_force_verify
     part_path = os.path.join(workspace_dir, f"partition_{i}.json")
     with open(part_path, "w", encoding="utf-8") as f:
       json.dump(partition_data, f, indent=2)
@@ -926,6 +944,12 @@ def run_scan_pipeline() -> None:
 
 def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   """Stage 1 implementation. See `run_scan_pipeline` for the telemetry wrapper."""
+  # Take the Wiz credentials out of the process environment before anything
+  # can spawn a subprocess, so only wizcli itself can ever receive them.
+  wiz_creds = take_wiz_credentials()
+  wiz_settings = WizBridgeSettings.from_env()
+  if not wiz_settings.enabled:
+    ctx.wiz_status = WIZ_NOT_ENABLED
   config = OrchestratorConfig.from_env()
   scan_id = config.scan_id or f"scan_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
   bucket_name = config.gcs_bucket
@@ -1022,6 +1046,22 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
       repo_dir, scrubbed_env, cm_binary, targets, config=config
   )
 
+  # 6b. Opt-in Wiz SAST bridge: import eligible Wiz findings for mandatory
+  #     verification. Never raises; a failure leaves CodeMender's own findings.
+  wiz_result = run_wiz_bridge(
+      settings=wiz_settings,
+      creds=wiz_creds,
+      repo_dir=repo_dir,
+      cm_binary=cm_binary,
+      cm_env=scrubbed_env,
+      existing_findings=findings,
+      cli_version=config.cli_version,
+  )
+  findings = wiz_result.findings
+  wiz_metadata = wiz_result.to_metadata()
+  ctx.apply_wiz(wiz_metadata)
+  wiz_note = wiz_summary_line(wiz_metadata)
+
   # 7. Handle case where repository scan returns zero findings
   if not findings:
     logger.info("Zero findings confirmed after scanning. Exiting Stage 1.")
@@ -1040,6 +1080,7 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
         config.is_pr_scan,
         config=config,
         token_totals=scan_token_usage,
+        wiz_note=wiz_note,
     )
     # Build minimal manifest with findings_count = 0
     manifest = {"findings_count": 0, "target_sha": target_sha}
@@ -1245,6 +1286,7 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
         config=config,
         filtered_reasons=filtered_reason,
         token_totals=scan_token_usage,
+        wiz_note=wiz_note,
     )
     # Build minimal manifest with findings_count = 0
     manifest = {"findings_count": 0, "target_sha": target_sha}
@@ -1348,6 +1390,7 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
       cm_binary=cm_binary,
       finding_prs=skipped_finding_prs,
       started_at=ctx.started_at,
+      wiz_metadata=wiz_metadata,
   )
 
   logger.info("Stage 1 (Scan) completed successfully.")
