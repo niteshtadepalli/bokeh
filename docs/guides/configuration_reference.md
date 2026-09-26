@@ -70,7 +70,8 @@ when running in Docker or Cloud Run.
 *   `CODEMENDER_VERIFY_MODEL`: Overrides the LLM model specifically for the Stage 2 verification (`cm verify`) phase.
 *   `CODEMENDER_FIX_MODEL`: Overrides the LLM model specifically for the Stage 2 fix (`cm fix`) phase.
 *   `CODEMENDER_SKIP_EXPLOIT_VERIFICATION`: Set to `"true"` to append `--skip-exploit-verification` during the verification phase, skipping compilation and execution of exploits.
-*   `CODEMENDER_SKIP_VERIFY`: Set to `"false"` to run `cm verify` before `cm fix`. Defaults to `"true"`, which skips the verification phase and proceeds directly to patch synthesis.
+*   `CODEMENDER_SKIP_VERIFY`: Set to `"false"` to run `cm verify` before `cm fix`, on every platform including Cloud Run. Defaults to `"true"`, which skips the verification phase and proceeds directly to patch synthesis.
+*   `CODEMENDER_FIND_FLAGS`, `CODEMENDER_VERIFY_FLAGS`, `CODEMENDER_FIX_FLAGS`: Extra flags for `cm find`, `cm verify` and `cm fix`, written as a shell-style string (for example `CODEMENDER_FIND_FLAGS="--deep --deep-workers 4"`). The orchestrator reads `cm <command> --help` from the installed binary and drops, with a warning, any flag that binary does not support, so a configuration written for a newer CLI release still runs on an older one. `--model` and `--unrestricted` are always ignored here: set models with the model variables above and the sandbox with `CODEMENDER_SANDBOX_ENABLED`. When the help output cannot be read, the flags are passed through unchanged.
 
 ### Wiz SAST Bridge (Optional, Opt-In Per Repository)
 

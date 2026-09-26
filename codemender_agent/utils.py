@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -141,6 +142,147 @@ def render_token_usage_markdown(
   return "\n".join(lines)
 
 
+_HELP_FLAG_LINE = re.compile(
+    r"^\s*(?:-(?P<short>[A-Za-z0-9]),\s+)?--(?P<long>[A-Za-z0-9][\w-]*)"
+    r"(?P<value> (?![ -])\S+)?"
+)
+_SUPPORTED_FLAGS_CACHE: Dict[tuple, Optional[Dict[str, bool]]] = {}
+# Flags set from the orchestrator's own settings, never from configured flags:
+# models go through the model settings so telemetry names the model that ran,
+# and the sandbox is controlled by CODEMENDER_SANDBOX_ENABLED.
+_RESERVED_FLAGS = frozenset({"--model", "--unrestricted"})
+
+
+def parse_help_flags(help_text: str) -> Dict[str, bool]:
+  """Parses `cm <action> --help` output into {flag: takes_value}.
+
+  Keys include the long form (``--deep``) and, when present, the short form
+  (``-c``). A flag takes a value when its help line names a value type, for
+  example ``--deep-workers int`` or ``-c, --context <text>``; boolean flags
+  such as ``--deep`` do not. A type with an optional value, for example
+  ``--diff string[="HEAD"]``, is reported as not requiring a separate value
+  token, because such flags only accept ``--diff=<ref>``.
+  """
+  flags: Dict[str, bool] = {}
+  in_flags = False
+  for line in (help_text or "").splitlines():
+    stripped = line.strip()
+    if stripped.endswith("Flags:"):
+      in_flags = True
+      continue
+    if not in_flags or not stripped.startswith("-"):
+      continue
+    match = _HELP_FLAG_LINE.match(line)
+    if not match:
+      continue
+    # The value type follows the flag after exactly one space; the help text
+    # follows after two or more.
+    value = (match.group("value") or "").strip()
+    takes_value = bool(value) and "[=" not in value
+    flags[f"--{match.group('long')}"] = takes_value
+    if match.group("short"):
+      flags[f"-{match.group('short')}"] = takes_value
+  return flags
+
+
+def get_supported_cm_flags(
+    cm_binary: str, action: str, env: Optional[Dict[str, str]] = None
+) -> Optional[Dict[str, bool]]:
+  """Returns the flags `cm <action>` accepts, or None when help is unavailable."""
+  key = (cm_binary, action)
+  if key in _SUPPORTED_FLAGS_CACHE:
+    return _SUPPORTED_FLAGS_CACHE[key]
+  flags: Optional[Dict[str, bool]] = None
+  try:
+    res = subprocess.run(
+        [cm_binary, action, "--help"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    parsed = parse_help_flags((res.stdout or "") + "\n" + (res.stderr or ""))
+    flags = parsed or None
+  except (OSError, subprocess.SubprocessError) as e:
+    logger.warning("Could not read '%s %s --help': %s", cm_binary, action, e)
+  _SUPPORTED_FLAGS_CACHE[key] = flags
+  return flags
+
+
+def filter_supported_flags(
+    flags: List[str], supported: Optional[Dict[str, bool]], action: str
+) -> List[str]:
+  """Drops configured flags that must not or cannot be passed to cm.
+
+  Flags the orchestrator controls itself (see ``_RESERVED_FLAGS``) are always
+  dropped. Flags missing from the installed cm's help are dropped too, with
+  their value, so a configuration written for a newer release still runs on
+  an older binary. When the supported set is unknown (help unavailable) the
+  remaining flags pass through unchanged: they were configured explicitly,
+  and cm reports a clear error for a flag it does not know.
+  """
+  kept: List[str] = []
+  i = 0
+  while i < len(flags):
+    token = flags[i]
+    i += 1
+    if not token.startswith("-"):
+      logger.warning(
+          "Ignoring stray cm %s argument '%s' (not preceded by a flag).",
+          action,
+          token,
+      )
+      continue
+    name = token.split("=", 1)[0]
+    takes_value = supported.get(name) if supported is not None else None
+    has_separate_value = (
+        "=" not in token
+        and takes_value is not False
+        and i < len(flags)
+        and not flags[i].startswith("-")
+    )
+    if name in _RESERVED_FLAGS or (supported is not None and takes_value is None):
+      if name in _RESERVED_FLAGS:
+        logger.warning(
+            "Ignoring '%s' in the configured cm %s flags; the orchestrator"
+            " sets it from its own settings.",
+            name,
+            action,
+        )
+      else:
+        logger.warning(
+            "The installed cm does not support '%s' for '%s'; dropping it.",
+            name,
+            action,
+        )
+      if has_separate_value:
+        i += 1
+      continue
+    kept.append(token)
+    if has_separate_value:
+      kept.append(flags[i])
+      i += 1
+  return kept
+
+
+def resolve_command_flags(command_name: str) -> List[str]:
+  """Extra cm flags configured for one command via CODEMENDER_<COMMAND>_FLAGS."""
+  raw = (os.environ.get(f"CODEMENDER_{command_name.upper()}_FLAGS") or "").strip()
+  if not raw:
+    return []
+  try:
+    return shlex.split(raw)
+  except ValueError as e:
+    logger.warning(
+        "Ignoring CODEMENDER_%s_FLAGS: cannot parse it (%s).",
+        command_name.upper(),
+        e,
+    )
+    return []
+
+
 def build_cm_command(
     cm_binary: str,
     action: str,
@@ -148,7 +290,14 @@ def build_cm_command(
     cli_version: Optional[str] = None,
     extra_flags: Optional[List[str]] = None,
 ) -> List[str]:
-  """Centralized command builder for CodeMender CLI invocations."""
+  """Centralized command builder for CodeMender CLI invocations.
+
+  For find, verify and fix, ``extra_flags`` plus any flags configured in
+  CODEMENDER_<ACTION>_FLAGS are placed before the target. Flags that the
+  installed cm does not list in `cm <action> --help` are dropped with a
+  warning, so a configuration written for a newer release still runs on an
+  older binary.
+  """
   # 1. Resolve active CLI version (preview vs legacy)
   if cli_version is None:
     cli_version = os.environ.get("CODEMENDER_CLI_VERSION", "preview").lower()
@@ -169,6 +318,13 @@ def build_cm_command(
         in ("false", "0", "no", "off")
         else []
     )
+    passthrough_flags: List[str] = []
+    if action in ("find", "verify", "fix"):
+      requested = list(extra_flags or []) + resolve_command_flags(action)
+      if requested:
+        passthrough_flags = filter_supported_flags(
+            requested, get_supported_cm_flags(cm_binary, action), action
+        )
 
     # Handle 'find' command (rely on CM_DISABLE_SANDBOX=true rather than --unrestricted
     # so cm find still enforces application-level allowedRoots = [target_or_id])
@@ -176,6 +332,7 @@ def build_cm_command(
       cmd = (
           [cm_binary, "find", "-y"]
           + model_flags
+          + passthrough_flags
           + [target_or_id]
       )
     # Handle 'verify' command with optional exploit verification skip
@@ -190,6 +347,7 @@ def build_cm_command(
           + unrestricted_flag
           + model_flags
           + skip_flag
+          + passthrough_flags
           + [target_or_id]
       )
     # Handle 'fix' command with bypass warnings
@@ -198,6 +356,7 @@ def build_cm_command(
           [cm_binary, "fix", "-y", "--bypass-warning"]
           + unrestricted_flag
           + model_flags
+          + passthrough_flags
           + [target_or_id]
       )
     # Handle 'init' command
