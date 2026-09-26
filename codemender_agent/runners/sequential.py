@@ -25,6 +25,7 @@ import time
 from codemender_agent.codemender.cli import ensure_cm_updated
 from codemender_agent.codemender.cli import extract_session_id
 from codemender_agent.codemender.cli import get_cm_default_model
+from codemender_agent.codemender.cli import is_closed_finding_status
 from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.db import get_finding_status
@@ -251,7 +252,7 @@ def run_sequential_pipeline() -> None:
       continue
 
     status = finding.get("Status")
-    if status in ["FALSE_POSITIVE", "RESOLVED"]:
+    if is_closed_finding_status(status):
       logger.info(
           "Skipping finding %s because status is %s.", finding_id, status
       )

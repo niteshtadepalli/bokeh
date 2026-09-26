@@ -685,6 +685,54 @@ class TestScanRunner(unittest.TestCase):
     self.assertEqual(ignored, [])
     mock_delete_branch.assert_not_called()
 
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  def test_filter_findings_skips_closed_statuses(
+      self, mock_check_branch, mock_is_dup_pr
+  ):
+    """FIXED and DISMISSED (cm's closed statuses) never reach the workers."""
+    from codemender_agent.runners.scan import _filter_findings
+
+    mock_check_branch.return_value = False
+    mock_is_dup_pr.return_value = False
+    statuses = {
+        "f-open": "OPEN",
+        "f-reopened": "REOPENED",
+        "f-detected": "DETECTED",
+        "f-none": None,
+        "f-fixed": "FIXED",
+        "f-dismissed": "DISMISSED",
+        "f-dismissed-lower": "dismissed",
+        "f-false-positive": "FALSE_POSITIVE",
+        "f-resolved": "RESOLVED",
+    }
+    findings = [
+        {
+            "FindingID": fid,
+            "Status": status,
+            "VulnType": "SQL Injection",
+            "FilePath": "routes/search.ts",
+            "StartLine": 25 + i,
+        }
+        for i, (fid, status) in enumerate(statuses.items())
+    ]
+
+    active, skipped, ignored = _filter_findings(
+        findings=findings,
+        repo_url="https://github.com/org/repo.git",
+        token="token",
+        repo_dir=self.workspace_dir,
+        force_overwrite=False,
+        is_pr_scan=False,
+    )
+
+    self.assertEqual(
+        [f["FindingID"] for f in active],
+        ["f-open", "f-reopened", "f-detected", "f-none"],
+    )
+    self.assertEqual(skipped, [])
+    self.assertEqual(ignored, [])
+
   def test_write_clean_sarif_file_includes_automation_details_id(self):
     """Verify _write_clean_sarif_file embeds automationDetails.id and has_sarif_results returns False."""
     from codemender_agent.runners.aggregate import has_sarif_results

@@ -116,6 +116,18 @@ _FINDING_KEY_ALIASES = {
     "confidence_level": "ConfidenceLevel",
 }
 
+# Finding statuses that must never be sent for remediation. cm's own statuses
+# are OPEN, FIXED, DISMISSED and REOPENED; FIXED and DISMISSED are closed.
+# FALSE_POSITIVE and RESOLVED are kept for payloads from older releases.
+CLOSED_FINDING_STATUSES = frozenset(
+    {"FIXED", "DISMISSED", "FALSE_POSITIVE", "RESOLVED"}
+)
+
+
+def is_closed_finding_status(status: Optional[str]) -> bool:
+  """Whether a finding status means the finding must not be remediated."""
+  return str(status or "").strip().upper() in CLOSED_FINDING_STATUSES
+
 
 def parse_findings_json(json_str: str) -> List[Dict[str, Any]]:
   """Parses `cm report --format json` output normalizing keys to PascalCase."""

@@ -28,6 +28,7 @@ import uuid
 # CodeMender CLI JSON parser, version logging, and binary auto-update helpers
 from codemender_agent.codemender.cli import ensure_cm_updated
 from codemender_agent.codemender.cli import get_cm_default_model
+from codemender_agent.codemender.cli import is_closed_finding_status
 from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.cli import stage_cm_binary_for_archive
@@ -540,9 +541,14 @@ def _filter_findings(
           sorted(finding.keys()),
       )
       continue
-    # Only process findings that are not already resolved or false positives
+    # Only process findings that are still open: never send FIXED, DISMISSED
+    # (for example rejected by verification) or false-positive findings to
+    # the fix workers.
     status = finding.get("Status")
-    if status in ["FALSE_POSITIVE", "RESOLVED"]:
+    if is_closed_finding_status(status):
+      logger.info(
+          "Skipping finding %s because its status is %s.", finding_id, status
+      )
       continue
 
     file_path = normalize_repo_relative_path(

@@ -19,12 +19,23 @@ from unittest.mock import MagicMock, patch
 
 from codemender_agent.codemender.cli import (
     extract_session_id,
+    is_closed_finding_status,
     log_cm_version,
     parse_findings_json,
 )
 
 
 class TestCodeMenderCli(unittest.TestCase):
+
+  def test_is_closed_finding_status(self):
+    """cm's FIXED/DISMISSED and legacy closed statuses are closed."""
+    for status in ("FIXED", "DISMISSED", "dismissed", " Fixed ",
+                   "FALSE_POSITIVE", "RESOLVED"):
+      with self.subTest(status=status):
+        self.assertTrue(is_closed_finding_status(status))
+    for status in ("OPEN", "REOPENED", "DETECTED", "", None):
+      with self.subTest(status=status):
+        self.assertFalse(is_closed_finding_status(status))
 
   def test_extract_session_id(self):
     """Verify regex extraction of Session UUID from cm find stdout."""
