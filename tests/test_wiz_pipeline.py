@@ -420,5 +420,64 @@ class AggregateWizTest(unittest.TestCase):
     self.assertNotIn("Wiz", md2)
 
 
+class WorkflowWizTest(unittest.TestCase):
+  """The Cloud Workflows definition forwards the opt-in switch to Stage 1."""
+
+  _WORKFLOW = os.path.join(
+      os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+      "workflows",
+      "gcp_parallel_workflow.yaml",
+  )
+
+  def setUp(self):
+    import yaml  # pylint: disable=g-import-not-at-top
+
+    with open(self._WORKFLOW, "r", encoding="utf-8") as f:
+      self.steps = {}
+      for step in yaml.safe_load(f)["main"]["steps"]:
+        (name, body), = step.items()
+        self.steps[name] = body
+
+  def _env(self, name):
+    body = self.steps[name]
+    call_args = body.get("args") or body.get("try", {}).get("args")
+    env = {}
+    for override in call_args["body"]["overrides"]["containerOverrides"]:
+      for entry in override.get("env", []):
+        env[entry["name"]] = entry["value"]
+    return env
+
+  def test_stage1_receives_wiz_switch(self):
+    env = self._env("run_stage1_scan")
+    self.assertEqual(env["CODEMENDER_WIZ_ENABLED"], "${string(wiz_enabled)}")
+    self.assertEqual(env["CODEMENDER_WIZ_MIN_SEVERITY"], "${wiz_min_severity}")
+
+  def test_other_stages_do_not_receive_wiz_env(self):
+    for name in ("run_stage2_workers", "run_stage3_aggregate"):
+      with self.subTest(stage=name):
+        self.assertFalse(
+            [k for k in self._env(name) if "WIZ" in k],
+            f"{name} must not carry Wiz settings",
+        )
+
+  def test_wiz_defaults_to_disabled(self):
+    assigns = {}
+    for entry in self.steps["init_variables"]["assign"]:
+      assigns.update(entry)
+    self.assertEqual(
+        assigns["wiz"], '${default(map.get(args, "wiz"), default_empty_map)}'
+    )
+    self.assertEqual(
+        assigns["wiz_enabled"], '${default(map.get(wiz, "enabled"), false)}'
+    )
+    self.assertEqual(
+        assigns["wiz_min_severity"],
+        '${default(map.get(wiz, "min_severity"), "HIGH")}',
+    )
+    names = list(assigns)
+    self.assertLess(names.index("default_empty_map"), names.index("wiz"))
+    self.assertLess(names.index("wiz"), names.index("wiz_enabled"))
+
+
 if __name__ == "__main__":
   unittest.main()

@@ -72,6 +72,49 @@ when running in Docker or Cloud Run.
 *   `CODEMENDER_SKIP_EXPLOIT_VERIFICATION`: Set to `"true"` to append `--skip-exploit-verification` during the verification phase, skipping compilation and execution of exploits.
 *   `CODEMENDER_SKIP_VERIFY`: Set to `"false"` to run `cm verify` before `cm fix`. Defaults to `"true"`, which skips the verification phase and proceeds directly to patch synthesis.
 
+### Wiz SAST Bridge (Optional, Opt-In Per Repository)
+
+The scan stage can run a Wiz CLI SAST scan (`wizcli scan dir`, results not
+published to Wiz) and import eligible findings into CodeMender. Imported
+findings are labelled like `SQL Injection (CWE-89)` and are **always** sent
+through `cm verify`, even when `CODEMENDER_SKIP_VERIFY` is `"true"`. Only
+findings that verification does not dismiss go on to fix PRs. The bridge is a
+hard no-op unless `CODEMENDER_WIZ_ENABLED` is `"true"`; providing credentials
+alone never enables it. A Wiz failure never fails the scan: the scan continues
+with CodeMender's own findings and records `wiz_status` as `enabled`,
+`not_enabled`, or `failed` in the report and in BigQuery. The bridge currently
+runs in the parallel pipeline's scan stage only (`CODEMENDER_RUN_MODE=scan`);
+`sequential` mode does not call it.
+
+*   `CODEMENDER_WIZ_ENABLED`: `"true"` to run the bridge for this scan. Defaults to off.
+*   `CODEMENDER_WIZ_MIN_SEVERITY`: Lowest Wiz severity to import (`INFO`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`). Defaults to `HIGH`.
+*   `WIZ_CLIENT_ID` / `WIZ_CLIENT_SECRET`: Wiz service account credentials. They are removed from the process environment at start-up and passed only to `wizcli`, never to `cm` or any other subprocess, and are never logged.
+*   `CODEMENDER_WIZ_LINE_WINDOW`: Lines of slack when matching a Wiz finding to a CodeMender finding for the same weakness in the same file. Defaults to `3`.
+*   `CODEMENDER_WIZ_MAX_IMPORTS`: Maximum findings imported per scan, highest severity first. Defaults to `50`.
+*   `CODEMENDER_WIZ_SCAN_TIMEOUT_SECONDS`: Timeout for the Wiz scan. Defaults to `900`.
+*   `CODEMENDER_WIZCLI_PATH`: Path to a pre-installed `wizcli`. Otherwise `wizcli` on `PATH` is used, or a pinned version is downloaded and checked against its SHA-256 (`CODEMENDER_WIZCLI_VERSION`, `CODEMENDER_WIZCLI_SHA256`, `CODEMENDER_WIZCLI_URL`).
+*   `CODEMENDER_WIZ_RESULTS_FILE`: Use an existing `wizcli` JSON result instead of running a scan (testing only).
+*   `CODEMENDER_WIZ_SCAN_NAME`: Scan name passed to `wizcli`. Defaults to `codemender-sast-bridge`.
+
+With Terraform, enable the bridge per repository in `target_repositories`:
+
+```hcl
+target_repositories = {
+  "my-repo" = {
+    repo_url = "https://github.com/org/my-repo.git"
+    wiz      = { enabled = true, min_severity = "HIGH" }
+  }
+}
+```
+
+The two credentials must already exist in Secret Manager as
+`<resource_prefix>-wiz-client-id` and `<resource_prefix>-wiz-client-secret`
+(override with `wiz_client_id_secret_id` / `wiz_client_secret_secret_id`).
+Terraform only reads them; it never creates, changes, or deletes them. When
+at least one repository opts in, Terraform grants the runner service account
+`secretAccessor` on both and mounts them on the runner job. The worker job
+never receives them.
+
 ### Execution Modes
 
 *   `CODEMENDER_RUN_MODE`: Determines the orchestrator's behavior.

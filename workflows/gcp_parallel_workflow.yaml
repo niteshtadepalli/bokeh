@@ -44,6 +44,11 @@ main:
           - find_model: ${if(raw_find_model != "", raw_find_model, model)}
           - verify_model: ${if(raw_verify_model != "", raw_verify_model, model)}
           - fix_model: ${if(raw_fix_model != "", raw_fix_model, model)}
+          # Opt-in Wiz SAST bridge; absent or disabled unless the scheduler
+          # payload carries wiz.enabled = true for this repository.
+          - wiz: ${default(map.get(args, "wiz"), default_empty_map)}
+          - wiz_enabled: ${default(map.get(wiz, "enabled"), false)}
+          - wiz_min_severity: ${default(map.get(wiz, "min_severity"), "HIGH")}
           - target_sha: ""
           - num_workers: 0
           - stage2_failed: false
@@ -100,6 +105,10 @@ main:
                         value: ${string(skip_exploit_verification)}
                       - name: CODEMENDER_SKIP_VERIFY
                         value: ${string(skip_verify)}
+                      - name: CODEMENDER_WIZ_ENABLED
+                        value: ${string(wiz_enabled)}
+                      - name: CODEMENDER_WIZ_MIN_SEVERITY
+                        value: ${wiz_min_severity}
             connector_params:
               skip_polling: true
           result: stage1_operation

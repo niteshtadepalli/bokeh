@@ -51,6 +51,14 @@ resource "google_cloud_scheduler_job" "repo_scans" {
             (each.value.verify_model != null && each.value.verify_model != "") ? { verify = each.value.verify_model } : {},
             (each.value.fix_model != null && each.value.fix_model != "") ? { fix = each.value.fix_model } : {}
           )
+        } : {},
+        # Opt-in Wiz SAST bridge: only emitted for repositories that enable
+        # it, so every other repository's payload is unchanged.
+        try(each.value.wiz.enabled, false) == true ? {
+          wiz = {
+            enabled      = true
+            min_severity = upper(coalesce(try(each.value.wiz.min_severity, null), "HIGH"))
+          }
         } : {}
       ))
     }))

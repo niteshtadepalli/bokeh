@@ -120,9 +120,42 @@ variable "target_repositories" {
     find_model    = optional(string, "")
     verify_model  = optional(string, "")
     fix_model     = optional(string, "")
+    # Opt-in Wiz SAST bridge. Disabled unless `enabled = true` is set for the
+    # repository; configuring the Wiz secrets alone never enables it.
+    wiz = optional(object({
+      enabled      = optional(bool, false)
+      min_severity = optional(string, "HIGH")
+    }))
   }))
   description = "Map of repositories to schedule for automated CodeMender security scans."
   default     = {}
+
+  validation {
+    condition = alltrue([
+      for repo in values(var.target_repositories) :
+      contains(
+        ["INFORMATIONAL", "INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"],
+        upper(coalesce(try(repo.wiz.min_severity, null), "HIGH"))
+      )
+    ])
+    error_message = "target_repositories[*].wiz.min_severity must be one of INFORMATIONAL, INFO, LOW, MEDIUM, HIGH, or CRITICAL."
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Wiz SAST bridge (opt-in per repository via target_repositories[*].wiz)
+# ---------------------------------------------------------------------------
+
+variable "wiz_client_id_secret_id" {
+  type        = string
+  description = "Existing Secret Manager secret ID holding the Wiz service account client ID. Only read when at least one repository enables the Wiz bridge. Defaults to \"<resource_prefix>-wiz-client-id\" when empty. The secret is referenced, not managed, by Terraform."
+  default     = ""
+}
+
+variable "wiz_client_secret_secret_id" {
+  type        = string
+  description = "Existing Secret Manager secret ID holding the Wiz service account client secret. Only read when at least one repository enables the Wiz bridge. Defaults to \"<resource_prefix>-wiz-client-secret\" when empty. The secret is referenced, not managed, by Terraform."
+  default     = ""
 }
 
 # ---------------------------------------------------------------------------

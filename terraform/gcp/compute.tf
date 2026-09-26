@@ -96,6 +96,23 @@ resource "google_cloud_run_v2_job" "runner" {
             }
           }
         }
+
+        # Wiz service account credentials for the opt-in Wiz SAST bridge.
+        # Present only when at least one repository enables the bridge (see
+        # wiz.tf); the runtime still requires the per-run
+        # CODEMENDER_WIZ_ENABLED flag before calling Wiz.
+        dynamic "env" {
+          for_each = local.wiz_secret_env
+          content {
+            name = env.key
+            value_source {
+              secret_key_ref {
+                secret  = env.value
+                version = "latest"
+              }
+            }
+          }
+        }
       }
 
       dynamic "vpc_access" {
@@ -115,7 +132,9 @@ resource "google_cloud_run_v2_job" "runner" {
   }
 
   depends_on = [
-    time_sleep.wait_for_apis_and_iam
+    time_sleep.wait_for_apis_and_iam,
+    google_secret_manager_secret_iam_member.runner_wiz_client_id_accessor,
+    google_secret_manager_secret_iam_member.runner_wiz_client_secret_accessor,
   ]
 }
 
