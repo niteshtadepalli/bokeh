@@ -132,6 +132,22 @@ class ForcedVerifyTest(unittest.TestCase):
     self.assertEqual(self._cm_calls("verify"), [])
     self.assertTrue(self._cm_calls("fix"))
 
+  def test_explicit_skip_verify_false_is_honored_on_cloud_run(self):
+    config = OrchestratorConfig(
+        workspace_dir=self.ws, skip_verify=False, execution_url="https://x"
+    )
+    self._run(config, force_verify=False)
+    self.assertTrue(self._cm_calls("verify"))
+    self.assertEqual(self._cm_calls("fix"), [])  # unverified => never fixed
+
+  def test_default_skip_verify_still_skips_on_cloud_run(self):
+    config = OrchestratorConfig(
+        workspace_dir=self.ws, skip_verify=True, execution_url="https://x"
+    )
+    self._run(config, force_verify=False)
+    self.assertEqual(self._cm_calls("verify"), [])
+    self.assertTrue(self._cm_calls("fix"))
+
   def test_partition_force_verify_ids(self):
     path = os.path.join(self.ws, "p.json")
     with open(path, "w") as f:

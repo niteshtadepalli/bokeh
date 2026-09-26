@@ -532,14 +532,9 @@ def _process_finding(
       return
 
   # 2. Verification Retry Loop (Executes 'cm verify' with port cleanup)
-  effective_skip_verify = not force_verify and (
-      config.skip_verify
-      or (
-          bool(config.execution_url)
-          and os.environ.get("CODEMENDER_FORCE_VERIFY", "false").strip().lower()
-          != "true"
-      )
-  )
+  # skip_verify defaults to true; an explicit skip_verify=false is honored on
+  # every platform, including Cloud Run.
+  effective_skip_verify = not force_verify and config.skip_verify
   if force_verify:
     logger.info(
         "Finding %s was imported from an external scanner; verification is"
