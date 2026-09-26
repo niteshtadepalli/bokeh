@@ -539,6 +539,26 @@ class DedupeTest(_RepoTestCase):
     res = dedupe.dedupe_candidates(cands, [row], self.repo, 0)
     self.assertEqual(res.already_imported_ids, ["wiz-9"])
 
+  def test_every_row_of_a_repeated_import_is_reported(self):
+    rows = [
+        self._cm("wiz-1", 67, 67, "SQL Injection (CWE-89)"),
+        self._cm("wiz-2", 67, 67, "CWE-89"),
+    ]
+    res = dedupe.dedupe_candidates(self.cands, rows, self.repo, 3)
+    self.assertEqual([c.start_line for c in res.already_imported], [67])
+    self.assertEqual(res.already_imported_ids, ["wiz-1", "wiz-2"])
+
+  def test_import_marker_detection(self):
+    marker = converter.IMPORT_MARKER + " Wiz rule(s): R-1."
+    self.assertTrue(converter.carries_import_marker({"Analysis": marker}))
+    self.assertTrue(
+        converter.carries_import_marker({"analysis": "  " + marker.lower()})
+    )
+    self.assertFalse(converter.carries_import_marker({"Analysis": "Prose."}))
+    self.assertFalse(converter.carries_import_marker(None))
+    record = converter.build_import_record(self.cands[0], self.repo)
+    self.assertTrue(converter.carries_import_marker({"Analysis": record["message"]}))
+
 
 # --- importer ----------------------------------------------------------------
 
@@ -803,7 +823,69 @@ class BridgeTest(_RepoTestCase):
     self.assertEqual(res.status, bridge.STATUS_NOT_ENABLED)
     self.assertEqual(res.findings, existing)
     self.assertEqual(res.force_verify_ids, [])
-    self.assertIsNone(bridge.summary_line(res.to_metadata()))
+    # Wiz is configured in this deployment (credentials present), so the
+    # report says the repository is not on Wiz rather than staying silent.
+    self.assertTrue(res.to_metadata()["configured"])
+    self.assertIn("not enabled", bridge.summary_line(res.to_metadata()))
+
+  def test_not_enabled_line_only_where_wiz_is_configured(self):
+    res = bridge.run_wiz_bridge(
+        settings=wiz_settings.WizBridgeSettings(enabled=False),
+        creds=wiz_settings.WizCredentials("", ""),
+        repo_dir=self.repo,
+        cm_binary=self.cm,
+        cm_env=self.cm_env,
+        existing_findings=[],
+    )
+    meta = res.to_metadata()
+    self.assertEqual(meta["status"], bridge.STATUS_NOT_ENABLED)
+    self.assertFalse(meta["configured"])
+    self.assertIsNone(bridge.summary_line(meta))
+    self.assertIsNone(bridge.summary_line({"status": "not_enabled"}))
+
+  def test_every_duplicate_import_row_is_force_verified(self):
+    first = self.run_bridge([])
+    self.assertEqual(first.imported_count, 3)
+    rows = self.cm_rows()
+    extra = dict(rows[0], finding_id="extra-row")
+    _write(self.cm_state, json.dumps(rows + [extra]))
+    existing = importer.read_findings(self.cm, self.repo, env=self.cm_env)
+    second = self.run_bridge(existing)
+    self.assertEqual(second.imported_count, 0)
+    self.assertEqual(
+        set(second.force_verify_ids), {r["finding_id"] for r in self.cm_rows()}
+    )
+
+  def test_earlier_imports_outside_current_candidates_stay_forced(self):
+    # Imported at MEDIUM, then the threshold is raised: the MEDIUM import is
+    # no longer a candidate but is still unverified and must stay forced.
+    first = self.run_bridge([], min_severity="MEDIUM")
+    self.assertEqual(first.imported_count, 4)
+    existing = importer.read_findings(self.cm, self.repo, env=self.cm_env)
+    second = self.run_bridge(existing, min_severity="HIGH")
+    self.assertEqual(second.imported_count, 0)
+    self.assertEqual(sorted(second.force_verify_ids), sorted(first.imported_ids))
+
+  def test_failed_run_still_forces_earlier_imports(self):
+    first = self.run_bridge([])
+    existing = importer.read_findings(self.cm, self.repo, env=self.cm_env)
+    shutil.copy(os.path.join(FIXTURES, "legacy_dir_scan.json"), self.results)
+    second = self.run_bridge(existing)
+    self.assertEqual(second.status, bridge.STATUS_FAILED)
+    self.assertEqual(sorted(second.force_verify_ids), sorted(first.imported_ids))
+
+  def test_eligible_count_is_raw_findings_before_grouping(self):
+    _write(
+        self.results,
+        json.dumps(_doc([
+            _sast("src/SQLI.java", 67, rule="R-1"),
+            _sast("src/SQLI.java", 67, rule="R-9"),
+            _sast("src/Rce.java", 90, severity="LOW", cwe="CWE-78"),
+        ])),
+    )
+    res = self.run_bridge([])
+    self.assertEqual(res.eligible_count, 2)
+    self.assertEqual(res.imported_count, 1)
 
   def test_import_dedupe_threshold_and_idempotency(self):
     # CodeMender's own finding lives in the same state the import writes to.

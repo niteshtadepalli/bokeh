@@ -53,6 +53,8 @@ from codemender_agent.vcs.github import create_pull_request
 from codemender_agent.vcs.github import delete_remote_branch
 from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import is_duplicate_pr
+from codemender_agent.wiz.converter import carries_import_marker
+from codemender_agent.wiz.settings import WizBridgeSettings
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -80,6 +82,12 @@ def run_sequential_pipeline() -> None:
       in ("true", "1", "yes")
   )
   token_usage: dict[str, dict[str, int]] = {}
+  if WizBridgeSettings.from_env().enabled:
+    logger.warning(
+        "The Wiz SAST bridge only runs in the parallel (Cloud Run) pipeline;"
+        " this sequential run scans with CodeMender alone and imports no Wiz"
+        " results."
+    )
   repo_url, token = get_github_credentials()
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
@@ -357,7 +365,9 @@ def run_sequential_pipeline() -> None:
             )
         continue
 
-    if not skip_verify:
+    # Findings imported from an external scanner are always verified before
+    # any fix, even when verification is otherwise skipped.
+    if not skip_verify or carries_import_marker(finding):
       max_verify_attempts = 3
       verified = False
 

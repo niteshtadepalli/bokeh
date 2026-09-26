@@ -40,6 +40,7 @@ from codemender_agent.codemender.importer import write_import_payload
 from codemender_agent.wiz.cli import run_wiz_sast_scan
 from codemender_agent.wiz.converter import WizCandidate
 from codemender_agent.wiz.converter import build_import_record
+from codemender_agent.wiz.converter import carries_import_marker
 from codemender_agent.wiz.converter import convert_findings
 from codemender_agent.wiz.dedupe import dedupe_candidates
 from codemender_agent.wiz.dedupe import finding_ref
@@ -67,6 +68,10 @@ class WizBridgeResult:
   status: str
   detail: str = ""
   source: str = ""
+  # Whether Wiz is set up in this deployment at all (credentials or a
+  # bring-your-own results file). Decides whether a "not enabled" status is
+  # worth showing in the human-readable report; telemetry always records it.
+  configured: bool = False
   reported_count: int = 0
   eligible_count: int = 0
   below_threshold_count: int = 0
@@ -89,6 +94,7 @@ class WizBridgeResult:
         "status": self.status,
         "detail": self.detail,
         "source": self.source,
+        "configured": self.configured,
         "min_severity": self.min_severity,
         "reported_count": self.reported_count,
         "eligible_count": self.eligible_count,
@@ -113,7 +119,12 @@ def redact(text: str, secrets: Sequence[str]) -> str:
 
 
 def summary_line(wiz: Optional[Dict[str, Any]]) -> Optional[str]:
-  """One line describing the bridge outcome, or None when it was not enabled."""
+  """One line describing the bridge outcome, or None when there is nothing to say.
+
+  A repository that is not enabled gets a line only when Wiz is configured in
+  the deployment, so "not on Wiz" is never mistaken for "clean" there, while
+  deployments that do not use Wiz keep their reports unchanged.
+  """
   if not isinstance(wiz, dict):
     return None
   status = wiz.get("status")
@@ -133,6 +144,11 @@ def summary_line(wiz: Optional[Dict[str, Any]]) -> Optional[str]:
   if status == STATUS_FAILED:
     detail = wiz.get("detail") or "unknown error"
     return f"failed ({detail}); CodeMender findings were processed normally."
+  if status == STATUS_NOT_ENABLED and wiz.get("configured"):
+    return (
+        "not enabled for this repository; no Wiz results were imported, so"
+        " this report covers CodeMender's own findings only."
+    )
   return None
 
 
@@ -144,6 +160,15 @@ def _resolve_results_file(path: str, repo_dir: str) -> str:
 
 def _import_order(cand: WizCandidate):
   return (-severity_rank(cand.severity), cand.file_path, cand.start_line)
+
+
+def _marker_ids(findings: Sequence[Dict[str, Any]]) -> List[str]:
+  """IDs of findings in state that still carry the bridge's import marker."""
+  return [
+      str(f["FindingID"])
+      for f in findings
+      if isinstance(f, dict) and f.get("FindingID") and carries_import_marker(f)
+  ]
 
 
 def _match_candidate(
@@ -185,13 +210,17 @@ def run_wiz_bridge(
     cli_version: Optional[str] = None,
 ) -> WizBridgeResult:
   """Runs the bridge for one repository. Never raises."""
+  configured = bool(creds.present or settings.results_file)
   if not settings.enabled:
     return WizBridgeResult(
-        status=STATUS_NOT_ENABLED, findings=list(existing_findings)
+        status=STATUS_NOT_ENABLED,
+        configured=configured,
+        findings=list(existing_findings),
     )
 
   result = WizBridgeResult(
       status=STATUS_FAILED,
+      configured=configured,
       findings=list(existing_findings),
       min_severity=settings.min_severity,
   )
@@ -216,7 +245,7 @@ def run_wiz_bridge(
     )
     result.reported_count = conversion.reported_count
     result.below_threshold_count = conversion.below_threshold_count
-    result.eligible_count = len(conversion.candidates)
+    result.eligible_count = conversion.eligible_count
 
     dedupe = dedupe_candidates(
         conversion.candidates, existing_findings, repo_dir, settings.line_window
@@ -242,8 +271,15 @@ def run_wiz_bridge(
       )
 
     result.findings = findings_after
+    # Earlier imports that no longer match a current candidate (for example
+    # after the threshold changed, or Wiz stopped reporting them) are still
+    # unverified external findings, so they are forced as well.
     result.force_verify_ids = list(
-        dict.fromkeys(result.imported_ids + dedupe.already_imported_ids)
+        dict.fromkeys(
+            result.imported_ids
+            + dedupe.already_imported_ids
+            + _marker_ids(findings_after)
+        )
     )
     all_candidates = list(to_import) + list(dedupe.already_imported)
     result.candidates = _summaries(
@@ -279,6 +315,9 @@ def run_wiz_bridge(
       _recover_partial_import(
           result, existing_ids, repo_dir, cm_binary, cm_env, cli_version
       )
+    result.force_verify_ids = list(
+        dict.fromkeys(result.force_verify_ids + _marker_ids(result.findings))
+    )
   finally:
     for d in (scan_out_dir, payload_dir):
       if d:

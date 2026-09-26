@@ -143,6 +143,16 @@ class ForcedVerifyTest(unittest.TestCase):
     self.assertEqual(worker._read_force_verify_ids(os.path.join(self.ws, "x")), set())
     self.assertEqual(worker._read_force_verify_ids(None), set())
 
+  def test_import_marker_forces_verify_without_partition_list(self):
+    from codemender_agent.wiz import converter  # pylint: disable=g-import-not-at-top
+
+    imported = {"Analysis": converter.IMPORT_MARKER + " Wiz rule(s): R-1."}
+    own = {"Analysis": "CodeMender prose."}
+    self.assertTrue(worker._must_force_verify("x", imported, set()))
+    self.assertTrue(worker._must_force_verify("x", own, {"x"}))
+    self.assertFalse(worker._must_force_verify("x", own, set()))
+    self.assertFalse(worker._must_force_verify("x", None, set()))
+
 
 # --- scan pipeline -------------------------------------------------------------
 
@@ -237,6 +247,12 @@ class ScanPipelineWizTest(unittest.TestCase):
         self.assertFalse([k for k in env if k.startswith("WIZ_")])
     meta = self.uploads["scans/test-scan-123/scan_metadata.json"]
     self.assertEqual(meta["wiz"]["status"], bridge.STATUS_NOT_ENABLED)
+    # Credentials are mounted in this deployment, so the report can say the
+    # repository is not on Wiz; the credentials themselves never persist.
+    self.assertTrue(meta["wiz"]["configured"])
+    self.assertIn("not enabled", bridge.summary_line(meta["wiz"]))
+    self.assertNotIn(FAKE_SECRET, json.dumps(self.uploads))
+    self.assertNotIn(FAKE_ID, json.dumps(self.uploads))
     for part in self._partitions():
       self.assertNotIn("force_verify_ids", part)
 

@@ -71,6 +71,7 @@ from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import get_pr_diff_line_ranges
 from codemender_agent.vcs.github import is_duplicate_pr
 from codemender_agent.vcs.github import list_reviewed_finding_ids
+from codemender_agent.wiz.converter import carries_import_marker
 from codemender_agent.wiz.settings import take_wiz_credentials
 
 logger = logging.getLogger("codemender-orchestrator")
@@ -92,6 +93,19 @@ def _read_force_verify_ids(partition_path: str) -> set[str]:
     return set()
   ids = data.get("force_verify_ids") if isinstance(data, dict) else None
   return {str(i) for i in ids} if isinstance(ids, list) else set()
+
+
+def _must_force_verify(
+    finding_id: str, finding: Optional[dict], force_verify_ids: set[str]
+) -> bool:
+  """Whether a finding must be verified regardless of skip_verify.
+
+  Stage 1's partition list is the primary signal. The import marker the
+  bridge writes into every imported finding is a second, independent one, so
+  a missing or stale partition list can never let an unverified external
+  finding reach a fix.
+  """
+  return finding_id in force_verify_ids or carries_import_marker(finding)
 
 
 def _setup_git_and_checkout(
@@ -1288,7 +1302,7 @@ def run_worker_pipeline() -> None:
         config=config,
         pr_diff_line_ranges=pr_diff_line_ranges,
         already_suggested=already_suggested,
-        force_verify=finding_id in force_verify_ids,
+        force_verify=_must_force_verify(finding_id, finding, force_verify_ids),
     )
     # Track generated Pull Request URL for Step Summary linking
     if pr_url and isinstance(pr_url, str) and pr_url.startswith("http"):

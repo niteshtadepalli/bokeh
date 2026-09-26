@@ -89,6 +89,9 @@ class ConversionResult:
 
   candidates: List[WizCandidate]
   reported_count: int = 0
+  # Raw findings at or above the threshold inside the repository, before
+  # grouping and vendored-copy collapsing.
+  eligible_count: int = 0
   below_threshold_count: int = 0
   invalid_count: int = 0
   outside_repo_count: int = 0
@@ -290,6 +293,7 @@ def convert_findings(
       continue
     parsed.append(cand)
 
+  result.eligible_count = len(parsed)
   grouped, result.grouped_count = group_overlapping(parsed)
   result.candidates, result.vendored_copy_count = collapse_vendored_copies(
       grouped, repo_dir
@@ -299,10 +303,31 @@ def convert_findings(
 
 # Opening sentence of every imported finding's description. It lets the
 # idempotency check recognise an earlier import even if ``cm`` rewrites the
-# stored vulnerability type.
+# stored vulnerability type, and lets the fix workers recognise an imported
+# finding on their own (see :func:`carries_import_marker`).
 IMPORT_MARKER = (
     "Reported by a Wiz SAST scan and imported for independent verification."
 )
+_NORM_IMPORT_MARKER = " ".join(IMPORT_MARKER.split()).upper()
+
+
+def carries_import_marker(finding: Any) -> bool:
+  """Whether a ``cm report`` finding still carries the bridge's import marker.
+
+  The marker is written by this module, so the check does not depend on how
+  any ``cm`` release stores or normalizes other fields. It holds until
+  ``cm verify`` replaces the description, after which the finding's status
+  records CodeMender's own verdict.
+  """
+  if not isinstance(finding, dict):
+    return False
+  for key in ("Analysis", "analysis", "Description", "description"):
+    text = finding.get(key)
+    if isinstance(text, str) and _NORM_IMPORT_MARKER in " ".join(
+        text.split()
+    ).upper():
+      return True
+  return False
 
 
 def build_import_record(cand: WizCandidate, repo_dir: str) -> Dict[str, Any]:

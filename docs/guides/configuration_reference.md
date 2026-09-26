@@ -78,13 +78,20 @@ The scan stage can run a Wiz CLI SAST scan (`wizcli scan dir`, results not
 published to Wiz) and import eligible findings into CodeMender. Imported
 findings are labelled like `SQL Injection (CWE-89)` and are **always** sent
 through `cm verify`, even when `CODEMENDER_SKIP_VERIFY` is `"true"`. Only
-findings that verification does not dismiss go on to fix PRs. The bridge is a
-hard no-op unless `CODEMENDER_WIZ_ENABLED` is `"true"`; providing credentials
-alone never enables it. A Wiz failure never fails the scan: the scan continues
-with CodeMender's own findings and records `wiz_status` as `enabled`,
-`not_enabled`, or `failed` in the report and in BigQuery. The bridge currently
-runs in the parallel pipeline's scan stage only (`CODEMENDER_RUN_MODE=scan`);
-`sequential` mode does not call it.
+findings that verification marks `VERIFIED` go on to fix PRs; dismissed ones
+keep CodeMender's reason. Fix workers recognise an imported finding both from
+the scan stage's list and from the marker sentence the bridge puts at the start
+of its description, so either signal alone is enough to force verification. The
+bridge is a hard no-op unless `CODEMENDER_WIZ_ENABLED` is `"true"`; providing
+credentials alone never enables it. A Wiz failure never fails the scan: the
+scan continues with CodeMender's own findings and records `wiz_status` as
+`enabled`, `not_enabled`, or `failed` in the report and in BigQuery. When Wiz
+credentials are configured in the deployment, repositories that have not opted
+in show a "not enabled" line in the report so that "not on Wiz" is never read as
+"clean". The bridge currently runs in the parallel pipeline's scan stage only
+(`CODEMENDER_RUN_MODE=scan`); `sequential` mode does not call it (it logs a
+warning if enabled), but still verifies any imported finding already in state
+before fixing it.
 
 *   `CODEMENDER_WIZ_ENABLED`: `"true"` to run the bridge for this scan. Defaults to off.
 *   `CODEMENDER_WIZ_MIN_SEVERITY`: Lowest Wiz severity to import (`INFO`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`). Defaults to `HIGH`.

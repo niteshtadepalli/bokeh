@@ -199,11 +199,15 @@ def dedupe_candidates(
   refs = [r for r in (finding_ref(f, repo_dir) for f in existing_findings) if r]
   result = DedupeResult()
   for cand in candidates:
-    imported = next((r for r in refs if is_same_import(cand, r)), None)
-    if imported is not None:
+    # ``cm report import`` never de-duplicates, so a state can hold several
+    # rows for the same earlier import. Every one of them must be routed to
+    # mandatory verification, not only the first.
+    imported = [r for r in refs if is_same_import(cand, r)]
+    if imported:
       result.already_imported.append(cand)
-      if imported.finding_id:
-        result.already_imported_ids.append(imported.finding_id)
+      for ref in imported:
+        if ref.finding_id and ref.finding_id not in result.already_imported_ids:
+          result.already_imported_ids.append(ref.finding_id)
       continue
     dup = next(
         (r for r in refs if _is_codemender_duplicate(cand, r, line_window)), None
