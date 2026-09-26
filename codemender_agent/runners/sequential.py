@@ -22,7 +22,9 @@ import sqlite3
 import sys
 import time
 
+from codemender_agent.codemender.cli import ensure_cm_updated
 from codemender_agent.codemender.cli import extract_session_id
+from codemender_agent.codemender.cli import get_cm_default_model
 from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.db import get_finding_status
@@ -135,8 +137,11 @@ def run_sequential_pipeline() -> None:
 
   # Step 2: Initialize CodeMender CLI
   logger.info("Initializing CodeMender CLI...")
-  cm_binary = shutil.which("cm") or "cm"
+  cm_binary = ensure_cm_updated(
+      shutil.which("cm") or "cm", env=scrubbed_env, cwd=repo_dir
+  )
   log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
+  default_cm_model = get_cm_default_model(cm_binary, env=scrubbed_env, cwd=repo_dir)
 
   try:
     init_cmd = build_cm_command(cm_binary, "init", cli_version=cli_version)
@@ -190,7 +195,7 @@ def run_sequential_pipeline() -> None:
           env=scrubbed_env,
           check=True,
       )
-      find_model = resolve_command_model("find") or "default"
+      find_model = resolve_command_model("find") or default_cm_model
       find_tokens = getattr(find_res, "token_usage", None)
       if isinstance(find_tokens, dict):
         accumulate_model_token_usage(token_usage, find_model, find_tokens)
@@ -363,7 +368,7 @@ def run_sequential_pipeline() -> None:
             env=scrubbed_env,
             check=False,
         )
-        verify_model = resolve_command_model("verify") or "default"
+        verify_model = resolve_command_model("verify") or default_cm_model
         verify_tokens = getattr(verify_res, "token_usage", None)
         if isinstance(verify_tokens, dict):
           accumulate_model_token_usage(token_usage, verify_model, verify_tokens)
@@ -427,7 +432,7 @@ def run_sequential_pipeline() -> None:
         env=scrubbed_env,
         check=False,
     )
-    fix_model = resolve_command_model("fix") or "default"
+    fix_model = resolve_command_model("fix") or default_cm_model
     fix_tokens = getattr(fix_res, "token_usage", None)
     if isinstance(fix_tokens, dict):
       accumulate_model_token_usage(token_usage, fix_model, fix_tokens)

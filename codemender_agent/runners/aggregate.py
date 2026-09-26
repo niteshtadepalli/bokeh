@@ -27,6 +27,7 @@ import time
 from typing import Optional, Set
 
 from codemender_agent.codemender.cli import log_cm_version
+from codemender_agent.codemender.cli import restore_staged_cm_binary
 from codemender_agent.config import OrchestratorConfig
 from codemender_agent.config import PR_MODE_REVIEW_SUGGESTION
 from codemender_agent.config import get_github_credentials
@@ -489,6 +490,11 @@ def _inject_token_metrics_into_html(
   if len(token_totals) == 1:
     only_model = list(token_totals.keys())[0]
     single_model_label = f' <span style="font-size: 0.8rem; color: #6c757d; font-weight: normal;">(Model: <code>{only_model}</code>)</span>'
+  elif len(token_totals) > 1:
+    models_str = ", ".join(
+        f"<code>{m}</code>" for m in sorted(token_totals.keys())
+    )
+    single_model_label = f' <span style="font-size: 0.8rem; color: #6c757d; font-weight: normal;">(Models: {models_str})</span>'
 
   banner_html = f"""
   <div id="codemender-token-metrics-banner" style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 25px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
@@ -1410,8 +1416,8 @@ def run_aggregate_pipeline() -> None:
 
   # 11. Generate final HTML and SARIF reports and upload
   inject_codemender_config(repo_dir, config=config)
-  # Resolve path to CodeMender 'cm' executable
-  cm_binary = shutil.which("cm") or "cm"
+  # Restore staged cm binary from workspace_base.tar.gz if present
+  cm_binary = restore_staged_cm_binary(codemender_home)
   log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   # Invoke report generation and upload routine with full run parameters
   _generate_and_upload_report(

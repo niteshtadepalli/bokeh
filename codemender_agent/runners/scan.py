@@ -26,8 +26,11 @@ from typing import Optional
 import uuid
 
 # CodeMender CLI JSON parser and version logging
+from codemender_agent.codemender.cli import ensure_cm_updated
+from codemender_agent.codemender.cli import get_cm_default_model
 from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
+from codemender_agent.codemender.cli import stage_cm_binary_for_archive
 # Configuration injection and credentials
 from codemender_agent.config import OrchestratorConfig
 from codemender_agent.config import get_github_credentials
@@ -465,7 +468,11 @@ def _scan_repository(
   max_scan_attempts = 3
   findings = []
   scan_token_usage: dict[str, dict[str, int]] = {}
-  find_model = cfg.find_model or resolve_command_model("find") or "default"
+  find_model = (
+      cfg.find_model
+      or resolve_command_model("find")
+      or get_cm_default_model(cm_binary, env=scrubbed_env, cwd=repo_dir)
+  )
 
   # Retry loop to account for transient cold-start or API rate-limit delays
   for attempt in range(1, max_scan_attempts + 1):
@@ -731,6 +738,7 @@ def _save_and_upload_state(
     scan_token_usage: dict[str, dict[str, int]],
     skipped_duplicate_count: int,
     config: Optional[OrchestratorConfig] = None,
+    cm_binary: Optional[str] = None,
 ) -> None:
   """Saves partitions and manifest, generates signed URLs, and uploads to GCS."""
   # Resolve active configuration instance
@@ -756,8 +764,9 @@ def _save_and_upload_state(
     logger.critical("Failed to upload scan_metadata.json to GCS.")
     sys.exit(1)
 
-  # 3. Archive ~/.codemender state directory containing initialized project metadata
+  # 3. Stage active cm binary into ~/.codemender/bin/cm and archive ~/.codemender state directory
   codemender_home = os.path.expanduser("~/.codemender")
+  stage_cm_binary_for_archive(codemender_home, cm_binary=cm_binary)
   tarball_path = os.path.join(workspace_dir, "workspace_base.tar.gz")
   logger.info("Archiving ~/.codemender to %s", tarball_path)
   make_tarfile(tarball_path, codemender_home)
@@ -905,7 +914,9 @@ def run_scan_pipeline() -> None:
 
   # 4. Initialize CodeMender CLI environment and local cache paths
   scrubbed_env = get_scrubbed_env(repo_dir=repo_dir)
-  cm_binary = shutil.which("cm") or "cm"
+  cm_binary = ensure_cm_updated(
+      shutil.which("cm") or "cm", env=scrubbed_env, cwd=repo_dir
+  )
   log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   _init_codemender(repo_dir, scrubbed_env, cm_binary, config=config)
 
@@ -1049,6 +1060,7 @@ def run_scan_pipeline() -> None:
       scan_token_usage,
       len(skipped_finding_ids) + len(ignored_finding_ids),
       config=config,
+      cm_binary=cm_binary,
   )
 
   logger.info("Stage 1 (Scan) completed successfully.")
