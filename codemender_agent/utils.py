@@ -151,6 +151,9 @@ _SUPPORTED_FLAGS_CACHE: Dict[tuple, Optional[Dict[str, bool]]] = {}
 # models go through the model settings so telemetry names the model that ran,
 # and the sandbox is controlled by CODEMENDER_SANDBOX_ENABLED.
 _RESERVED_FLAGS = frozenset({"--model", "--unrestricted"})
+# Flags that would make cm print help and exit 0 without running the command,
+# which a scheduled scan would report as a clean run with no findings.
+_BLOCKED_FLAGS = frozenset({"-h", "--help"})
 
 
 def parse_help_flags(help_text: str) -> Dict[str, bool]:
@@ -222,6 +225,11 @@ def filter_supported_flags(
   an older binary. When the supported set is unknown (help unavailable) the
   remaining flags pass through unchanged: they were configured explicitly,
   and cm reports a clear error for a flag it does not know.
+
+  A flag that the installed cm lists as taking a value always takes the next
+  token, even one starting with '-'; if no token follows, the flag is dropped
+  so cm cannot take the scan target as its value. ``-h``/``--help`` are
+  always dropped.
   """
   kept: List[str] = []
   i = 0
@@ -237,12 +245,36 @@ def filter_supported_flags(
       continue
     name = token.split("=", 1)[0]
     takes_value = supported.get(name) if supported is not None else None
-    has_separate_value = (
-        "=" not in token
-        and takes_value is not False
-        and i < len(flags)
-        and not flags[i].startswith("-")
-    )
+    if "=" in token or takes_value is False:
+      has_separate_value = False
+    elif takes_value:
+      # The installed cm says this flag takes a value, so the next token is
+      # its value even when it starts with '-' (for example a negative number
+      # or a context string such as "--focus on auth").
+      has_separate_value = i < len(flags)
+      if not has_separate_value and name not in _RESERVED_FLAGS:
+        # Passing it bare would make cm take the scan target (or finding ID)
+        # as the flag's value.
+        logger.warning(
+            "Dropping '%s' from the configured cm %s flags: it needs a value.",
+            name,
+            action,
+        )
+        continue
+    else:
+      # Unknown arity (help unavailable, or a flag this cm does not list):
+      # treat a following non-flag token as the value.
+      has_separate_value = i < len(flags) and not flags[i].startswith("-")
+    if name in _BLOCKED_FLAGS:
+      logger.warning(
+          "Ignoring '%s' in the configured cm %s flags; cm would print help"
+          " and exit without running the command.",
+          name,
+          action,
+      )
+      if has_separate_value:
+        i += 1
+      continue
     if name in _RESERVED_FLAGS or (supported is not None and takes_value is None):
       if name in _RESERVED_FLAGS:
         logger.warning(

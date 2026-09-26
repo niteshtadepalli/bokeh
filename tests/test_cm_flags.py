@@ -109,6 +109,32 @@ class FilterSupportedFlagsTest(unittest.TestCase):
   def test_empty(self):
     self.assertEqual(filter_supported_flags([], self.new, "find"), [])
 
+  def test_value_starting_with_dash_stays_with_its_flag(self):
+    flags = ["-c", "--focus on auth", "--deep-workers", "-1", "--deep"]
+    self.assertEqual(filter_supported_flags(flags, self.new, "find"), flags)
+
+  def test_value_flag_without_value_is_dropped(self):
+    # Kept bare, cm would take the scan target as the flag's value.
+    with self.assertLogs("codemender-orchestrator", level="WARNING"):
+      self.assertEqual(
+          filter_supported_flags(["--deep", "--deep-workers"], self.new, "find"),
+          ["--deep"],
+      )
+
+  def test_reserved_value_flag_consumes_dash_value(self):
+    self.assertEqual(
+        filter_supported_flags(["--model", "-x", "--deep"], self.new, "find"),
+        ["--deep"],
+    )
+
+  def test_help_is_blocked(self):
+    for supported in (self.new, None):
+      with self.assertLogs("codemender-orchestrator", level="WARNING"):
+        self.assertEqual(
+            filter_supported_flags(["--deep", "--help", "-h"], supported, "find"),
+            ["--deep"],
+        )
+
 
 class ResolveCommandFlagsTest(unittest.TestCase):
 

@@ -105,6 +105,15 @@ class CiGateExitTest(unittest.TestCase):
     )
     self.assertFalse(is_ci_gate_exit(1, truncated))
 
+  def test_blocking_findings_with_truncation_is_not_success(self):
+    # cm prints both gate messages when both conditions hold.
+    out = (
+        "\n🚨 CI Gate Failure: 2 blocking finding(s) match --fail-on=HIGH\n"
+        "\n🚨 CI Gate Failure: Impact expansion truncated (40 files identified,"
+        " capped at 10).\n"
+    )
+    self.assertFalse(is_ci_gate_exit(1, out))
+
 
 class RunCommandTokenTest(unittest.TestCase):
   """Token accounting from real subprocess output."""
@@ -162,6 +171,7 @@ class ScanRepositoryTest(unittest.TestCase):
     self.assertEqual(len(findings), 1)
     self.assertEqual(len(summaries), 1)
     self.assertEqual(summaries[0]["target"], "/tmp/repo")
+    self.assertEqual(summaries[0]["attempt"], 1)
     self.assertEqual(summaries[0]["failed"], 1)
 
   def test_ci_gate_exit_is_not_logged_as_find_error(self):

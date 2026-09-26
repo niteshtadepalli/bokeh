@@ -467,7 +467,9 @@ def _scan_repository(
                 target,
             )
           if deep_summaries is not None:
-            deep_summaries.append({"target": target, **deep_summary})
+            deep_summaries.append(
+                {"target": target, "attempt": attempt, **deep_summary}
+            )
         rc = getattr(res, "returncode", 0)
         if isinstance(rc, int) and is_ci_gate_exit(rc, find_stdout):
           logger.info(

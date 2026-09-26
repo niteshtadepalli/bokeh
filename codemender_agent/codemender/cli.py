@@ -192,6 +192,7 @@ _DEEP_SUMMARY_ALL_PRUNED = re.compile(
 )
 _DEEP_TOTAL_TOKENS = re.compile(r"Total tokens consumed:\s*([0-9.]+[kKmMgG]?)")
 _CI_GATE_BLOCKING = re.compile(r"CI Gate Failure:\s*\d+ blocking finding")
+_CI_GATE_TRUNCATED = re.compile(r"CI Gate Failure:\s*Impact expansion truncated")
 
 
 def parse_deep_scan_summary(find_stdout: str) -> Optional[Dict[str, Any]]:
@@ -245,9 +246,15 @@ def is_ci_gate_exit(returncode: int, find_stdout: str) -> bool:
 
   With `--diff`, cm exits 1 when findings match `--fail-on`. For a scheduled
   scan that means "findings present", not a failed scan. A gate exit caused
-  by truncated impact expansion is not treated as success.
+  by truncated impact expansion is not treated as success, even when cm also
+  reports blocking findings in the same run (it prints both messages).
   """
-  return returncode == 1 and bool(_CI_GATE_BLOCKING.search(find_stdout or ""))
+  text = find_stdout or ""
+  return (
+      returncode == 1
+      and bool(_CI_GATE_BLOCKING.search(text))
+      and not _CI_GATE_TRUNCATED.search(text)
+  )
 
 
 def log_cm_version(
