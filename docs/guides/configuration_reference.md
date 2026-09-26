@@ -47,9 +47,9 @@ when running in Docker or Cloud Run.
     *   *Cloud Workflows / Terraform*: pass `dry_run: true` in the workflow
         arguments, or set `dry_run = true` on a repository in
         `target_repositories`.
-    *   *GitHub Actions*: the reusable workflow's own SARIF upload step is
-        controlled by its `upload_sarif` input, not by this variable; set
-        `upload_sarif: false` as well for a run with no GitHub writes.
+    *   *GitHub Actions*: set the reusable workflow's `dry_run: true` input. It
+        sets this variable on every stage and also skips the workflow's own
+        SARIF upload steps, whatever `upload_sarif` says.
 *   `CODEMENDER_PR_REMEDIATION_MODE`: How fixes are delivered on Pull Request
     scans.
     *   `review_suggestion` (*default*): posts the patch as one-click inline

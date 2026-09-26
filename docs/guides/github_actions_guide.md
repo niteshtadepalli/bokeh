@@ -1370,6 +1370,7 @@ Build and push your image to GitHub Container Registry
 | `intermediate_artifact_retention_days` | `number` | `3` | Retention period (days) for base state and worker shard artifacts. |
 | `report_artifact_retention_days` | `number` | `90` | Retention period (days) for final HTML, JSON, and SARIF triage reports. |
 | `upload_sarif` | `boolean` | `true` | Upload generated `report.sarif` findings to GitHub Security Tab. |
+| `dry_run` | `boolean` | `false` | Run scan, verify and fix without GitHub writes: no fix PRs, branch pushes, comments, commit status or SARIF upload (sets `CODEMENDER_DRY_RUN`). |
 | `fail_on_findings` | `boolean` | `true` *(on PR)*, `false` *(on Nightly)* | Exit with non-zero code in Stage 3 if actionable vulnerabilities are detected on PR diff. |
 | `pr_remediation_mode` | `string` | `review_suggestion` | How PR scan fixes are delivered. `review_suggestion` posts one-click inline suggestions on the PR; `child_pr` pushes a fix branch and opens a Child Pull Request. Fork PRs always use `review_suggestion`. |
 | `model` | `string` | `""` *(CodeMender default)* | Global Gemini model override across all stages. Check up-to-date defaults & supported models [here](https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender#specifying-the-model). |

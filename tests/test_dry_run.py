@@ -516,6 +516,57 @@ class WorkflowDryRunTest(unittest.TestCase):
     )
 
 
+class GitHubActionsWorkflowDryRunTest(unittest.TestCase):
+  """The reusable Actions workflow forwards dry_run and gates its SARIF upload.
+
+  The codeql upload-sarif action writes to GitHub outside the Python helpers,
+  so CODEMENDER_DRY_RUN alone cannot stop it.
+  """
+
+  def setUp(self):
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ".github",
+        "workflows",
+        "codemender_parallel.yml",
+    )
+    with open(path, "r", encoding="utf-8") as f:
+      self.pipeline = yaml.safe_load(f)
+    # PyYAML parses the bare `on:` key as boolean True.
+    triggers = self.pipeline.get("on", self.pipeline.get(True))
+    self.inputs = triggers["workflow_call"]["inputs"]
+
+  def test_dry_run_input_defaults_to_false(self):
+    self.assertEqual(self.inputs["dry_run"]["type"], "boolean")
+    self.assertIs(self.inputs["dry_run"]["default"], False)
+
+  def test_every_stage_receives_dry_run(self):
+    stage_steps = [
+        (job_name, step)
+        for job_name, job in self.pipeline["jobs"].items()
+        for step in job.get("steps", [])
+        if (step.get("env") or {}).get("CODEMENDER_RUN_MODE")
+    ]
+    self.assertEqual(len(stage_steps), 3)
+    for job_name, step in stage_steps:
+      with self.subTest(job=job_name):
+        self.assertEqual(
+            step["env"].get("CODEMENDER_DRY_RUN"), "${{ inputs.dry_run }}"
+        )
+
+  def test_sarif_upload_steps_skip_in_dry_run(self):
+    upload_steps = [
+        step
+        for job in self.pipeline["jobs"].values()
+        for step in job.get("steps", [])
+        if "upload-sarif" in str(step.get("uses", ""))
+    ]
+    self.assertEqual(len(upload_steps), 2)
+    for step in upload_steps:
+      with self.subTest(step=step["name"]):
+        self.assertIn("!inputs.dry_run", step["if"])
+
+
 class OrchestratorDryRunLogTest(unittest.TestCase):
 
   @mock.patch("orchestrator.run_scan_pipeline")

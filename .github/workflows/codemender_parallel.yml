@@ -43,6 +43,11 @@ on:
         required: false
         default: true
         type: boolean
+      dry_run:
+        description: 'Run scan, verify and fix without GitHub writes (no fix PRs, branch pushes, comments, commit status or SARIF upload; sets CODEMENDER_DRY_RUN)'
+        required: false
+        default: false
+        type: boolean
       model:
         description: 'Default Gemini model across all stages'
         required: false
@@ -173,6 +178,7 @@ jobs:
         id: run-scan
         env:
           CODEMENDER_RUN_MODE: scan
+          CODEMENDER_DRY_RUN: ${{ inputs.dry_run }}
           CODEMENDER_STORAGE_MODE: github_actions
           CODEMENDER_SCAN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
           CODEMENDER_TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -202,7 +208,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Clean SARIF Report
-        if: always() && inputs.upload_sarif && steps.run-scan.outputs.findings_count == '0' && hashFiles('report.sarif') != ''
+        if: always() && inputs.upload_sarif && !inputs.dry_run && steps.run-scan.outputs.findings_count == '0' && hashFiles('report.sarif') != ''
         uses: github/codeql-action/upload-sarif@b56ba49b26e50535fa1e7f7db0f4f7b4bf65d80d # v3.28.10
         continue-on-error: true
         with:
@@ -270,6 +276,7 @@ jobs:
       - name: Execute Worker Stage
         env:
           CODEMENDER_RUN_MODE: worker
+          CODEMENDER_DRY_RUN: ${{ inputs.dry_run }}
           CODEMENDER_STORAGE_MODE: github_actions
           CODEMENDER_SCAN_ID: ${{ needs.scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
           CODEMENDER_WORKER_INDEX: ${{ matrix.worker_index }}
@@ -367,6 +374,7 @@ jobs:
       - name: Execute Aggregator Stage
         env:
           CODEMENDER_RUN_MODE: aggregate
+          CODEMENDER_DRY_RUN: ${{ inputs.dry_run }}
           CODEMENDER_STORAGE_MODE: github_actions
           CODEMENDER_SCAN_ID: ${{ needs.scan.outputs.scan_id || format('gha-{0}-{1}', github.run_id, github.run_attempt) }}
           CODEMENDER_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
@@ -389,7 +397,7 @@ jobs:
         run: /opt/codemender/venv/bin/python3 /opt/codemender/orchestrator.py
 
       - name: Upload SARIF Report
-        if: always() && inputs.upload_sarif && hashFiles('report.sarif') != ''
+        if: always() && inputs.upload_sarif && !inputs.dry_run && hashFiles('report.sarif') != ''
         uses: github/codeql-action/upload-sarif@b56ba49b26e50535fa1e7f7db0f4f7b4bf65d80d # v3.28.10
         continue-on-error: true
         with:
