@@ -531,8 +531,24 @@ def detect_build_command(repo_dir: str) -> Optional[str]:
 def inject_codemender_config(
     repo_dir: str,
     config: Optional[OrchestratorConfig] = None,
+    *,
+    for_remediation: bool = False,
 ) -> None:
-  """Reads project-level and environment configs and merges them into ~/.codemender/config.yaml."""
+  """Reads project-level and environment configs and merges them into ~/.codemender/config.yaml.
+
+  Args:
+    repo_dir: The checked-out repository the cm commands run in.
+    config: The orchestrator configuration; read from the environment if None.
+    for_remediation: Set when the following cm commands are `cm verify` and
+      `cm fix` rather than `cm find`. The default `project_paths` then becomes
+      the repository root instead of empty. cm derives each finding's project
+      root from `project_paths`, falling back to the finding file's own
+      directory when it is empty, and runs the configured build command,
+      workspace reset, artifact restore and patch capture there. A build
+      command such as `mvn ... compile` only works from the directory that
+      holds the build file, which is normally the repository root. A
+      `project_paths` set in the repository's own config file still wins.
+  """
   cfg = config or OrchestratorConfig.from_env()
   home_dir = os.path.expanduser("~")
   global_config_path = os.path.join(home_dir, ".codemender", "config.yaml")
@@ -568,7 +584,12 @@ def inject_codemender_config(
 
   # Leave project_paths empty by default so 'cm find <scanTarget>' scopes allowedRoots
   # strictly to [scanTarget] rather than the entire repository root written by 'cm init'.
-  config_data["project_paths"] = []
+  # Verify and fix instead get the repository root, so that cm resolves each
+  # finding's project root (where it runs the build command) to the repository
+  # rather than to the directory of the finding's file.
+  config_data["project_paths"] = (
+      [os.path.abspath(repo_dir)] if for_remediation else []
+  )
 
   # 3. Read Repository-Level config (Config-as-Code - takes precedence over defaults)
   project_config = None

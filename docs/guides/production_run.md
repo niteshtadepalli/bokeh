@@ -403,6 +403,13 @@ To solve this:
     This allows the CodeMender agent to explore and read imported files in
     sibling directories during targeted validations.
 
+    Without this file, `cm find` is scoped to the scan target, while `cm verify`
+    and `cm fix` use the repository root as their project path. cm runs the
+    build command from the project root it derives for each finding, so the
+    repository root is where a root-level build file (`pom.xml`, `go.mod`,
+    `package.json`, ...) is found. A `project_paths` set in `.codemender.yaml`
+    replaces both defaults.
+
 ### CodeMender Public Preview CLI & Model Overrides
 
 The orchestrator defaults to `CODEMENDER_CLI_VERSION="preview"`, enabling Public Preview CLI syntax (`cm find -y`, `cm verify -y --bypass-warning`, `cm fix -y --bypass-warning`).

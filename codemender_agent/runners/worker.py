@@ -1328,7 +1328,8 @@ def run_worker_pipeline() -> None:
     sys.exit(0)
 
   # 8. Inject project configurations, restore staged cm binary from workspace_base.tar.gz, and verify CLI binary
-  inject_codemender_config(repo_dir, config=config)
+  # The worker only runs 'cm verify' and 'cm fix', so project_paths is the repository root.
+  inject_codemender_config(repo_dir, config=config, for_remediation=True)
   cm_binary = restore_staged_cm_binary(codemender_home)
   log_cm_version(cm_binary, env=scrubbed_env, cwd=repo_dir)
   cli_version = config.cli_version

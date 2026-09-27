@@ -307,6 +307,78 @@ class TestConfig(unittest.TestCase):
             data = yaml.safe_load(f)
           self.assertEqual(data["project_paths"], [])
 
+  def _inject_and_read(self, temp_home, repo_dir, **kwargs):
+    with unittest.mock.patch("os.path.expanduser", return_value=temp_home):
+      inject_codemender_config(repo_dir, **kwargs)
+    with open(
+        os.path.join(temp_home, ".codemender", "config.yaml"), "r"
+    ) as f:
+      return yaml.safe_load(f)
+
+  def test_inject_codemender_config_remediation_uses_repo_root(self):
+    """Verify and fix get the repository root as their only project path."""
+    with tempfile.TemporaryDirectory() as temp_home:
+      with tempfile.TemporaryDirectory() as repo_dir:
+        with open(os.path.join(repo_dir, "pom.xml"), "w") as f:
+          f.write("<project/>")
+        data = self._inject_and_read(temp_home, repo_dir, for_remediation=True)
+        self.assertEqual(data["project_paths"], [os.path.abspath(repo_dir)])
+
+  def test_inject_codemender_config_find_scope_unchanged_by_default(self):
+    """Find (the default) still clears project_paths, even after a remediation injection."""
+    with tempfile.TemporaryDirectory() as temp_home:
+      with tempfile.TemporaryDirectory() as repo_dir:
+        with open(os.path.join(repo_dir, "go.mod"), "w") as f:
+          f.write("module example.com/x\n")
+        # The config file is shared by every stage in a container, so the
+        # scope has to follow the latest injection in both directions.
+        data = self._inject_and_read(temp_home, repo_dir, for_remediation=True)
+        self.assertEqual(data["project_paths"], [os.path.abspath(repo_dir)])
+        data = self._inject_and_read(temp_home, repo_dir)
+        self.assertEqual(data["project_paths"], [])
+        data = self._inject_and_read(temp_home, repo_dir, for_remediation=False)
+        self.assertEqual(data["project_paths"], [])
+
+  def test_inject_codemender_config_remediation_normalizes_relative_repo_dir(self):
+    """A relative repo_dir is written as an absolute path for cm."""
+    with tempfile.TemporaryDirectory() as temp_home:
+      with tempfile.TemporaryDirectory() as parent:
+        repo_dir = os.path.join(parent, "repo")
+        os.makedirs(repo_dir)
+        with open(os.path.join(repo_dir, "Cargo.toml"), "w") as f:
+          f.write("[package]\n")
+        cwd = os.getcwd()
+        os.chdir(parent)
+        try:
+          data = self._inject_and_read(temp_home, "repo", for_remediation=True)
+        finally:
+          os.chdir(cwd)
+        self.assertEqual(data["project_paths"], [os.path.abspath(repo_dir)])
+
+  def test_inject_codemender_config_remediation_repo_config_wins(self):
+    """A project_paths set in the repository's config file overrides the remediation default."""
+    with tempfile.TemporaryDirectory() as temp_home:
+      with tempfile.TemporaryDirectory() as repo_dir:
+        with open(os.path.join(repo_dir, ".codemender.yaml"), "w") as f:
+          yaml.dump(
+              {"build": {"command": "make"}, "project_paths": ["services/api"]},
+              f,
+          )
+        expected = [os.path.abspath(os.path.join(repo_dir, "services/api"))]
+        data = self._inject_and_read(temp_home, repo_dir, for_remediation=True)
+        self.assertEqual(data["project_paths"], expected)
+        data = self._inject_and_read(temp_home, repo_dir)
+        self.assertEqual(data["project_paths"], expected)
+
+  def test_inject_codemender_config_remediation_repo_config_empty_list_wins(self):
+    """An explicit empty project_paths in the repository config is honored for remediation too."""
+    with tempfile.TemporaryDirectory() as temp_home:
+      with tempfile.TemporaryDirectory() as repo_dir:
+        with open(os.path.join(repo_dir, ".codemender.yaml"), "w") as f:
+          yaml.dump({"build": {"command": "make"}, "project_paths": []}, f)
+        data = self._inject_and_read(temp_home, repo_dir, for_remediation=True)
+        self.assertEqual(data["project_paths"], [])
+
   def test_inject_codemender_config_removes_stale_model_when_unset(self):
     """Verify inject_codemender_config strips stale model from ~/.codemender/config.yaml when CODEMENDER_MODEL is empty."""
     from codemender_agent.config import OrchestratorConfig

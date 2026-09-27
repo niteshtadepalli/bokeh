@@ -253,6 +253,9 @@ def run_sequential_pipeline() -> None:
   logger.info("Found %d vulnerability finding(s).", len(findings))
 
   # Step 4: Sequential Verify -> Fix -> Branch -> Push -> PR loop
+  # Find is done; verify and fix resolve each finding's project root (where cm
+  # runs the build command) from project_paths, so point it at the repository.
+  inject_codemender_config(repo_dir, for_remediation=True)
   state_db_path = os.path.expanduser("~/.codemender/state.db")
   for idx, finding in enumerate(findings, start=1):
     finding_id = finding.get("FindingID")
