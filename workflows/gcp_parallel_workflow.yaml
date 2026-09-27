@@ -439,6 +439,8 @@ main:
                                     value: ${execution_url}
                                   - name: CODEMENDER_SCAN_TARGET
                                     value: ${scan_target}
+                                  - name: CODEMENDER_SKIP_VERIFY
+                                    value: ${string(skip_verify)}
                                   - name: CODEMENDER_DRY_RUN
                                     value: ${string(dry_run)}
                         connector_params:

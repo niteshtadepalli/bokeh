@@ -507,6 +507,18 @@ class WorkflowDryRunTest(unittest.TestCase):
       with self.subTest(run_mode=env.get("CODEMENDER_RUN_MODE")):
         self.assertEqual(env.get("CODEMENDER_DRY_RUN"), "${string(dry_run)}")
 
+  def test_every_job_run_receives_skip_verify(self):
+    # Telemetry derives `verified` from skip_verify, so every stage that can
+    # emit it (including the failure finalizer) must see the same value.
+    envs = self._job_envs(self.workflow["main"], [])
+    self.assertEqual(len(envs), 4)
+    for env in envs:
+      with self.subTest(run_mode=env.get("CODEMENDER_RUN_MODE"),
+                        finalizer=env.get("CODEMENDER_WORKFLOW_FAILED")):
+        self.assertEqual(
+            env.get("CODEMENDER_SKIP_VERIFY"), "${string(skip_verify)}"
+        )
+
   def test_dry_run_defaults_to_false(self):
     assigns = {}
     for entry in self.workflow["main"]["steps"][0]["init_variables"]["assign"]:
