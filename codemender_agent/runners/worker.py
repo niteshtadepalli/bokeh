@@ -18,6 +18,7 @@ from contextlib import closing
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -78,6 +79,87 @@ logger = logging.getLogger("codemender-orchestrator")
 
 # Verdicts after which re-running `cm verify` on an imported finding is pointless.
 _NOT_EXPLOITABLE_STATUSES = frozenset({"DISMISSED", "FALSE_POSITIVE"})
+
+# Status the worker records when every `cm fix` attempt failed. Without it the
+# finding would keep its VERIFIED status and be indistinguishable from one for
+# which a fix was never attempted.
+FIX_FAILED_STATUS = "FIX_FAILED"
+
+# Delay between ordinary verify/fix retries.
+_RETRY_DELAY_SECONDS = 5.0
+# Defaults for the backoff applied when cm failed on a model quota or rate limit
+# (HTTP 429 / RESOURCE_EXHAUSTED). Per-project concurrency quotas free up only
+# as other sessions finish, so a fixed 5 s pause just burns the retry budget.
+_QUOTA_BACKOFF_BASE_SECONDS = 60.0
+_QUOTA_BACKOFF_MAX_SECONDS = 600.0
+_QUOTA_ERROR_PATTERN = re.compile(
+    r"\bcode:?\s*429\b|\bHTTP\s*429\b|\b429\s+Too Many Requests\b"
+    r"|RESOURCE_EXHAUSTED|Resource has been exhausted|Quota exceeded"
+    r"|too_many_requests|rate limit exceeded",
+    re.IGNORECASE,
+)
+
+
+def _is_quota_error(output: object) -> bool:
+  """Whether cm output shows a model quota or rate-limit rejection."""
+  return isinstance(output, str) and bool(_QUOTA_ERROR_PATTERN.search(output))
+
+
+def _env_seconds(name: str, default: float) -> float:
+  try:
+    value = float(os.environ.get(name, default))
+  except (TypeError, ValueError):
+    return default
+  return value if value >= 0 else default
+
+
+def _retry_delay_seconds(attempt: int, output: object) -> float:
+  """Seconds to wait before retrying after a failed verify/fix attempt.
+
+  Ordinary failures keep the short fixed pause. Quota failures back off
+  exponentially (base * 2^(attempt-1), capped) with jitter, so parallel workers
+  that hit the same quota do not retry in lockstep.
+  """
+  if not _is_quota_error(output):
+    return _RETRY_DELAY_SECONDS
+  base = _env_seconds(
+      "CODEMENDER_QUOTA_BACKOFF_SECONDS", _QUOTA_BACKOFF_BASE_SECONDS
+  )
+  cap = _env_seconds(
+      "CODEMENDER_QUOTA_BACKOFF_MAX_SECONDS", _QUOTA_BACKOFF_MAX_SECONDS
+  )
+  delay = min(cap, base * (2 ** max(0, attempt - 1)))
+  return delay * random.uniform(0.5, 1.0)
+
+
+def _sleep_before_retry(
+    stage: str, finding_id: str, attempt: int, output: object
+) -> None:
+  delay = _retry_delay_seconds(attempt, output)
+  if _is_quota_error(output):
+    logger.warning(
+        "cm %s for finding %s hit a model quota or rate limit; backing off"
+        " %.0f s before retrying.",
+        stage,
+        finding_id,
+        delay,
+    )
+  time.sleep(delay)
+
+
+def _mark_fix_failed(state_db_path: str, finding_id: str, reason: str) -> None:
+  """Records in the worker state database that every fix attempt failed."""
+  if not os.path.exists(state_db_path):
+    return
+  try:
+    with closing(sqlite3.connect(state_db_path)) as conn:
+      conn.execute(
+          "UPDATE findings SET status = ?, mute_reason = ? WHERE finding_id = ?",
+          (FIX_FAILED_STATUS, reason, finding_id),
+      )
+      conn.commit()
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Failed to set %s in worker state.db: %s", FIX_FAILED_STATUS, e)
 
 
 def _read_force_verify_ids(partition_path: str) -> set[str]:
@@ -607,7 +689,9 @@ def _process_finding(
             "Attempt %d failed to verify finding %s.", attempt, finding_id
         )
         if attempt < max_verify_attempts:
-          time.sleep(5)
+          _sleep_before_retry(
+              "verify", finding_id, attempt, getattr(verify_res, "stdout", None)
+          )
 
     if not verified:
       logger.error(
@@ -676,12 +760,24 @@ def _process_finding(
           fix_res.returncode,
       )
       if attempt < max_fix_attempts:
-        time.sleep(5)
+        _sleep_before_retry(
+            "fix", finding_id, attempt, getattr(fix_res, "stdout", None)
+        )
 
   if not fixed:
     logger.warning(
         "Fix failed for finding %s (status: %s)", finding_id, finding_status
     )
+    # Record the exhaustion so telemetry can tell a failed fix apart from a
+    # verified finding that was never sent to fix. A not-exploitable verdict
+    # reached during fix is kept as is.
+    if str(finding_status or "").upper() not in _NOT_EXPLOITABLE_STATUSES:
+      _mark_fix_failed(
+          state_db_path,
+          finding_id,
+          f"cm fix failed after {max_fix_attempts} attempts (last status:"
+          f" {finding_status}, returncode: {fix_res.returncode})",
+      )
     return
 
   # 4. Surgical Git Staging 3-Tier Fallback

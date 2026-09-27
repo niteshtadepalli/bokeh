@@ -290,16 +290,32 @@ class TestSchemaMapping(unittest.TestCase):
     self.assertEqual(counts["skipped_duplicate"], 1)
     self.assertEqual(counts["total"], 4)
 
-  def test_verified_but_unfixed_counts_as_failed_fix(self):
-    # The worker leaves a finding VERIFIED when every `cm fix` attempt fails.
+  def test_fix_failed_counts_but_verified_without_fix_attempt_does_not(self):
+    # The worker records FIX_FAILED when every `cm fix` attempt fails. A
+    # finding still VERIFIED was never sent to fix (report-only remediation,
+    # a run that ended early, ...), so it is not a failed fix.
     counts = bq.summarize_remediation([
         {"finding_id": "a", "status": "VERIFIED"},
         {"finding_id": "b", "status": "FIXED"},
         {"finding_id": "c", "status": "OPEN"},
         {"finding_id": "d", "status": "DISMISSED"},
+        {"finding_id": "e", "status": "FIX_FAILED"},
+        {"finding_id": "f", "status": "CONFIRMED"},
     ])
     self.assertEqual(counts["fixed"], 1)
     self.assertEqual(counts["failed_fix"], 1)
+    self.assertEqual(counts["total"], 6)
+
+  def test_only_verified_findings_means_zero_failed_fixes(self):
+    counts = bq.summarize_remediation(
+        [{"finding_id": str(i), "status": "VERIFIED"} for i in range(5)]
+    )
+    self.assertEqual(counts["failed_fix"], 0)
+
+  def test_fix_failed_row_is_verified_only_when_verification_was_mandatory(self):
+    self.assertIs(self._verified("FIX_FAILED", skip_verify=False, raw=0), True)
+    self.assertIs(self._verified("FIX_FAILED", wiz=True, skip_verify=True), True)
+    self.assertIs(self._verified("FIX_FAILED", skip_verify=True, raw=0), False)
 
   def _verified(self, status, *, skip_verify=None, wiz=False, raw=None):
     ctx = bq.ScanRunContext(scan_id="s", repository="a/b", skip_verify=skip_verify,

@@ -130,10 +130,8 @@ _FAILED_FIX_STATUSES = frozenset({"FIX_FAILED", "PR_CREATION_FAILED", "PATCH_FAI
 # Statuses a finding can only hold after `cm verify` confirmed it. The worker's
 # own verify gate is status-based, and cm does not reliably set a `verified`
 # column, so these statuses also mark a row as verified.
-_VERIFY_PASSED_STATUSES = frozenset({"VERIFIED", "CONFIRMED"}) | _FIXED_STATUSES | _FAILED_FIX_STATUSES
-# A finding still VERIFIED at aggregate time passed verification but never
-# reached FIXED: every fix attempt failed (the worker leaves the status as is).
-_VERIFIED_UNFIXED_STATUSES = frozenset({"VERIFIED", "CONFIRMED"})
+_VERIFIED_STATUSES = frozenset({"VERIFIED", "CONFIRMED"})
+_VERIFY_PASSED_STATUSES = _VERIFIED_STATUSES | _FIXED_STATUSES | _FAILED_FIX_STATUSES
 
 _CWE_PATTERN = re.compile(r"(CWE-\d+)", re.IGNORECASE)
 
@@ -641,7 +639,7 @@ def _row_verified(
   """
   if _as_bool(finding.get("verified")):
     return True
-  if status in _VERIFIED_UNFIXED_STATUSES:
+  if status in _VERIFIED_STATUSES:
     return True
   if status in _VERIFY_PASSED_STATUSES and (force_verified or skip_verify is False):
     return True
@@ -653,9 +651,10 @@ def summarize_remediation(
 ) -> Dict[str, int]:
   """Counts fixed / failed-fix / skipped-duplicate findings in a snapshot.
 
-  A finding still VERIFIED here passed verification but never reached FIXED
-  (the worker leaves the status untouched when every fix attempt fails), so
-  it counts as a failed fix rather than silently disappearing.
+  Only an explicit failure status counts as a failed fix. The worker records
+  FIX_FAILED when every `cm fix` attempt fails, so a finding that is still
+  VERIFIED was never sent to fix (for example report-only remediation or a
+  run that ended early) and is not counted as a failure.
   """
   counts = {"fixed": 0, "failed_fix": 0, "skipped_duplicate": 0, "total": 0}
   for finding in findings or []:
@@ -666,8 +665,7 @@ def summarize_remediation(
     patch_status = (_as_str(finding.get("patch_status")) or "").upper()
     if status in _FIXED_STATUSES or patch_status in _FIXED_STATUSES:
       counts["fixed"] += 1
-    elif (status in _FAILED_FIX_STATUSES or patch_status in _FAILED_FIX_STATUSES
-          or status in _VERIFIED_UNFIXED_STATUSES):
+    elif status in _FAILED_FIX_STATUSES or patch_status in _FAILED_FIX_STATUSES:
       counts["failed_fix"] += 1
     if status == "SKIPPED_DUPLICATE":
       counts["skipped_duplicate"] += 1

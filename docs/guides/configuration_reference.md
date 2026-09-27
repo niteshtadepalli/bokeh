@@ -50,6 +50,20 @@ when running in Docker or Cloud Run.
     *   *GitHub Actions*: set the reusable workflow's `dry_run: true` input. It
         sets this variable on every stage and also skips the workflow's own
         SARIF upload steps, whatever `upload_sarif` says.
+*   `CODEMENDER_QUOTA_BACKOFF_SECONDS` / `CODEMENDER_QUOTA_BACKOFF_MAX_SECONDS`:
+    Backoff for Stage 2 `cm verify` / `cm fix` retries that failed on a model
+    quota or rate limit (HTTP 429, `RESOURCE_EXHAUSTED`, "Quota exceeded").
+    The wait before retry *n* is `base * 2^(n-1)`, capped at the maximum, with
+    random jitter down to half that value so parallel workers do not retry in
+    lockstep. Other failures keep the fixed 5 second pause.
+    *   *Default*: `60` / `600`.
+    *   Vertex AI limits concurrent model sessions per project, so running many
+        scans at once can exhaust the quota. Stagger scans or request a quota
+        increase if workers keep backing off.
+    *   When every `cm fix` attempt fails, the worker records the finding as
+        `FIX_FAILED`. Telemetry counts it in `failed_fix_count` and the report
+        lists it as unfixed. A finding that stays `VERIFIED` was never sent to
+        fix and is not counted as a failed fix.
 *   `CODEMENDER_PR_REMEDIATION_MODE`: How fixes are delivered on Pull Request
     scans.
     *   `review_suggestion` (*default*): posts the patch as one-click inline
