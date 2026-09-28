@@ -1472,14 +1472,23 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
     ctx.token_totals = scan_token_usage
     # Write the filtered findings too, so the warehouse shows which findings
     # were already tracked (and by which pull request) rather than an empty run.
+    # This runs after the success status and SARIF upload, outside the
+    # exporter's own guard, so a failure here must not fail the scan.
     telemetry_findings = []
     if bq_telemetry.telemetry_enabled():
-      telemetry_findings = _filtered_findings_for_telemetry(
-          findings,
-          skipped_finding_ids,
-          ignored_finding_ids,
-          os.path.expanduser("~/.codemender/state.db"),
-      )
+      try:
+        telemetry_findings = _filtered_findings_for_telemetry(
+            findings,
+            skipped_finding_ids,
+            ignored_finding_ids,
+            os.path.expanduser("~/.codemender/state.db"),
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "Could not build the filtered findings for telemetry (non-fatal): %s",
+            e,
+        )
+        telemetry_findings = []
     bq_telemetry.emit_scan_telemetry(
         ctx,
         status=bq_telemetry.STATUS_SUCCESS,

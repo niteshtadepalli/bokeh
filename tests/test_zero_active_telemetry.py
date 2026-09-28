@@ -278,6 +278,59 @@ class TestAllDuplicateScanEmitsFindingRows(unittest.TestCase):
     mock_snapshot.assert_not_called()
     self.client.insert_rows_json.assert_not_called()
 
+  @patch("codemender_agent.runners.scan.upload_sarif_to_code_scanning")
+  @patch("codemender_agent.runners.scan.post_commit_status")
+  @patch("codemender_agent.runners.scan.run_command")
+  @patch("codemender_agent.runners.scan.upload_file_to_gcs")
+  @patch("codemender_agent.runners.scan.is_duplicate_pr")
+  @patch("codemender_agent.runners.scan.check_remote_branch_exists")
+  @patch("codemender_agent.runners.scan.get_default_branch")
+  @patch("shutil.which")
+  def test_snapshot_error_does_not_fail_the_scan(
+      self,
+      mock_which,
+      mock_default_branch,
+      mock_remote_branch,
+      mock_dup_pr,
+      mock_upload,
+      mock_run,
+      _mock_status,
+      _mock_sarif,
+  ):
+    # The commit status and SARIF are already published by this point, so a
+    # telemetry error must still end the run as a success.
+    mock_which.return_value = "/bin/cm"
+    mock_default_branch.return_value = "main"
+    mock_remote_branch.return_value = False
+    mock_dup_pr.return_value = PR_URL
+    mock_upload.return_value = True
+    report = MagicMock()
+    report.stdout = json.dumps([
+        {"FindingID": "fid-1", "Status": "DETECTED", "VulnType": "SQLI",
+         "FilePath": "db.py", "StartLine": 10},
+    ])
+    rev = MagicMock()
+    rev.stdout = "abc123commitsha"
+    other = MagicMock()
+    other.stdout = ""
+    mock_run.side_effect = lambda cmd, *_a, **_kw: (
+        rev if "rev-parse" in " ".join(cmd)
+        else report if "report" in " ".join(cmd) else other
+    )
+    with patch.object(bq, "BigQueryTelemetryExporter", return_value=self.exporter):
+      with patch(
+          "codemender_agent.runners.scan._filtered_findings_for_telemetry",
+          side_effect=RuntimeError("boom"),
+      ):
+        with self.assertRaises(SystemExit) as cm:
+          run_scan_pipeline()
+    self.assertEqual(cm.exception.code, 0)
+    runs = self._rows(bq.SCAN_RUNS_TABLE)
+    self.assertEqual(len(runs), 1)
+    self.assertEqual(runs[0]["status"], "SUCCESS")
+    self.assertEqual(runs[0]["skipped_duplicate_count"], 1)
+    self.assertEqual(self._rows(bq.VULNERABILITY_FINDINGS_TABLE), [])
+
 
 if __name__ == "__main__":
   unittest.main()
