@@ -717,6 +717,57 @@ def _filter_findings(
   return active_findings, skipped_finding_ids, ignored_finding_ids
 
 
+def _filtered_findings_for_telemetry(
+    findings: list[dict[str, any]],
+    skipped_finding_ids: list[str],
+    ignored_finding_ids: list[str],
+    state_db_path: str,
+) -> list[dict[str, any]]:
+  """Finding snapshot for telemetry when Stage 1 filtered out every finding.
+
+  Stage 3 never runs on this path, so this is the only chance to record the
+  findings. The snapshot comes from state.db, the same source Stage 3 uses.
+  The filtered status is applied on top of it, because the state.db update is
+  best effort, and a filtered finding missing from state.db is rebuilt from
+  its `cm report` entry so it is still counted.
+  """
+  filtered_status = {str(fid): "SKIPPED_DUPLICATE" for fid in skipped_finding_ids}
+  filtered_status.update(
+      {str(fid): "PRE_EXISTING_IGNORED" for fid in ignored_finding_ids}
+  )
+  snapshot = bq_telemetry.snapshot_state_db_findings(state_db_path)
+  seen = set()
+  for row in snapshot:
+    finding_id = str(row.get("finding_id") or "")
+    seen.add(finding_id)
+    if finding_id in filtered_status:
+      row["status"] = filtered_status[finding_id]
+  for finding in findings:
+    if not isinstance(finding, dict):
+      continue
+    finding_id = str(finding.get("FindingID") or finding.get("finding_id") or "")
+    if finding_id not in filtered_status or finding_id in seen:
+      continue
+    seen.add(finding_id)
+    snapshot.append({
+        "finding_id": finding_id,
+        "title": _report_field(finding, "Title", "title"),
+        "vuln_type": _report_field(finding, "VulnType", "vuln_type"),
+        "severity": _report_field(finding, "Severity", "severity"),
+        "file_path": _report_field(finding, "FilePath", "file_path"),
+        "start_line": _report_field(finding, "StartLine", "start_line"),
+        "end_line": _report_field(finding, "EndLine", "end_line"),
+        "status": filtered_status[finding_id],
+    })
+  return snapshot
+
+
+def _report_field(finding: dict[str, any], camel: str, snake: str) -> any:
+  """Reads a `cm report` field in either its CamelCase or snake_case spelling."""
+  value = finding.get(camel)
+  return value if value not in (None, "") else finding.get(snake)
+
+
 def _partition_findings(
     active_findings: list[dict[str, any]],
     max_tasks: int,
@@ -1419,7 +1470,22 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
     ctx.fixed_count = 0
     ctx.failed_fix_count = 0
     ctx.token_totals = scan_token_usage
-    bq_telemetry.emit_scan_telemetry(ctx, status=bq_telemetry.STATUS_SUCCESS)
+    # Write the filtered findings too, so the warehouse shows which findings
+    # were already tracked (and by which pull request) rather than an empty run.
+    telemetry_findings = []
+    if bq_telemetry.telemetry_enabled():
+      telemetry_findings = _filtered_findings_for_telemetry(
+          findings,
+          skipped_finding_ids,
+          ignored_finding_ids,
+          os.path.expanduser("~/.codemender/state.db"),
+      )
+    bq_telemetry.emit_scan_telemetry(
+        ctx,
+        status=bq_telemetry.STATUS_SUCCESS,
+        findings=telemetry_findings,
+        finding_prs=skipped_finding_prs,
+    )
     sys.exit(0)
 
   # 11. Partition findings into balanced worker buckets

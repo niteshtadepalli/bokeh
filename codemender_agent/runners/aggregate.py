@@ -2105,6 +2105,22 @@ def has_sarif_results(sarif_path: Optional[str]) -> bool:
   return False
 
 
+def _skipped_count_for_telemetry(
+    telemetry_findings: List[Dict[str, Any]], skipped_finding_ids: Set[str]
+) -> int:
+  """`scan_runs.skipped_duplicate_count` for a run that reached Stage 3.
+
+  Duplicates and pre-existing findings count alike, as Stage 1 counts them
+  when it records an all-filtered run, so the column means the same on every
+  path. Falls back to the SKIPPED_DUPLICATE IDs when no snapshot was taken.
+  """
+  if telemetry_findings:
+    return bq_telemetry.summarize_remediation(telemetry_findings)[
+        "skipped_duplicate"
+    ]
+  return len(skipped_finding_ids)
+
+
 def _resolve_end_to_end_duration(workspace_dir: str) -> Optional[float]:
   """Computes total scan wall-clock seconds from the Stage 1 start timestamp.
 
@@ -2839,7 +2855,9 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   if bq_telemetry.telemetry_enabled():
     ctx.token_totals = token_totals
     ctx.active_findings_count = active_findings_count
-    ctx.skipped_duplicate_count = len(skipped_finding_ids)
+    ctx.skipped_duplicate_count = _skipped_count_for_telemetry(
+        telemetry_findings, skipped_finding_ids
+    )
     # Prefer the true end-to-end duration measured from Stage 1's start time,
     # falling back to this stage's own runtime when Stage 1 did not record one.
     end_to_end_seconds = _resolve_end_to_end_duration(workspace_dir)

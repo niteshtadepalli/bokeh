@@ -132,6 +132,10 @@ _FAILED_FIX_STATUSES = frozenset({"FIX_FAILED", "PR_CREATION_FAILED", "PATCH_FAI
 # column, so these statuses also mark a row as verified.
 _VERIFIED_STATUSES = frozenset({"VERIFIED", "CONFIRMED"})
 _VERIFY_PASSED_STATUSES = _VERIFIED_STATUSES | _FIXED_STATUSES | _FAILED_FIX_STATUSES
+# Statuses Stage 1 assigns to findings it filters out instead of remediating:
+# an open pull request or branch already tracks them, or they pre-date the
+# change under review. `scan_runs.skipped_duplicate_count` counts both.
+SKIPPED_STATUSES = frozenset({"SKIPPED_DUPLICATE", "PRE_EXISTING_IGNORED"})
 
 _CWE_PATTERN = re.compile(r"(CWE-\d+)", re.IGNORECASE)
 
@@ -667,7 +671,7 @@ def summarize_remediation(
       counts["fixed"] += 1
     elif status in _FAILED_FIX_STATUSES or patch_status in _FAILED_FIX_STATUSES:
       counts["failed_fix"] += 1
-    if status == "SKIPPED_DUPLICATE":
+    if status in SKIPPED_STATUSES:
       counts["skipped_duplicate"] += 1
   return counts
 
