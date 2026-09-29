@@ -15,6 +15,7 @@
 # Unit tests for GCP VPC and networking module using built-in Terraform test framework (v1.6+)
 
 mock_provider "google" {}
+mock_provider "google-beta" {}
 
 variables {
   project_id = "test-project-123"

@@ -14,6 +14,7 @@
 
 # Unit tests for GCP IAM and Service Accounts
 mock_provider "google" {}
+mock_provider "google-beta" {}
 mock_provider "random" {}
 
 variables {

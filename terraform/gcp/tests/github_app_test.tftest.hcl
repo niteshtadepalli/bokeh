@@ -14,6 +14,7 @@
 
 # Unit tests for the opt-in GitHub App authentication wiring.
 mock_provider "google" {}
+mock_provider "google-beta" {}
 mock_provider "random" {}
 
 variables {

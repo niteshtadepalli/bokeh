@@ -14,6 +14,7 @@
 
 # Unit tests for the BigQuery analytics telemetry dataset, tables, and IAM.
 mock_provider "google" {}
+mock_provider "google-beta" {}
 
 variables {
   project_id      = "test-project-123"

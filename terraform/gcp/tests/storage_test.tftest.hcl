@@ -14,6 +14,7 @@
 
 # Unit tests for GCP Storage and Artifact Registry
 mock_provider "google" {}
+mock_provider "google-beta" {}
 
 variables {
   project_id      = "test-project-123"
