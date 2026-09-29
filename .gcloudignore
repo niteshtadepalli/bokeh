@@ -1,0 +1,14 @@
+.git/
+.gitignore
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+#!include:.gitignore
+!cm

@@ -1,0 +1,110 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The cm binary is pinned by version and sha256 (_CM_VERSION / _CM_SHA256).
+# A pre-staged ./cm is used as is, but must still match _CM_SHA256. Clear both
+# substitutions to fall back to the latest stable release via `cm update`.
+#
+# The default pin is the release the scheduled Cloud Run jobs run, because a
+# default build (_IMAGE_TAG=latest, _UPDATE_JOBS=true) repoints those jobs.
+# Change it only once a newer release has been evaluated.
+#
+# _IMAGE_TAG names the pushed image tag. _UPDATE_JOBS=false builds and pushes
+# the image without pointing the runner and worker Cloud Run jobs at it. To
+# trial a newer CLI release, override all four, for example:
+#   _CM_VERSION=<version>,_CM_SHA256=<sha256>,_IMAGE_TAG=cm-<version>,_UPDATE_JOBS=false
+
+steps:
+  # Step 1: Stage the cm binary and check that it is the pinned release
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -euo pipefail
+        if [ -f ./cm ]; then
+          echo "Using pre-staged ./cm binary"
+        else
+          CM_DOWNLOAD_VERSION="${_CM_VERSION}"
+          gcloud artifacts generic download \
+            --project=cmoc-prod \
+            --location=us \
+            --repository=codemender-cli-production \
+            --package=cm \
+            --version="$${CM_DOWNLOAD_VERSION:-stable}" \
+            --name=cm-linux-amd64.zip \
+            --destination=./
+          python3 -m zipfile -e cm-linux-amd64.zip ./
+        fi
+        chmod +x ./cm
+        if [ -n "${_CM_SHA256}" ]; then
+          echo "${_CM_SHA256}  cm" | sha256sum -c -
+        else
+          echo "No _CM_SHA256 pin set; updating to the latest stable release."
+          ./cm update || true
+        fi
+        ./cm --version
+
+  # Step 2: Pull cached image and build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        docker pull ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest || true
+        docker build \
+          --cache-from ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest \
+          -t ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:${_IMAGE_TAG} \
+          -t ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/codemender-runner:${_IMAGE_TAG} \
+          .
+
+  # Step 3: Push the container image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:${_IMAGE_TAG}'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/codemender-runner:${_IMAGE_TAG}'
+
+  # Step 4: Point the runner and worker Cloud Run jobs at the new image
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -euo pipefail
+        if [ "${_UPDATE_JOBS}" != "true" ]; then
+          echo "_UPDATE_JOBS=${_UPDATE_JOBS}; leaving the Cloud Run jobs unchanged."
+          exit 0
+        fi
+        IMAGE="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:${_IMAGE_TAG}"
+        REPO_NAME_VAL="${_REPO_NAME}"
+        WORKER_JOB="$${REPO_NAME_VAL/-runner/-worker}"
+        gcloud run jobs update "${_REPO_NAME}" --image "$${IMAGE}" --region "${_REGION}"
+        gcloud run jobs update "$${WORKER_JOB}" --image "$${IMAGE}" --region "${_REGION}"
+
+options:
+  dynamicSubstitutions: true
+
+substitutions:
+  _RESOURCE_PREFIX: 'codemender'
+  _REPO_NAME: '${_RESOURCE_PREFIX}-runner'
+  _REGION: 'us-central1'
+  _CM_VERSION: '0.9.0'
+  _CM_SHA256: '2056b26908f683f35715487ed35597fee3a0bc6c86e00f23eedebff4da36f022'
+  _IMAGE_TAG: 'latest'
+  _UPDATE_JOBS: 'true'
