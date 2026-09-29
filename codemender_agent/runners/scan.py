@@ -71,6 +71,7 @@ from codemender_agent.vcs.github import delete_remote_branch
 from codemender_agent.vcs.github import get_default_branch
 from codemender_agent.vcs.github import is_duplicate_pr
 from codemender_agent.vcs.github import post_commit_status
+from codemender_agent.vcs.github import post_or_update_sticky_comment
 from codemender_agent.vcs.github import upload_sarif_to_code_scanning
 # Opt-in Wiz SAST bridge (hard no-op unless enabled for this repository)
 from codemender_agent.wiz.bridge import STATUS_NOT_ENABLED as WIZ_NOT_ENABLED
@@ -182,12 +183,15 @@ def _render_zero_findings_summary(
     filtered_reasons: Optional[str] = None,
     token_totals: Optional[dict[str, dict[str, int]]] = None,
     wiz_note: Optional[str] = None,
-) -> None:
-  """Renders a reassuring Step Summary when zero findings are detected or all are ignored."""
+) -> str:
+  """Renders a reassuring Step Summary when zero findings are detected or all are ignored.
+
+  The summary is always rendered and returned, so PR scans can mirror it into
+  the sticky PR comment; it is appended to GITHUB_STEP_SUMMARY only when a
+  summary file is configured.
+  """
   cfg = config or OrchestratorConfig.from_env()
   summary_file = cfg.github_step_summary or os.environ.get("GITHUB_STEP_SUMMARY")
-  if not summary_file:
-    return
 
   mode_desc = (
       "Pull Request Scan (Clean as You Code)"
@@ -200,6 +204,15 @@ def _render_zero_findings_summary(
       if filtered_reasons and not is_pr_scan
       else ""
   )
+  gate_section = (
+      "\n- **Security Gate:** ✅ **PASSED (Clean as You Code)**\n\n"
+      "> [!NOTE]\n"
+      "> **Security Gate Status: PASSED**\n"
+      "> \n"
+      "> No new actionable security vulnerabilities detected in the pull request diff."
+      if is_pr_scan
+      else ""
+  )
 
   token_md = render_token_usage_markdown(token_totals)
   token_section = f"\n{token_md}" if token_md else ""
@@ -209,7 +222,7 @@ def _render_zero_findings_summary(
 
 - **Repository:** `{owner}/{repo_name}`
 - **Target Commit:** `{commit_desc}`
-- **Execution Mode:** `{mode_desc}`{reason_note}{wiz_line}
+- **Execution Mode:** `{mode_desc}`{reason_note}{wiz_line}{gate_section}
 
 ### 📊 Remediation Overview
 
@@ -219,12 +232,56 @@ def _render_zero_findings_summary(
 
 🎉 **No actionable security vulnerabilities detected.**
 {token_section}"""
-  try:
-    with open(summary_file, "a", encoding="utf-8") as f:
-      f.write(summary_md + "\n")
-    logger.info("Wrote Zero-Findings Step Summary to %s", summary_file)
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logger.warning("Failed to write to GITHUB_STEP_SUMMARY (%s): %s", summary_file, e)
+  if summary_file:
+    try:
+      with open(summary_file, "a", encoding="utf-8") as f:
+        f.write(summary_md + "\n")
+      logger.info("Wrote Zero-Findings Step Summary to %s", summary_file)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.warning("Failed to write to GITHUB_STEP_SUMMARY (%s): %s", summary_file, e)
+  return summary_md
+
+
+def _post_zero_findings_pr_gate(
+    config: OrchestratorConfig,
+    token: Optional[str],
+    owner: str,
+    repo_name: str,
+    target_sha: Optional[str],
+    summary_md: Optional[str],
+) -> None:
+  """Passes the PR Security Gate and updates the sticky summary on a zero-finding PR scan.
+
+  Stage 1 exits before Stage 3 when a PR scan has no active findings, so Stage
+  3 never posts the gate status. Without this, a required
+  "CodeMender / Security Gate" check stays pending and blocks the PR.
+  """
+  if not config.is_pr_scan:
+    return
+  target_commit_sha = config.target_sha or target_sha
+  if target_commit_sha and token:
+    logger.info(
+        "✅ CodeMender Security Gate PASSED: Clean as You Code. Emitting '%s' commit status check.",
+        STATUS_CONTEXT_PR,
+    )
+    post_commit_status(
+        token=token,
+        owner=owner,
+        repo=repo_name,
+        sha=target_commit_sha,
+        state="success",
+        description="Security Gate PASSED: Clean as You Code (0 active vulnerabilities).",
+        context=STATUS_CONTEXT_PR,
+        target_url=config.execution_url or None,
+    )
+  if config.pr_number and token and summary_md:
+    post_or_update_sticky_comment(
+        token=token,
+        owner=owner,
+        repo=repo_name,
+        pr_number=config.pr_number,
+        body=summary_md,
+    )
 
 
 def _sync_repository(
@@ -1181,7 +1238,7 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
         scan_target=config.scan_target,
     )
     # Render clean Step Summary before exiting
-    _render_zero_findings_summary(
+    summary_md = _render_zero_findings_summary(
         owner,
         repo_name,
         target_sha,
@@ -1189,6 +1246,10 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
         config=config,
         token_totals=scan_token_usage,
         wiz_note=wiz_note,
+    )
+    # Stage 3 does not run, so pass the PR Security Gate here
+    _post_zero_findings_pr_gate(
+        config, token, owner, repo_name, target_sha, summary_md
     )
     # Build minimal manifest with findings_count = 0
     manifest = {"findings_count": 0, "target_sha": target_sha}
@@ -1387,7 +1448,7 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
         )
     )
     # Render clean Step Summary before exiting
-    _render_zero_findings_summary(
+    summary_md = _render_zero_findings_summary(
         owner,
         repo_name,
         target_sha,
@@ -1396,6 +1457,10 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
         filtered_reasons=filtered_reason,
         token_totals=scan_token_usage,
         wiz_note=wiz_note,
+    )
+    # Stage 3 does not run, so pass the PR Security Gate here
+    _post_zero_findings_pr_gate(
+        config, token, owner, repo_name, target_sha, summary_md
     )
     # Build minimal manifest with findings_count = 0
     manifest = {"findings_count": 0, "target_sha": target_sha}
