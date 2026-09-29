@@ -16,9 +16,9 @@
 mock_provider "google" {}
 
 variables {
-  project_id           = "test-project-123"
-  region               = "us-central1"
-  resource_prefix      = "test-compute"
+  project_id      = "test-project-123"
+  region          = "us-central1"
+  resource_prefix = "test-compute"
 }
 
 run "compute_resources_created_correctly" {

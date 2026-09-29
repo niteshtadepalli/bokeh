@@ -16,16 +16,16 @@
 mock_provider "google" {}
 
 variables {
-  project_id           = "test-project-123"
-  region               = "us-central1"
-  resource_prefix      = "test-storage"
+  project_id      = "test-project-123"
+  region          = "us-central1"
+  resource_prefix = "test-storage"
 }
 
 run "storage_resources_default_names" {
   command = plan
 
   variables {
-    reports_bucket_name  = ""
+    reports_bucket_name = ""
   }
 
   assert {
@@ -43,7 +43,7 @@ run "storage_resources_custom_names" {
   command = plan
 
   variables {
-    reports_bucket_name  = "custom-reports-123"
+    reports_bucket_name = "custom-reports-123"
   }
 
   assert {

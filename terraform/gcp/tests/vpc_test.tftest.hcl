@@ -17,8 +17,8 @@
 mock_provider "google" {}
 
 variables {
-  project_id           = "test-project-123"
-  region               = "us-central1"
+  project_id = "test-project-123"
+  region     = "us-central1"
 }
 
 run "vpc_disabled_default" {
