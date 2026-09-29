@@ -17,12 +17,20 @@
 import base64
 import gzip
 import logging
+import random
 import re
+import time
 from typing import Any, Dict, List, Optional, Set
 
 import requests
 from codemender_agent.utils import is_dry_run, retry_on_exception, run_command
-from codemender_agent.vcs.git import get_git_auth_header, parse_repo_owner_and_name, sanitize_git_url
+from codemender_agent.vcs.git import (
+    get_git_auth_header,
+    normalize_repo_relative_path,
+    parse_diff_hunks_to_review_comments,
+    parse_repo_owner_and_name,
+    sanitize_git_url,
+)
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -1064,4 +1072,341 @@ def upload_sarif_to_code_scanning(
   except Exception as e:  # pylint: disable=broad-exception-caught
     logger.warning("Failed to upload SARIF to GitHub code scanning: %s", e)
     return None
+
+
+SEVERITY_RANK: Dict[str, int] = {
+    "CRITICAL": 4,
+    "HIGH": 3,
+    "MEDIUM": 2,
+    "LOW": 1,
+    "INFO": 0,
+    "INFORMATIONAL": 0,
+}
+
+
+def is_blocking_severity(severity: str, min_sev: str = "MEDIUM") -> bool:
+  """Returns True when `severity` meets or exceeds `min_sev`."""
+  return SEVERITY_RANK.get(str(severity or "MEDIUM").strip().upper(), 2) >= (
+      SEVERITY_RANK.get(str(min_sev or "MEDIUM").strip().upper(), 2)
+  )
+
+
+def extract_finding_fields(
+    finding: Dict[str, Any], repo_dir: str = ""
+) -> Dict[str, Any]:
+  """Extracts normalized finding fields across PascalCase and snake_case schemas."""
+  fid = str(
+      finding.get("finding_id")
+      or finding.get("FindingID")
+      or finding.get("id")
+      or ""
+  )
+  sev = (
+      str(finding.get("severity") or finding.get("Severity") or "MEDIUM")
+      .strip()
+      .upper()
+  )
+  title = str(
+      finding.get("title")
+      or finding.get("Title")
+      or finding.get("VulnType")
+      or finding.get("vulnerability_type")
+      or fid
+  )
+  raw_path = str(finding.get("file_path") or finding.get("FilePath") or "")
+  fpath = (
+      normalize_repo_relative_path(raw_path, repo_dir=repo_dir)
+      if repo_dir
+      else normalize_repo_relative_path(raw_path)
+  )
+  line_no = int(
+      finding.get("line_number")
+      or finding.get("start_line")
+      or finding.get("StartLine")
+      or finding.get("line")
+      or 1
+  )
+  end_line = int(
+      finding.get("end_line") or finding.get("EndLine") or line_no
+  )
+  desc = str(
+      finding.get("description")
+      or finding.get("Description")
+      or finding.get("Analysis")
+      or finding.get("analysis")
+      or ""
+  )
+  return {
+      "finding_id": fid,
+      "severity": sev,
+      "title": title,
+      "file_path": fpath,
+      "line_number": max(1, line_no),
+      "end_line": max(line_no, end_line),
+      "description": desc,
+  }
+
+
+def _github_api_headers(token: str) -> Dict[str, str]:
+  """Builds standard GitHub REST API request headers."""
+  return {
+      "Authorization": f"Bearer {token}",
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+  }
+
+
+def _find_sticky_comment(
+    token: str, owner: str, repo: str, pr_number: int
+) -> Optional[Dict[str, Any]]:
+  """Fetches the existing sticky summary comment on a PR if present."""
+  list_url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments?per_page=100"
+  resp = requests.get(list_url, headers=_github_api_headers(token), timeout=15)
+  resp.raise_for_status()
+  comments = resp.json()
+  if not isinstance(comments, list):
+    return None
+  return next(
+      (
+          c
+          for c in comments
+          if isinstance(c, dict)
+          and STICKY_SUMMARY_MARKER in str(c.get("body") or "")
+      ),
+      None,
+  )
+
+
+def update_finding_in_sticky_comment(
+    token: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    finding: Dict,
+    status_cell_md: str,
+    min_sev: str = "MEDIUM",
+    max_retries: int = 5,
+) -> bool:
+  """Updates a single finding's row in the sticky PR comment with optimistic concurrency retries."""
+  if not (token and owner and repo and pr_number):
+    return False
+  if token == "fake-token":
+    return True
+
+  fields = extract_finding_fields(finding)
+  fid = fields["finding_id"][:8]
+  if not fid:
+    return False
+
+  sev = fields["severity"]
+  title = fields["title"]
+  fpath = fields["file_path"]
+  line_no = fields["line_number"]
+  is_blocking = is_blocking_severity(sev, min_sev)
+  gate_badge = (
+      "⚪ Dismissed (FP)"
+      if "Dismissed" in status_cell_md
+      else ("🚫 **BLOCKING**" if is_blocking else "ℹ️ Advisory")
+  )
+  new_row = (
+      f"| `{sev}` | {gate_badge} | **{title}** (`{fid}`) | `{fpath}:{line_no}`"
+      f" | {status_cell_md} | <!-- cm-row:{fid} -->"
+  )
+  headers = _github_api_headers(token)
+
+  for attempt in range(max_retries):
+    try:
+      sticky = _find_sticky_comment(token, owner, repo, pr_number)
+      if not sticky:
+        return False
+
+      comment_id = sticky["id"]
+      get_url = f"https://api.github.com/repos/{owner}/{repo}/issues/comments/{comment_id}"
+      c_resp = requests.get(get_url, headers=headers, timeout=15)
+      c_resp.raise_for_status()
+      body = str(c_resp.json().get("body") or "")
+
+      row_pattern = re.compile(
+          rf"^\|[^\n]*<!-- cm-row:{re.escape(fid)} -->\s*$", re.MULTILINE
+      )
+      if not row_pattern.search(body):
+        return False
+      updated_body = row_pattern.sub(new_row, body)
+
+      all_rows = re.findall(
+          r"^\|[^\n]*<!-- cm-row:[a-zA-Z0-9_-]+ -->", updated_body, re.MULTILINE
+      )
+      total_f = len(all_rows)
+      done_f = sum(
+          1
+          for r in all_rows
+          if ("✅" in r or "⚪" in r or "⚠️" in r)
+          and "⏳" not in r
+          and "🔨" not in r
+      )
+      if total_f > 0:
+        if done_f == total_f:
+          updated_body = re.sub(
+              r"\*(?:⏳|🔄|✅)\s*(?:\*\*)?Stage [12][^\n]*\*",
+              f"*✅ **Stage 2 Complete: {done_f}/{total_f} Findings Processed** (`cm verify` + `cm fix` finished)*",
+              updated_body,
+          )
+        else:
+          updated_body = re.sub(
+              r"\*(?:⏳|🔄|✅)\s*(?:\*\*)?Stage [12][^\n]*\*",
+              f"*🔄 **Stage 2 In Progress: {done_f}/{total_f} Findings Processed** (`cm verify` & `cm fix` running in parallel)*",
+              updated_body,
+          )
+
+      patch_resp = requests.patch(
+          get_url, headers=headers, json={"body": updated_body}, timeout=15
+      )
+      patch_resp.raise_for_status()
+      return True
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      logger.warning(
+          "Retrying sticky comment update for %s (attempt %d/%d): %s",
+          fid,
+          attempt + 1,
+          max_retries,
+          exc,
+      )
+      time.sleep(0.2 * (attempt + 1) + random.uniform(0.05, 0.25))
+  return False
+
+
+def resolve_sticky_comment_if_present(
+    token: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    target_sha: str,
+    min_sev: str = "MEDIUM",
+) -> bool:
+  """Transitions an existing sticky comment on the PR to All Findings Resolved when 0 active findings remain."""
+  if not (token and owner and repo and pr_number):
+    return False
+  if token == "fake-token":
+    return True
+
+  try:
+    existing = _find_sticky_comment(token, owner, repo, pr_number)
+    if not existing:
+      return False
+    existing_body = str(existing.get("body") or "")
+    if "✅ **All Findings Resolved**" in existing_body and (
+        not target_sha or target_sha[:8] in existing_body
+    ):
+      return True
+
+    resolved_body = (
+        f"{STICKY_SUMMARY_MARKER}\n"
+        "## 🛡️ CodeMender Pre-Submit Security Gate — ✅ **All Findings Resolved**\n\n"
+        f"**Gate Status:** ✅ **PASSED** (`0` active vulnerabilities `>= {min_sev}` in current PR diff at commit `{target_sha[:8]}`)\n\n"
+        "All previously reported security findings in this Pull Request have been remediated or removed from the modified files.\n"
+    )
+    patch_url = f"https://api.github.com/repos/{owner}/{repo}/issues/comments/{existing['id']}"
+    patch_resp = requests.patch(
+        patch_url,
+        headers=_github_api_headers(token),
+        json={"body": resolved_body},
+        timeout=15,
+    )
+    patch_resp.raise_for_status()
+    return True
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logger.warning(
+        "Failed to resolve existing sticky comment on PR #%d: %s",
+        pr_number,
+        exc,
+    )
+    return False
+
+
+def post_idempotent_inline_review(
+    token: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    target_sha: str,
+    finding: Dict,
+    patch_diff: str,
+    existing_inline_urls: Optional[Dict[str, str]] = None,
+    repo_dir: str = "",
+) -> str:
+  """Posts an idempotent inline GitHub PR review suggestion for a verified finding.
+
+  Embeds `<!-- cm-inline:{fpath}:{line_no}:{title} -->` (plus `finding_marker`
+  for compatibility with `list_reviewed_finding_ids`) and checks existing PR
+  review comments before posting so subsequent commits never duplicate reviews.
+  """
+  if not (token and owner and repo and pr_number):
+    return ""
+
+  fields = extract_finding_fields(finding)
+  fid = fields["finding_id"]
+  sev = fields["severity"]
+  title = fields["title"]
+  fpath = fields["file_path"]
+  line_no = fields["line_number"]
+  desc = fields["description"]
+  if not fpath:
+    return ""
+
+  cache = existing_inline_urls if existing_inline_urls is not None else {}
+  if not cache and token != "fake-token":
+    try:
+      c_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments?per_page=100"
+      c_resp = requests.get(
+          c_url, headers=_github_api_headers(token), timeout=15
+      )
+      if c_resp.status_code == 200 and isinstance(c_resp.json(), list):
+        for rc in c_resp.json():
+          rc_body = str(rc.get("body") or "")
+          rc_url = str(rc.get("html_url") or "")
+          for m in re.findall(
+              r"<!-- (?:cm-inline|codemender-finding):[^>]+ -->", rc_body
+          ):
+            if not patch_diff or "```suggestion" in rc_body:
+              cache[m] = rc_url
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+  inline_marker = f"<!-- cm-inline:{fpath}:{line_no}:{title} -->"
+  f_marker = finding_marker(fid) if fid else ""
+  if inline_marker in cache:
+    return cache[inline_marker]
+  if f_marker and f_marker in cache:
+    return cache[f_marker]
+
+  marker_prefix = (
+      f"{inline_marker}\n{f_marker}\n" if f_marker else f"{inline_marker}\n"
+  )
+  header_md = (
+      f"{marker_prefix}"
+      f"### 🛡️ CodeMender Security Finding (`{sev}`)\n"
+      f"**{title}** (`{fid[:8]}`)\n\n"
+      f"{desc}"
+  )
+  review_comments = parse_diff_hunks_to_review_comments(
+      patch_diff, fpath, header_md, fallback_line=line_no, repo_dir=repo_dir
+  )
+  review_body = (
+      f"🛡️ **CodeMender Automated Remediation** generated an inline fix for"
+      f" **{title}** (`{sev}`) in `{fpath}`."
+  )
+  review_url = create_pr_review_with_suggestions(
+      token=token,
+      owner=owner,
+      repo=repo,
+      pr_number=pr_number,
+      commit_id=target_sha,
+      body=review_body,
+      comments=review_comments,
+  ) or ""
+  if review_url:
+    cache[inline_marker] = review_url
+    if f_marker:
+      cache[f_marker] = review_url
+  return review_url
 
