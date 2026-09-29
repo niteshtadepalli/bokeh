@@ -369,6 +369,8 @@ _DIFF_GIT_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
 
 def _read_head_file_lines(repo_dir: str, path: str) -> Optional[List[str]]:
   """Reads a file's contents at HEAD (the PR head commit), bypassing the mutated working tree."""
+  if not repo_dir:
+    return None
   from codemender_agent.utils import run_command
 
   try:
@@ -436,39 +438,68 @@ def _build_suggestion_hunk(
   if path not in head_cache:
     head_cache[path] = _read_head_file_lines(repo_dir, path)
   head_lines = head_cache[path]
-  if not head_lines:
-    return None, f"cannot read '{path}' at HEAD to anchor an insertion"
 
   # Prefer anchoring on the preceding line so the insertion reads naturally.
   preceding = insert_before - 1
-  if 1 <= preceding <= len(head_lines):
+  if head_lines:
+    if 1 <= preceding <= len(head_lines):
+      return (
+          SuggestionHunk(
+              path=path,
+              start_line=preceding,
+              end_line=preceding,
+              replacement_lines=[head_lines[preceding - 1]] + replacement,
+          ),
+          None,
+      )
+
+    # Insertion at the very top of the file: anchor the following line instead.
+    if 1 <= insert_before <= len(head_lines):
+      return (
+          SuggestionHunk(
+              path=path,
+              start_line=insert_before,
+              end_line=insert_before,
+              replacement_lines=replacement + [head_lines[insert_before - 1]],
+          ),
+          None,
+      )
+
+    return None, f"cannot anchor an insertion in '{path}'"
+
+  # Fallback when HEAD is unavailable (e.g. standalone diff with context lines):
+  # extract the adjacent anchor line directly from the hunk's context lines so
+  # pure insertions still preserve the existing line instead of overwriting it.
+  if first > 0 and body[first - 1][:1] == " " and preceding >= 1:
     return (
         SuggestionHunk(
             path=path,
             start_line=preceding,
             end_line=preceding,
-            replacement_lines=[head_lines[preceding - 1]] + replacement,
+            replacement_lines=[body[first - 1][1:]] + replacement,
         ),
         None,
     )
-
-  # Insertion at the very top of the file: anchor the following line instead.
-  if 1 <= insert_before <= len(head_lines):
+  if (
+      last + 1 < len(body)
+      and body[last + 1][:1] == " "
+      and insert_before >= 1
+  ):
     return (
         SuggestionHunk(
             path=path,
             start_line=insert_before,
             end_line=insert_before,
-            replacement_lines=replacement + [head_lines[insert_before - 1]],
+            replacement_lines=replacement + [body[last + 1][1:]],
         ),
         None,
     )
 
-  return None, f"cannot anchor an insertion in '{path}'"
+  return None, f"cannot read '{path}' at HEAD to anchor an insertion"
 
 
 def parse_patch_to_suggestions(
-    repo_dir: str, patch_diff: str
+    repo_dir: str, patch_diff: str, default_relpath: str = ""
 ) -> Tuple[List[SuggestionHunk], List[str]]:
   """Converts a unified diff produced against HEAD into GitHub suggestion hunks.
 
@@ -489,7 +520,11 @@ def parse_patch_to_suggestions(
 
   lines = patch_diff.splitlines()
   head_cache: dict = {}
-  current_path: Optional[str] = None
+  current_path: Optional[str] = (
+      normalize_repo_relative_path(default_relpath)
+      if default_relpath
+      else None
+  )
   file_blocked = False
   i = 0
 
@@ -505,6 +540,11 @@ def parse_patch_to_suggestions(
       if old_path != new_path:
         blockers.append(f"renames '{old_path}' to '{new_path}'")
         file_blocked = True
+      i += 1
+      continue
+
+    if line.startswith("+++ b/") and not file_blocked:
+      current_path = normalize_repo_relative_path(line[6:]) or current_path
       i += 1
       continue
 
@@ -583,3 +623,97 @@ def push_branch_to_remote(
   push_cmd.extend(["origin", branch_name])
   from codemender_agent.utils import run_command
   run_command(push_cmd, cwd=repo_dir, check=True)
+
+
+def parse_diff_hunks_to_review_comments(
+    diff_text: str,
+    default_relpath: str,
+    header_md: str,
+    fallback_line: int = 1,
+    repo_dir: str = "",
+) -> List[dict]:
+  """Parses a unified diff into GitHub PR review suggestion comments anchored on RIGHT.
+
+  Delegates hunk parsing and pure-insertion anchoring to
+  `parse_patch_to_suggestions()` and formats comments with
+  `format_suggestion_body()` and `build_review_comment()`. Falls back to a raw
+  diff block on `fallback_line` if no suggestion hunks can be constructed.
+  """
+  from codemender_agent.vcs.github import (
+      build_review_comment,
+      format_suggestion_body,
+  )
+
+  hunks, blockers = parse_patch_to_suggestions(
+      repo_dir, diff_text or "", default_relpath=default_relpath
+  )
+  if hunks and not blockers:
+    total = len(hunks)
+    comments: List[dict] = []
+    for index, hunk in enumerate(hunks, start=1):
+      part_suffix = f" (part {index} of {total})" if total > 1 else ""
+      prefix = f"{header_md}\n\n" if index == 1 else ""
+      preamble = (
+          f"{prefix}#### 💡 CodeMender One-Click Fix (`cm fix`)\n"
+          "Click **Commit suggestion** below to apply this security fix"
+          f" directly to the PR{part_suffix}:"
+      )
+      comments.append(
+          build_review_comment(
+              path=hunk.path or default_relpath,
+              start_line=hunk.start_line,
+              end_line=hunk.end_line,
+              body=format_suggestion_body(
+                  hunk.replacement_lines, preamble=preamble
+              ),
+          )
+      )
+    return comments
+
+  body = header_md
+  if diff_text and diff_text.strip():
+    body += (
+        "\n\n#### 💡 Proposed CodeMender Patch (`cm fix`)\n"
+        f"```diff\n{diff_text[:4000]}\n```"
+    )
+  line = max(1, int(fallback_line or 1))
+  return [
+      build_review_comment(
+          path=default_relpath,
+          start_line=line,
+          end_line=line,
+          body=body,
+      )
+  ]
+
+
+def find_source_pragma(
+    workspace_dir: str,
+    relpath: str,
+    start_line: int,
+    end_line: int,
+    pattern: re.Pattern,
+) -> Optional[re.Match]:
+  """Searches the local line window around a finding and file header for a `# codemender:` pragma."""
+  if not (workspace_dir and relpath):
+    return None
+  full_file = os.path.join(workspace_dir, relpath)
+  if not os.path.exists(full_file):
+    return None
+  try:
+    with open(full_file, "r", encoding="utf-8", errors="ignore") as sf:
+      src_lines = sf.read().splitlines()
+    win_start = max(0, start_line - 8)
+    win_end = min(len(src_lines), max(start_line, end_line) + 2)
+    match = pattern.search("\n".join(src_lines[win_start:win_end]))
+    if match:
+      return match
+    header_lines = []
+    for hl in src_lines[:5]:
+      if hl.lstrip().startswith(("def ", "class ")):
+        break
+      header_lines.append(hl)
+    return pattern.search("\n".join(header_lines))
+  except Exception:  # pylint: disable=broad-exception-caught
+    return None
+
