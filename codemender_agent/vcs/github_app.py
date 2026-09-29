@@ -31,11 +31,17 @@ right before each batch of GitHub calls instead of holding on to one string.
 
 Installation tokens are used exactly like a personal access token: as a
 `Bearer` token for the REST API and as the `x-access-token` password for git
-over HTTPS. Commits pushed and pull requests opened with them are attributed
-to the App's bot account (`<app-slug>[bot]`).
+over HTTPS. Branch pushes, pull requests, comments and commit statuses made
+with them are attributed to the App's bot account (`<app-slug>[bot]`). The
+author of the fix commits themselves is still the git identity the runners
+configure locally.
 
 Minting a token is not a write to the repository, so it also happens in a dry
 run (CODEMENDER_DRY_RUN): the clone still needs credentials.
+
+`google-auth` (a dependency of the Google Cloud client libraries) is only
+imported when a JWT is actually signed, so deployments that authenticate with
+a static token never load it.
 """
 
 import dataclasses
@@ -45,8 +51,6 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from google.auth import crypt as google_crypt
-from google.auth import jwt as google_jwt
 import requests
 
 from codemender_agent.utils import retry_on_exception
@@ -152,8 +156,8 @@ class GitHubAppCredentials:
       )
     if _PRIVATE_KEY_MARKER not in key:
       raise GitHubAppAuthError(
-          "GITHUB_APP_PRIVATE_KEY does not look like a PEM private key (expected"
-          " a '-----BEGIN RSA PRIVATE KEY-----' block)."
+          "GITHUB_APP_PRIVATE_KEY does not look like a PEM private key"
+          " (expected a '-----BEGIN RSA PRIVATE KEY-----' block)."
       )
 
     parsed_installation_id: Optional[int] = None
@@ -177,6 +181,11 @@ def build_app_jwt(
     credentials: GitHubAppCredentials, now: Optional[float] = None
 ) -> str:
   """Signs the short-lived App JWT used to call the `/app/...` endpoints."""
+  # pylint: disable=g-import-not-at-top
+  from google.auth import crypt as google_crypt
+  from google.auth import jwt as google_jwt
+  # pylint: enable=g-import-not-at-top
+
   issued = int(time.time() if now is None else now)
   payload = {
       "iat": issued - JWT_CLOCK_SKEW_SECONDS,

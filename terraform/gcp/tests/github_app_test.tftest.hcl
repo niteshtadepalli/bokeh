@@ -63,6 +63,11 @@ run "disabled_by_default_keeps_static_token" {
     )) == 0
     error_message = "No GitHub App settings may be set on either job when the App is disabled."
   }
+
+  assert {
+    condition     = strcontains(output.secret_manager_notice, "gcloud secrets versions add test-gha-github-token") && !strcontains(output.secret_manager_notice, "private-key")
+    error_message = "Without an App, the secret notice must keep the static token instructions."
+  }
 }
 
 run "enabled_mounts_app_on_runner_and_worker" {
@@ -110,6 +115,11 @@ run "enabled_mounts_app_on_runner_and_worker" {
       [for e in google_cloud_run_v2_job.worker.template[0].template[0].containers[0].env : e.name if contains(["GITHUB_APP_TOKEN", "GITHUB_APP_INSTALLATION_ID"], e.name)],
     )) == 0
     error_message = "With an App configured, the static token must not be mounted, and no installation ID is set unless given."
+  }
+
+  assert {
+    condition     = strcontains(output.secret_manager_notice, "gcloud secrets versions add test-gha-github-app-private-key") && !strcontains(output.secret_manager_notice, "placeholder data")
+    error_message = "With an App configured, the secret notice must point at the App private key secret, not the static token."
   }
 }
 

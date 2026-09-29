@@ -18,6 +18,9 @@ import base64
 import datetime
 import json
 import os
+import subprocess
+import sys
+import tempfile
 import unittest
 import unittest.mock
 
@@ -30,7 +33,9 @@ from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import github_app_configured
 from codemender_agent.config import refresh_github_token
+from codemender_agent.runners import sequential
 from codemender_agent.vcs import github_app
+from codemender_agent.vcs.git import get_git_auth_header
 from codemender_agent.vcs.github_app import GitHubAppAuthError
 from codemender_agent.vcs.github_app import GitHubAppCredentials
 from codemender_agent.vcs.github_app import InstallationTokenProvider
@@ -45,7 +50,7 @@ except ImportError:  # pragma: no cover - exercised only without cryptography
 
 
 def _generate_keys():
-  """Returns (PKCS#1 private PEM, public PEM), like a GitHub App key download."""
+  """Returns (PKCS#1 private PEM, public PEM), like a GitHub App key."""
   key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
   private_pem = key.private_bytes(
       encoding=serialization.Encoding.PEM,
@@ -550,6 +555,167 @@ class TestConfigGitHubAppIntegration(unittest.TestCase):
         "GITHUB_APP_INSTALLATION_ID",
     ):
       self.assertNotIn(name, scrubbed)
+
+
+class TestStaticTokenPathWithoutGoogleAuth(unittest.TestCase):
+  """The static token path must not depend on google-auth being importable."""
+
+  def test_static_token_works_when_google_auth_cannot_be_imported(self):
+    script = (
+        "import sys\n"
+        "sys.modules['google.auth'] = None\n"
+        "from codemender_agent.config import get_github_credentials\n"
+        "print(get_github_credentials()[1])\n"
+    )
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("GITHUB_", "GH_"))
+    }
+    env["GITHUB_REPO_URL"] = "https://github.com/octo-org/octo-repo.git"
+    env["GITHUB_PAT"] = "ghp_personal"
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (repo_root, env.get("PYTHONPATH")) if p
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(result.stdout.strip(), "ghp_personal")
+
+
+class TestSequentialRunnerRefreshesGitHubAppToken(unittest.TestCase):
+  """The sequential runner re-reads an App token per finding and before push."""
+
+  def setUp(self):
+    github_app.reset_token_cache()
+    self.addCleanup(github_app.reset_token_cache)
+    self.tmp = tempfile.TemporaryDirectory()
+    self.addCleanup(self.tmp.cleanup)
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("GITHUB_", "GH_", "CODEMENDER_"))
+    }
+    env.update(
+        {
+            "HOME": self.tmp.name,
+            "WORKSPACE_DIR": self.tmp.name,
+            "CODEMENDER_SKIP_VERIFY": "true",
+            "GITHUB_REPO_URL": "https://github.com/o/r.git",
+            "GITHUB_PAT": "ghp_personal",
+            "GITHUB_APP_ID": "12345",
+            "GITHUB_APP_PRIVATE_KEY": (
+                "-----BEGIN RSA PRIVATE KEY-----\nunused\n"
+                "-----END RSA PRIVATE KEY-----"
+            ),
+            "GITHUB_APP_INSTALLATION_ID": "77",
+        }
+    )
+    env_patcher = unittest.mock.patch.dict(os.environ, env, clear=True)
+    env_patcher.start()
+    self.addCleanup(env_patcher.stop)
+
+    minted = iter(f"ghs_token_{i}" for i in range(1, 10))
+    mint_patcher = unittest.mock.patch.object(
+        config_module,
+        "get_installation_token",
+        side_effect=lambda *_args: next(minted),
+    )
+    self.mock_mint = mint_patcher.start()
+    self.addCleanup(mint_patcher.stop)
+
+    self.mocks = {}
+    for name in (
+        "run_command",
+        "get_scrubbed_env",
+        "ensure_cm_updated",
+        "log_cm_version",
+        "get_cm_default_model",
+        "inject_codemender_config",
+        "setup_local_git_excludes",
+        "check_remote_branch_exists",
+        "is_duplicate_pr",
+        "create_pull_request",
+        "delete_remote_branch",
+        "get_finding_status",
+    ):
+      patcher = unittest.mock.patch(
+          f"codemender_agent.runners.sequential.{name}"
+      )
+      self.mocks[name] = patcher.start()
+      self.addCleanup(patcher.stop)
+    self.mocks["ensure_cm_updated"].return_value = "/bin/cm"
+    self.mocks["get_cm_default_model"].return_value = None
+    self.mocks["get_scrubbed_env"].return_value = {}
+    self.mocks["get_finding_status"].return_value = "FIXED"
+    self.mocks["check_remote_branch_exists"].return_value = False
+    self.mocks["is_duplicate_pr"].return_value = False
+    self.mocks["create_pull_request"].return_value = (
+        "https://github.com/o/r/pull/1"
+    )
+    report = json.dumps(
+        [
+            {"FindingID": "fid-1", "VulnType": "XSS", "FilePath": "a.py"},
+        ]
+    )
+
+    def run_cmd(cmd, *_args, **_kwargs):
+      res = unittest.mock.MagicMock(returncode=0, stdout="", token_usage=None)
+      joined = " ".join(cmd)
+      if cmd[:3] == ["git", "branch", "--show-current"]:
+        res.stdout = "main\n"
+      elif "report" in joined and "json" in joined:
+        res.stdout = report
+      elif cmd[:2] == ["git", "status"]:
+        res.stdout = " M a.py"
+      return res
+
+    self.mocks["run_command"].side_effect = run_cmd
+
+  def _push_commands(self):
+    return [
+        c.args[0]
+        for c in self.mocks["run_command"].call_args_list
+        if "push" in c.args[0]
+    ]
+
+  def test_push_and_pull_request_use_the_token_read_after_the_fix(self):
+    sequential.run_sequential_pipeline()
+
+    # 1: start (clone), 2: before the finding, 3: right before the push.
+    self.assertEqual(self.mock_mint.call_count, 3)
+    self.assertEqual(
+        self.mocks["check_remote_branch_exists"].call_args.args[1],
+        "ghs_token_2",
+    )
+    pushes = self._push_commands()
+    self.assertEqual(len(pushes), 1)
+    self.assertIn(get_git_auth_header("ghs_token_3"), pushes[0])
+    self.assertEqual(
+        self.mocks["create_pull_request"].call_args.kwargs["token"],
+        "ghs_token_3",
+    )
+    # The personal token is never used while an App is configured.
+    for call in self.mocks["run_command"].call_args_list:
+      self.assertNotIn(get_git_auth_header("ghp_personal"), call.args[0])
+
+  def test_failed_refresh_before_push_skips_the_pull_request(self):
+    self.mock_mint.side_effect = [
+        "ghs_token_1",
+        "ghs_token_2",
+        GitHubAppAuthError("revoked"),
+    ]
+    sequential.run_sequential_pipeline()
+    self.assertEqual(self._push_commands(), [])
+    self.mocks["create_pull_request"].assert_not_called()
 
 
 if __name__ == "__main__":

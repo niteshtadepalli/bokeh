@@ -202,8 +202,8 @@ gcloud builds submit --config=cloudbuild.yaml \
 ### Step 4: Populate GitHub Access Token in Secret Manager
 
 Terraform initializes the `${PREFIX}-github-token` Secret Manager secret with
-placeholder data (`"PLACEHOLDER"`). Add your actual GitHub PAT or GitHub App
-Installation Access Token:
+placeholder data (`"PLACEHOLDER"`). Either add your GitHub PAT to it, or
+configure a GitHub App as described below (the static token is then unused):
 
 #### Using a GitHub Personal Access Token (PAT):
 
@@ -221,9 +221,10 @@ echo -n "ghp_your_github_personal_access_token" | \
 
 Installation access tokens expire after one hour, so rather than storing one,
 store the App's private key and let the jobs mint and refresh tokens
-themselves. Fix branches, commits and pull requests are then attributed to the
-App's bot account (`<app-slug>[bot]`) instead of a person, and no seat or
-personal token is needed.
+themselves. Fix branch pushes, pull requests, comments and commit statuses are
+then attributed to the App's bot account (`<app-slug>[bot]`) instead of a
+person, and no seat or personal token is needed. (The fix commits themselves
+keep the `CodeMender Agent` git author identity, as with a personal token.)
 
 1.  Create a GitHub App owned by your organization (**Settings → Developer
     settings → GitHub Apps → New GitHub App**). Webhooks can be disabled.
@@ -236,6 +237,8 @@ personal token is needed.
         status).
     *   **Code scanning alerts**: Read and write (SARIF upload).
     *   **Metadata**: Read-only (mandatory).
+    *   **Workflows**: Read and write, only if fixes may modify files under
+        `.github/workflows/`. GitHub rejects such pushes without it.
 2.  Install the App on the organization, limited to the repositories you scan.
 3.  Generate a private key (`.pem`) on the App's settings page and note the
     App ID (and, optionally, the installation ID from the installation's URL).
@@ -264,6 +267,12 @@ With `github_app_id` set, both Cloud Run jobs receive `GITHUB_APP_ID`,
 mount the static `${PREFIX}-github-token` secret. Unset `github_app_id` to
 return to the static token. A new key version is picked up by the next job
 execution; no redeploy is needed.
+
+> [!IMPORTANT]
+> Build and deploy a runner image that includes GitHub App support **before**
+> setting `github_app_id`. An older image does not read the App variables, and
+> because the static token is no longer mounted it would have no GitHub
+> credentials at all.
 
 > [!NOTE]
 > **Token Expiration Handling**: The jobs mint an installation token scoped to

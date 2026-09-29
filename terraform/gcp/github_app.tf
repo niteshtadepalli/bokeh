@@ -53,6 +53,17 @@ locals {
   github_static_token_env = local.github_app_enabled ? {} : {
     GITHUB_APP_TOKEN = google_secret_manager_secret.github_app_token.secret_id
   }
+
+  # Replaces the static-token instructions in the secret_manager_notice output
+  # while an App is configured.
+  github_app_secret_notice = join("\n", [
+    "GitHub App authentication is enabled (App ID ${var.github_app_id}). The runner and worker jobs",
+    "read the App's private key from the existing secret '${local.github_app_private_key_secret_id}'",
+    "and mint installation tokens at runtime; '${google_secret_manager_secret.github_app_token.secret_id}' is not mounted.",
+    "To rotate the key, add a new version (used by the next job execution):",
+    "  gcloud secrets versions add ${local.github_app_private_key_secret_id} --data-file=/path/to/app.private-key.pem --project=${var.project_id}",
+    "",
+  ])
 }
 
 data "google_secret_manager_secret" "github_app_private_key" {

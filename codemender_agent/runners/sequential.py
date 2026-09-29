@@ -30,10 +30,12 @@ from codemender_agent.codemender.cli import log_cm_version
 from codemender_agent.codemender.cli import parse_findings_json
 from codemender_agent.codemender.db import get_finding_status
 from codemender_agent.codemender.db import is_finding_verified
+from codemender_agent.config import OrchestratorConfig
 from codemender_agent.config import get_cleanup_ports
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import refresh_github_token
 from codemender_agent.runners.aggregate import _inject_token_metrics_into_html
 from codemender_agent.storage import upload_and_sign_report
 from codemender_agent.utils import accumulate_model_token_usage
@@ -89,7 +91,8 @@ def run_sequential_pipeline() -> None:
         " this sequential run scans with CodeMender alone and imports no Wiz"
         " results."
     )
-  repo_url, token = get_github_credentials()
+  config = OrchestratorConfig.from_env()
+  repo_url, token = get_github_credentials(config=config)
   clean_repo_url = sanitize_git_url(repo_url)
   owner, repo_name = parse_repo_owner_and_name(clean_repo_url)
 
@@ -302,6 +305,17 @@ def run_sequential_pipeline() -> None:
         os.environ.get("CODEMENDER_FORCE_OVERWRITE", "false").lower() == "true"
     )
     dry_run = is_dry_run()
+    # Earlier findings may have outlived a GitHub App installation token. A
+    # static token is returned unchanged. A failed refresh is not fatal here;
+    # the refresh before pushing records a failure for this finding instead.
+    try:
+      token = refresh_github_token(config, token)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.error(
+          "Could not refresh the GitHub token before finding %s: %s",
+          finding_id,
+          e,
+      )
     # A dry run skips remote duplicate checks, like the parallel runners.
     if not force_overwrite and not dry_run:
       is_branch_dup = check_remote_branch_exists(
@@ -509,6 +523,8 @@ def run_sequential_pipeline() -> None:
         continue
 
       logger.info("Pushing branch %s to remote...", branch_name)
+      # Verification and fixing can outlive a GitHub App installation token.
+      token = refresh_github_token(config, token)
       push_cmd = [
           "git",
           "-c",

@@ -174,7 +174,7 @@ variable "wiz_client_secret_secret_id" {
 
 variable "github_app_id" {
   type        = string
-  description = "GitHub App ID (or client ID) used by scheduled scans. When set, the runner and worker jobs mint short-lived installation tokens from the App's private key instead of reading the static token secret, and changes are attributed to the App's bot account. Leave empty to keep using the static token in \"<resource_prefix>-github-token\"."
+  description = "GitHub App ID (or client ID) used by scheduled scans. When set, the runner and worker jobs mint short-lived installation tokens from the App's private key instead of reading the static token secret, and branch pushes, pull requests, comments and statuses are attributed to the App's bot account. The deployed runner image must include GitHub App support, because the static token is no longer mounted. Leave empty to keep using the static token in \"<resource_prefix>-github-token\"."
   default     = ""
 
   validation {

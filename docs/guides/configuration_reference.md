@@ -30,7 +30,9 @@ when running in Docker or Cloud Run.
     rather than falling back to a personal token. Without
     `GITHUB_APP_INSTALLATION_ID` the installation is looked up from the
     repository. All three variables are scrubbed from child subprocesses.
-    Commits and pull requests are attributed to the App's bot account.
+    Branch pushes, pull requests, comments and commit statuses are attributed
+    to the App's bot account; fix commits keep the `CodeMender Agent` git
+    author identity.
 
 ### Pipeline Customization
 

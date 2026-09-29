@@ -120,8 +120,8 @@ output "bigquery_snippet_export_notice" {
 }
 
 output "secret_manager_notice" {
-  description = "Instructions for updating the GitHub App Token secret."
-  value       = <<EOT
+  description = "Instructions for updating the GitHub App Token secret (or the GitHub App private key when github_app_id is set)."
+  value       = local.github_app_enabled ? local.github_app_secret_notice : <<EOT
 The secret '${google_secret_manager_secret.github_app_token.secret_id}' has been created with placeholder data.
 Please update it with your actual GitHub App Token before running scans:
   gcloud secrets versions add ${google_secret_manager_secret.github_app_token.secret_id} --data-file=/path/to/token.pem --project=${var.project_id}
