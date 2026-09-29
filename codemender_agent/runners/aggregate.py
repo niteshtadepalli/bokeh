@@ -37,7 +37,9 @@ from codemender_agent.config import OrchestratorConfig
 from codemender_agent.config import PR_MODE_REVIEW_SUGGESTION
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
+from codemender_agent.config import github_app_configured
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import refresh_github_token
 from codemender_agent.config import resolve_pr_remediation_mode
 from codemender_agent.storage import download_file_from_gcs
 from codemender_agent.storage import get_storage_adapter
@@ -2241,7 +2243,8 @@ def run_aggregate_pipeline() -> None:
               ctx.target_sha or cfg.target_sha,
           )
           if (ctx.target_sha or cfg.target_sha) and ctx.repository and "/" in ctx.repository:
-            token = cfg.github_token
+            # A configured GitHub App always wins over a static token.
+            token = None if github_app_configured(cfg) else cfg.github_token
             if not token:
               try:
                 _, token = get_github_credentials(config=cfg)
@@ -2713,6 +2716,11 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   )
 
   # 12. Publish Commit Status Check and SARIF to GitHub (both PR Security Gate and Scheduled Nightly Scan)
+  # Merging and report generation run between the initial token read and
+  # here; re-read it so a GitHub App installation token is still valid. A
+  # static token is returned unchanged.
+  if token:
+    token = refresh_github_token(config, token)
   target_commit_sha = config.target_sha or target_sha
   if target_commit_sha and token:
     if config.is_pr_scan:

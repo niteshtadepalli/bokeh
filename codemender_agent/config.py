@@ -24,11 +24,18 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 
 from codemender_agent.utils import is_dry_run
+from codemender_agent.vcs.git import parse_repo_owner_and_name
+from codemender_agent.vcs.git import sanitize_git_url
+from codemender_agent.vcs.github_app import GitHubAppCredentials
+from codemender_agent.vcs.github_app import get_installation_token
 
 logger = logging.getLogger("codemender-orchestrator")
 
 SENSITIVE_ENV_VARS = [
     "GITHUB_APP_TOKEN",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_APP_INSTALLATION_ID",
     "GITHUB_PAT",
     "GITHUB_TOKEN",
     "GH_TOKEN",
@@ -87,6 +94,12 @@ class OrchestratorConfig:
   # VCS & GitHub Integration
   repo_url: Optional[str] = None
   github_token: Optional[str] = None
+  # GitHub App authentication (GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY /
+  # GITHUB_APP_INSTALLATION_ID). When any of these is set, the App is used and
+  # `github_token` is ignored; see `get_github_credentials`.
+  github_app_id: Optional[str] = None
+  github_app_private_key: Optional[str] = field(default=None, repr=False)
+  github_app_installation_id: Optional[str] = None
   build_command: Optional[str] = None
   scan_target: str = "."
   max_tasks: int = 20
@@ -200,6 +213,13 @@ class OrchestratorConfig:
         or os.environ.get("GITHUB_PAT")
         or os.environ.get("GITHUB_TOKEN")
     )
+    github_app_id = (os.environ.get("GITHUB_APP_ID") or "").strip() or None
+    github_app_private_key = (
+        os.environ.get("GITHUB_APP_PRIVATE_KEY") or ""
+    ).strip() or None
+    github_app_installation_id = (
+        os.environ.get("GITHUB_APP_INSTALLATION_ID") or ""
+    ).strip() or None
     build_command = os.environ.get("CODEMENDER_BUILD_COMMAND")
     scan_target = os.environ.get("CODEMENDER_SCAN_TARGET", ".")
     try:
@@ -364,6 +384,9 @@ class OrchestratorConfig:
         # Repository credentials and scan constraints
         repo_url=repo_url,
         github_token=github_token,
+        github_app_id=github_app_id,
+        github_app_private_key=github_app_private_key,
+        github_app_installation_id=github_app_installation_id,
         build_command=build_command,
         scan_target=scan_target,
         max_tasks=max_tasks,
@@ -449,10 +472,51 @@ def get_scrubbed_env(repo_dir: Optional[str] = None) -> Dict[str, str]:
   return env
 
 
+def github_app_configured(config: OrchestratorConfig) -> bool:
+  """Whether any GitHub App setting is present.
+
+  A partial configuration still counts, so that it fails loudly in
+  `get_github_credentials` instead of silently falling back to a personal
+  access token.
+  """
+  return bool(
+      config.github_app_id
+      or config.github_app_private_key
+      or config.github_app_installation_id
+  )
+
+
+def _mint_github_app_token(config: OrchestratorConfig, repo_url: str) -> str:
+  """Returns a GitHub App installation token for the configured repository."""
+  credentials = GitHubAppCredentials.from_values(
+      config.github_app_id,
+      config.github_app_private_key,
+      config.github_app_installation_id,
+  )
+  owner, repo = parse_repo_owner_and_name(sanitize_git_url(repo_url))
+  return get_installation_token(credentials, owner, repo)
+
+
 def get_github_credentials(
     config: Optional[OrchestratorConfig] = None,
 ) -> Tuple[str, str]:
-  """Retrieves repo URL and GitHub access token from configuration or environment."""
+  """Retrieves repo URL and GitHub access token from configuration or environment.
+
+  When a GitHub App is configured (GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY,
+  optionally GITHUB_APP_INSTALLATION_ID), the token is an installation token
+  minted for the repository and cached for the process. Calling this again
+  returns the cached token until it nears expiry, then a fresh one, so
+  long-running stages should call it (or `refresh_github_token`) right before
+  each batch of GitHub operations. Otherwise the static token from
+  GITHUB_APP_TOKEN, GITHUB_PAT or GITHUB_TOKEN is returned unchanged.
+
+  Raises:
+    ValueError: The repository URL or every credential is missing.
+    GitHubAppAuthError: A GitHub App is configured but no token could be
+      minted. There is deliberately no fallback to a static token, so a
+      broken App configuration cannot silently attribute changes to a
+      personal account.
+  """
   cfg = config or OrchestratorConfig.from_env()
 
   # 1. Validate repository URL
@@ -461,21 +525,43 @@ def get_github_credentials(
     logger.error("Environment variable GITHUB_REPO_URL is required.")
     raise ValueError("Environment variable GITHUB_REPO_URL is required.")
 
-  # 2. Validate GitHub authentication token
+  # 2. GitHub App installation token (takes precedence over static tokens)
+  if github_app_configured(cfg):
+    if cfg.github_token:
+      logger.debug(
+          "GitHub App authentication is configured; ignoring the static"
+          " GITHUB_APP_TOKEN/GITHUB_PAT/GITHUB_TOKEN value."
+      )
+    return repo_url.strip(), _mint_github_app_token(cfg, repo_url)
+
+  # 3. Validate static GitHub authentication token
   token = cfg.github_token
   if not token:
     logger.error(
         "One of GITHUB_APP_TOKEN, GITHUB_PAT, or GITHUB_TOKEN environment"
-        " variables is required."
+        " variables (or GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY) is required."
     )
     # Raise configuration error if no GitHub credential token is present
     raise ValueError(
         "One of GITHUB_APP_TOKEN, GITHUB_PAT, or GITHUB_TOKEN environment"
-        " variables is required."
+        " variables (or GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY) is required."
     )
 
   # Return cleaned repository URL and authentication token
   return repo_url.strip(), token.strip()
+
+
+def refresh_github_token(config: OrchestratorConfig, token: str) -> str:
+  """Returns a token that is safe to use for the next batch of GitHub calls.
+
+  With a GitHub App this returns the cached installation token, minting a new
+  one if it is close to expiry. Without one the static `token` is returned
+  unchanged, so call sites behave exactly as before.
+  """
+  if not github_app_configured(config):
+    return token
+  _, fresh_token = get_github_credentials(config=config)
+  return fresh_token
 
 
 def detect_build_command(repo_dir: str) -> Optional[str]:

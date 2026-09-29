@@ -87,12 +87,40 @@ resource "google_cloud_run_v2_job" "runner" {
           value = var.bigquery_include_snippets ? "true" : "false"
         }
 
-        env {
-          name = "GITHUB_APP_TOKEN"
-          value_source {
-            secret_key_ref {
-              secret  = google_secret_manager_secret.github_app_token.secret_id
-              version = "latest"
+        # Static GitHub token, mounted only while no GitHub App is configured
+        # (see github_app.tf). Kept first so the env list, and therefore the
+        # plan, is unchanged for deployments that do not use an App.
+        dynamic "env" {
+          for_each = local.github_static_token_env
+          content {
+            name = env.key
+            value_source {
+              secret_key_ref {
+                secret  = env.value
+                version = "latest"
+              }
+            }
+          }
+        }
+
+        # GitHub App identity and private key (opt-in, see github_app.tf).
+        dynamic "env" {
+          for_each = local.github_app_plain_env
+          content {
+            name  = env.key
+            value = env.value
+          }
+        }
+
+        dynamic "env" {
+          for_each = local.github_app_secret_env
+          content {
+            name = env.key
+            value_source {
+              secret_key_ref {
+                secret  = env.value
+                version = "latest"
+              }
             }
           }
         }
@@ -135,6 +163,7 @@ resource "google_cloud_run_v2_job" "runner" {
     time_sleep.wait_for_apis_and_iam,
     google_secret_manager_secret_iam_member.runner_wiz_client_id_accessor,
     google_secret_manager_secret_iam_member.runner_wiz_client_secret_accessor,
+    google_secret_manager_secret_iam_member.runner_github_app_key_accessor,
   ]
 }
 
@@ -177,12 +206,39 @@ resource "google_cloud_run_v2_job" "worker" {
           value = "false"
         }
 
-        env {
-          name = "GITHUB_APP_TOKEN"
-          value_source {
-            secret_key_ref {
-              secret  = google_secret_manager_secret.github_app_token.secret_id
-              version = "latest"
+        # Static GitHub token, mounted only while no GitHub App is configured
+        # (see github_app.tf).
+        dynamic "env" {
+          for_each = local.github_static_token_env
+          content {
+            name = env.key
+            value_source {
+              secret_key_ref {
+                secret  = env.value
+                version = "latest"
+              }
+            }
+          }
+        }
+
+        # GitHub App identity and private key (opt-in, see github_app.tf).
+        dynamic "env" {
+          for_each = local.github_app_plain_env
+          content {
+            name  = env.key
+            value = env.value
+          }
+        }
+
+        dynamic "env" {
+          for_each = local.github_app_secret_env
+          content {
+            name = env.key
+            value_source {
+              secret_key_ref {
+                secret  = env.value
+                version = "latest"
+              }
             }
           }
         }
@@ -205,7 +261,8 @@ resource "google_cloud_run_v2_job" "worker" {
   }
 
   depends_on = [
-    time_sleep.wait_for_apis_and_iam
+    time_sleep.wait_for_apis_and_iam,
+    google_secret_manager_secret_iam_member.worker_github_app_key_accessor,
   ]
 }
 

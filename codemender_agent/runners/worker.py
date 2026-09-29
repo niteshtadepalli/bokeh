@@ -39,6 +39,7 @@ from codemender_agent.config import get_cleanup_ports
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import refresh_github_token
 from codemender_agent.config import resolve_pr_remediation_mode
 from codemender_agent.storage import download_from_url
 from codemender_agent.storage import get_storage_adapter
@@ -875,6 +876,10 @@ def _process_finding(
           finding_id,
       )
       return None
+    # Verification and fixing can take longer than a GitHub App installation
+    # token lives, so re-read the token before routing. A static token is
+    # returned unchanged.
+    token = refresh_github_token(config, token)
     if suggestion_mode:
       fallback_route = "patch comment" if config.is_fork_pr else "Child PR"
       # Suggestions must be derived before committing: the parser reads the
@@ -1388,6 +1393,19 @@ def run_worker_pipeline() -> None:
           "Finding %s not found in restored database, skipping.", finding_id
       )
       continue
+
+    # Earlier findings may have taken longer than a GitHub App installation
+    # token lives. A static token is returned unchanged. A failed refresh is
+    # not fatal here: routing refreshes again and records a failure for the
+    # finding, and the partition's state must still be uploaded.
+    try:
+      token = refresh_github_token(config, token)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.error(
+          "Could not refresh the GitHub token before finding %s: %s",
+          finding_id,
+          e,
+      )
 
     # Execute verify, fix, staging, and remediation routing routine for finding
     pr_url = _process_finding(

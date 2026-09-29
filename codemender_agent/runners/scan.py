@@ -42,7 +42,9 @@ from codemender_agent.runners.aggregate import transform_json_to_sarif
 from codemender_agent.config import OrchestratorConfig
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
+from codemender_agent.config import github_app_configured
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import refresh_github_token
 # Storage signed URL and upload utilities
 from codemender_agent.storage import generate_signed_url
 from codemender_agent.storage import upload_file_to_gcs
@@ -1008,7 +1010,8 @@ def run_scan_pipeline() -> None:
               ctx.target_sha or cfg.target_sha,
           )
           if (ctx.target_sha or cfg.target_sha) and ctx.repository and "/" in ctx.repository:
-            token = cfg.github_token
+            # A configured GitHub App always wins over a static token.
+            token = None if github_app_configured(cfg) else cfg.github_token
             if not token:
               try:
                 _, token = get_github_credentials(config=cfg)
@@ -1161,6 +1164,11 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   wiz_metadata = wiz_result.to_metadata()
   ctx.apply_wiz(wiz_metadata)
   wiz_note = wiz_summary_line(wiz_metadata)
+
+  # The scan can run for hours, longer than a GitHub App installation token
+  # lives. Re-read the token before the GitHub calls below; a static token is
+  # returned unchanged.
+  token = refresh_github_token(config, token)
 
   # 7. Handle case where repository scan returns zero findings
   if not findings:

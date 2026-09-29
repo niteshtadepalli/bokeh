@@ -169,6 +169,38 @@ variable "wiz_client_secret_secret_id" {
 }
 
 # ---------------------------------------------------------------------------
+# GitHub App authentication for scheduled scans (opt-in)
+# ---------------------------------------------------------------------------
+
+variable "github_app_id" {
+  type        = string
+  description = "GitHub App ID (or client ID) used by scheduled scans. When set, the runner and worker jobs mint short-lived installation tokens from the App's private key instead of reading the static token secret, and changes are attributed to the App's bot account. Leave empty to keep using the static token in \"<resource_prefix>-github-token\"."
+  default     = ""
+
+  validation {
+    condition     = !can(regex("\\s", var.github_app_id))
+    error_message = "github_app_id must not contain whitespace."
+  }
+}
+
+variable "github_app_installation_id" {
+  type        = string
+  description = "Optional GitHub App installation ID. When empty, the installation is looked up from each scanned repository, which requires the App to be installed on it."
+  default     = ""
+
+  validation {
+    condition     = var.github_app_installation_id == "" || can(regex("^[1-9][0-9]*$", var.github_app_installation_id))
+    error_message = "github_app_installation_id must be empty or a positive integer."
+  }
+}
+
+variable "github_app_private_key_secret_id" {
+  type        = string
+  description = "Existing Secret Manager secret ID holding the GitHub App's PEM private key. Only read when github_app_id is set. Defaults to \"<resource_prefix>-github-app-private-key\" when empty. The secret is referenced, not managed, by Terraform, so the key never enters Terraform state."
+  default     = ""
+}
+
+# ---------------------------------------------------------------------------
 # BigQuery analytics telemetry
 # ---------------------------------------------------------------------------
 

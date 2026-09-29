@@ -217,24 +217,60 @@ echo -n "ghp_your_github_personal_access_token" | \
     --project=${PROJECT_ID}
 ```
 
-#### Using a GitHub App Installation Token:
+#### Using a GitHub App (recommended for scheduled scans):
 
-```bash
-export PROJECT_ID=$(gcloud config get-value project)
+Installation access tokens expire after one hour, so rather than storing one,
+store the App's private key and let the jobs mint and refresh tokens
+themselves. Fix branches, commits and pull requests are then attributed to the
+App's bot account (`<app-slug>[bot]`) instead of a person, and no seat or
+personal token is needed.
 
-# Add GitHub App Installation Access Token (ghs_...) to Secret Manager
-echo -n "ghs_your_github_app_installation_token" | \
-    gcloud secrets versions add "${PREFIX}-github-token" \
-    --data-file=- \
-    --project=${PROJECT_ID}
-```
+1.  Create a GitHub App owned by your organization (**Settings → Developer
+    settings → GitHub Apps → New GitHub App**). Webhooks can be disabled.
+    Grant these repository permissions:
+    *   **Contents**: Read and write (clone, push fix branches, delete a fix
+        branch when PR creation fails).
+    *   **Pull requests**: Read and write (open fix PRs, find duplicates,
+        comment).
+    *   **Commit statuses**: Read and write (the `CodeMender / Nightly Scan`
+        status).
+    *   **Code scanning alerts**: Read and write (SARIF upload).
+    *   **Metadata**: Read-only (mandatory).
+2.  Install the App on the organization, limited to the repositories you scan.
+3.  Generate a private key (`.pem`) on the App's settings page and note the
+    App ID (and, optionally, the installation ID from the installation's URL).
+4.  Store the key in a Secret Manager secret that Terraform only references,
+    so the key never enters Terraform state:
+
+    ```bash
+    gcloud secrets create "${PREFIX}-github-app-private-key" \
+        --replication-policy=automatic --project=${PROJECT_ID}
+    gcloud secrets versions add "${PREFIX}-github-app-private-key" \
+        --data-file=path/to/app.private-key.pem --project=${PROJECT_ID}
+    ```
+
+5.  Set the App in `terraform.tfvars` and apply:
+
+    ```hcl
+    github_app_id = "123456"
+    # Optional; looked up from each repository when empty.
+    github_app_installation_id = ""
+    # Optional; defaults to "<resource_prefix>-github-app-private-key".
+    github_app_private_key_secret_id = ""
+    ```
+
+With `github_app_id` set, both Cloud Run jobs receive `GITHUB_APP_ID`,
+`GITHUB_APP_PRIVATE_KEY` (and `GITHUB_APP_INSTALLATION_ID` if set) and no longer
+mount the static `${PREFIX}-github-token` secret. Unset `github_app_id` to
+return to the static token. A new key version is picked up by the next job
+execution; no redeploy is needed.
 
 > [!NOTE]
-> **Token Expiration Handling**: Because GitHub App Installation Tokens
-> (`ghs_...`) expire after 1 hour, automated nightly pipelines using GitHub Apps
-> should generate fresh tokens prior to execution using the GitHub App Private
-> Key (`.pem`) and App ID, then update Secret Manager via `gcloud secrets
-> versions add`.
+> **Token Expiration Handling**: The jobs mint an installation token scoped to
+> the scanned repository at start-up and mint a new one whenever less than 10
+> minutes of its one-hour lifetime remain before a batch of GitHub calls (after
+> the scan, per finding, before opening each pull request, and before
+> publishing results), so scans that run for many hours keep working.
 
 --------------------------------------------------------------------------------
 

@@ -1031,6 +1031,96 @@ class TestWorkerRunner(unittest.TestCase):
     ]
     self.assertGreater(len(verify_calls), 0)
 
+  @unittest.mock.patch("codemender_agent.config.get_installation_token")
+  @unittest.mock.patch("codemender_agent.runners.worker.get_default_branch")
+  @unittest.mock.patch("codemender_agent.runners.worker.run_command")
+  @unittest.mock.patch("codemender_agent.runners.worker.download_from_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.upload_to_url")
+  @unittest.mock.patch("codemender_agent.runners.worker.check_remote_branch_exists")
+  @unittest.mock.patch("codemender_agent.runners.worker.push_branch_to_remote")
+  @unittest.mock.patch("codemender_agent.runners.worker.create_pull_request")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_duplicate_pr")
+  @unittest.mock.patch("codemender_agent.runners.worker.is_finding_verified")
+  @unittest.mock.patch("codemender_agent.runners.worker.get_finding_status")
+  @unittest.mock.patch("tarfile.open")
+  @unittest.mock.patch("shutil.which")
+  def test_worker_pipeline_refreshes_github_app_token_before_routing(
+      self,
+      mock_which,
+      _mock_tarfile_open,
+      mock_get_finding_status,
+      mock_is_finding_verified,
+      mock_is_duplicate_pr,
+      mock_create_pr,
+      mock_push_branch,
+      mock_check_remote_branch_exists,
+      mock_upload_to_url,
+      mock_download_from_url,
+      mock_run_cmd,
+      mock_get_default_branch,
+      mock_mint,
+  ):
+    """With a GitHub App, push and PR creation use the token read after the fix."""
+    os.environ.pop("GITHUB_TOKEN", None)
+    os.environ["GITHUB_APP_ID"] = "12345"
+    os.environ["GITHUB_APP_PRIVATE_KEY"] = (
+        "-----BEGIN RSA PRIVATE KEY-----\nunused\n-----END RSA PRIVATE KEY-----"
+    )
+    os.environ["GITHUB_APP_INSTALLATION_ID"] = "77"
+    minted = iter(f"ghs_token_{i}" for i in range(1, 10))
+    mock_mint.side_effect = lambda *_args: next(minted)
+
+    mock_which.return_value = "/bin/cm"
+    mock_get_default_branch.return_value = "main"
+    mock_check_remote_branch_exists.return_value = False
+    mock_is_duplicate_pr.return_value = False
+    mock_is_finding_verified.return_value = True
+    mock_get_finding_status.return_value = "FIXED"
+    mock_create_pr.return_value = "https://github.com/owner/repo/pull/7"
+
+    def download_side_effect(url, dest_path):
+      if "partition" in url:
+        with open(dest_path, "w") as f:
+          json.dump({"partition_index": 0, "finding_ids": ["fid-1"]}, f)
+        return True
+      return "base.tar.gz" in url
+
+    mock_download_from_url.side_effect = download_side_effect
+    mock_upload_to_url.return_value = True
+
+    mock_cm_report = unittest.mock.MagicMock(returncode=0)
+    mock_cm_report.stdout = json.dumps([{
+        "FindingID": "fid-1",
+        "Status": "DETECTED",
+        "VulnType": "SQL_INJECTION",
+        "FilePath": "db.py",
+        "StartLine": 10,
+    }])
+    mock_git_status = unittest.mock.MagicMock(returncode=0, stdout=" M db.py")
+    mock_default = unittest.mock.MagicMock(returncode=0, stdout="")
+
+    def run_cmd_side_effect(cmd, *_args, **_kwargs):
+      cmd_str = " ".join(cmd)
+      if "report" in cmd_str:
+        return mock_cm_report
+      if "status" in cmd_str:
+        return mock_git_status
+      return mock_default
+
+    mock_run_cmd.side_effect = run_cmd_side_effect
+
+    run_worker_pipeline()
+
+    # 1: container start (clone), 2: before the finding, 3: before routing.
+    self.assertEqual(mock_mint.call_count, 3)
+    _, owner, repo = mock_mint.call_args.args
+    self.assertEqual((owner, repo), ("owner", "repo"))
+    self.assertEqual(
+        mock_check_remote_branch_exists.call_args.args[1], "ghs_token_2"
+    )
+    self.assertEqual(mock_push_branch.call_args.kwargs["token"], "ghs_token_3")
+    self.assertEqual(mock_create_pr.call_args.kwargs["token"], "ghs_token_3")
+
 
 if __name__ == "__main__":
   unittest.main()

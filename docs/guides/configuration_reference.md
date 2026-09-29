@@ -17,8 +17,20 @@ when running in Docker or Cloud Run.
 *   `GITHUB_APP_TOKEN` (or `GITHUB_PAT`, `GITHUB_TOKEN`): The authentication token
     used for cloning the repository, authenticating with the GitHub REST API,
     and pushing branches. *Note: One of these three variables is required by the
-    orchestrator. Additional token variables (`GH_TOKEN`, `GITHUB_SECRET`) are
-    also explicitly scrubbed from child subprocesses for security.*
+    orchestrator unless a GitHub App is configured (below). Additional token
+    variables (`GH_TOKEN`, `GITHUB_SECRET`) are also explicitly scrubbed from
+    child subprocesses for security.*
+*   `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` (optional
+    `GITHUB_APP_INSTALLATION_ID`): GitHub App credentials. When any of these is
+    set, the orchestrator signs an App JWT with the PEM private key, exchanges
+    it for an installation access token scoped to the scanned repository, and
+    re-mints the token when less than 10 minutes of its one-hour lifetime
+    remain, so multi-hour scans keep working. The static token variables above
+    are then ignored, and a partial or broken App configuration fails the run
+    rather than falling back to a personal token. Without
+    `GITHUB_APP_INSTALLATION_ID` the installation is looked up from the
+    repository. All three variables are scrubbed from child subprocesses.
+    Commits and pull requests are attributed to the App's bot account.
 
 ### Pipeline Customization
 
