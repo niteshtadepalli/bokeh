@@ -1,5 +1,31 @@
 # CodeMender Orchestrator (Public Preview)
 
+## Relationship to upstream
+
+This repository is a downstream copy of
+[`cloud-ai-fde/codemender-agent`](https://github.com/cloud-ai-fde/codemender-agent)
+("upstream"). It follows upstream `main` and also carries changes that are not
+merged upstream yet. Send generic fixes upstream as well, so the two stay close.
+
+To pick up new upstream changes, merge upstream `main` into a branch and open a
+pull request into `main`. Land it with a merge commit, not a squash or rebase:
+keeping upstream's commits in the history is what keeps later syncs clean.
+
+```bash
+# Once per clone
+git remote add upstream git@github.com:cloud-ai-fde/codemender-agent.git
+
+git fetch origin && git fetch upstream
+git checkout -b sync-upstream origin/main
+git merge upstream/main
+git push origin sync-upstream   # then open the pull request into main
+```
+
+In a checkout where `origin` points at upstream instead, the merge step is
+`git fetch origin && git merge origin/main`.
+
+--------------------------------------------------------------------------------
+
 The CodeMender Orchestrator is an automated, multi-stage execution runner
 designed to run within an engineering team's own infrastructure—both natively as
 **GitHub Actions CI/CD workflows** and within **Google Cloud Platform (GCP Cloud
