@@ -54,8 +54,9 @@ EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 # Never exported, whatever the allow-list says.
 _ALWAYS_DENY = [
-    re.compile(r"(^|/)[^/]*\.tfvars$"),
+    re.compile(r"(^|/)[^/]*\.tfvars(\.json)?$"),
     re.compile(r"(^|/)[^/]*\.tfstate($|\.)"),
+    re.compile(r"(^|/)[^/]*\.tfplan$"),
     re.compile(r"(^|/)\.terraform/"),
     re.compile(r"(^|/)gcs_backend_override\.tf$"),
 ]
@@ -403,6 +404,16 @@ def commit_snapshot(
   base, bare = _open_target(target, branch)
   found, parent_sha = _tgit_ok(base, "rev-parse", "-q", "--verify", f"{ref}^{{commit}}")
   parent = parent_sha if found else None
+  if parent is None:
+    # A target with history but without this branch would get a parentless
+    # commit that breaks the snapshot chain (for example, a clone whose
+    # branch is not called "main"). Make the caller pick the branch.
+    _, branches = _tgit_ok(base, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+    if branches:
+      raise ExportError(
+          f"{target} has history but no branch {branch!r} (branches: {', '.join(branches.split())});"
+          " pass --branch with the branch that holds the previous snapshot"
+      )
 
   _, head = _tgit_ok(base, "symbolic-ref", "-q", "HEAD")
   update_worktree = not bare and head == ref

@@ -300,6 +300,48 @@ class EndToEndTest(unittest.TestCase):
     self.assertEqual(code, 1)
     self.assertIn("never exported", err)
 
+  def test_never_exports_json_tfvars_or_plans_even_if_allowed(self):
+    self.write_src("app/prod.auto.tfvars.json", "{\"secret\": 1}\n")
+    self.write_src("app/saved.tfplan", "plan\n")
+    self.commit_src("more secrets")
+    out_dir = os.path.join(self.tmp, "out")
+    code, out, err = self.export("--dry-run", "--out", out_dir)
+    self.assertEqual(code, 0, err)
+    self.assertNotIn("tfvars.json", out)
+    self.assertNotIn("tfplan", out)
+    self.assertFalse(os.path.exists(os.path.join(out_dir, "app", "saved.tfplan")))
+
+  def test_target_with_history_on_another_branch_is_refused(self):
+    os.makedirs(self.target)
+    run_git(self.target, "init", "-q", "-b", "trunk")
+    with open(os.path.join(self.target, "old.txt"), "w") as f:
+      f.write("previous snapshot\n")
+    run_git(self.target, "add", "-A")
+    run_git(self.target, "commit", "-q", "-m", "old snapshot")
+    code, _, err = self.export(*self.commit_args())
+    self.assertEqual(code, 1)
+    self.assertIn("has history but no branch 'main'", err)
+    self.assertNotEqual(
+        subprocess.run(["git", "-C", self.target, "rev-parse", "-q", "--verify", "refs/heads/main"],
+                       capture_output=True).returncode, 0)
+    # With the right branch, the new snapshot chains onto the old one.
+    old = run_git(self.target, "rev-parse", "trunk")
+    code, _, err = self.export(*self.commit_args(), "--branch", "trunk")
+    self.assertEqual(code, 0, err)
+    self.assertEqual(run_git(self.target, "log", "-1", "--format=%P", "trunk"), old)
+
+
+class RealConfigTest(unittest.TestCase):
+
+  def test_live_deployment_config_is_never_exported(self):
+    allow = export_snapshot.AllowList.parse(
+        export_snapshot._config_lines(os.path.join(export_snapshot.HERE, "allowlist.txt")))
+    self.assertTrue(allow.matches("terraform/gcp/repos.example.yaml"))
+    self.assertTrue(allow.matches("terraform/gcp/deployment.example.yaml"))
+    self.assertFalse(allow.matches("terraform/gcp/repos.yaml"))
+    self.assertFalse(allow.matches("terraform/gcp/deployment.yaml"))
+    self.assertFalse(allow.matches("terraform/gcp/terraform.tfvars.json"))
+
 
 if __name__ == "__main__":
   unittest.main()

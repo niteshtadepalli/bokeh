@@ -42,6 +42,13 @@ docs/examples/github-actions/terraform.yml
 
 # Never: local Terraform variables, state and provider caches
 !**/*.tfvars
+!**/*.tfvars.json
 !**/*.tfstate
 !**/*.tfstate.*
 !**/.terraform/**
+
+# Never: the live deployment configuration. Each copy owns its own
+# repos.yaml and deployment.yaml; snapshots ship only the *.example.yaml files,
+# so merging a new snapshot never conflicts with them.
+!terraform/gcp/repos.yaml
+!terraform/gcp/deployment.yaml

@@ -10,7 +10,8 @@ of the snapshot.
     working tree and uncommitted changes are never used.
 2.  Keeps only the files that [`allowlist.txt`](allowlist.txt) selects.
     Anything not listed is left out, so files that upstream syncs add stay out
-    of the snapshot until someone adds them. Terraform variable files, state
+    of the snapshot until someone adds them. Terraform variable files (including
+    `*.tfvars.json`), state, saved plans
     and provider caches are never exported, whatever the list says.
 3.  Applies [`renames.txt`](renames.txt). The customer README
     (`docs/customer/README.md`) becomes the snapshot's `README.md`, and the
@@ -46,7 +47,10 @@ git -C ~/handoff log --stat -1
 `--target` accepts a non-bare clone, a bare repository, or a missing or empty
 directory (initialised as a new repository). In a non-bare clone with the
 branch checked out, the work tree must be clean; it is updated to the new
-snapshot. The script never pushes.
+snapshot. If the target already has commits but not on `--branch` (default
+`main`), the export stops rather than start a new, unrelated history; pass
+`--branch` with the branch that holds the previous snapshot. The script never
+pushes.
 
 Exit status: 0 on success (including "no changes"), 1 if a check fails or the
 export cannot be built, 2 for usage errors. Check failures name the file, line
