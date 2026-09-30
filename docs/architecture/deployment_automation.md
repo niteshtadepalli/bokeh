@@ -40,7 +40,7 @@ graph TD
             SM[Secret Manager: prefix-github-token]
             RunnerSA[Runner Service Account]
             WorkflowSA[Workflows Service Account]
-            CustomRole[Custom Role: Workflow Invoker]
+            RunRoles[Predefined Cloud Run roles: Workflow job runner]
         end
 
         subgraph Storage & Registry
@@ -82,9 +82,12 @@ graph TD
     not conflict with Terraform, while still allowing updates to environment
     variables and resource limits.
 *   **Least-Privilege Security**: Service accounts are granted bucket-level
-    access only. The Workflows engine uses a custom role to trigger and monitor
-    the job, bound specifically to the runner job resource rather than
-    project-wide.
+    access only. The Workflows engine triggers and monitors the jobs through
+    `roles/run.jobsExecutorWithOverrides` and `roles/run.viewer`, bound at the
+    project level so it can poll regional operations. (Earlier versions used a
+    per-deployment custom role with the same permissions; see
+    `docs/guides/gitops_cloud_build.md` for removing it from an existing
+    deployment.)
 *   **Optional Private Egress (VPC/NAT)**: A boolean flag (`create_vpc_and_nat`)
     enables routing all Cloud Run traffic (`egress = "ALL_TRAFFIC"`) through a
     Serverless VPC Access Connector and Cloud NAT. The VPC connector CIDR is
@@ -112,9 +115,14 @@ graph TD
     *   *Rationale*: Creating a project requires Org/Folder level admin
         permissions, limiting usability.
 *   **Managing the Cloud Build Trigger in Terraform**:
-    *   *Decision*: **Ruled Out**.
-    *   *Rationale*: Programmatic connection to GitHub via Cloud Build requires
-        pre-existing manual OAuth configurations.
+    *   *Decision*: **Revisited; now supported in `terraform/bootstrap/`**.
+    *   *Rationale*: Connecting Cloud Build to GitHub still needs a one-time
+        browser authorization and a GitHub App installation, so that step
+        stays manual. Once the repository is linked to a 2nd-gen connection,
+        the separate bootstrap stack takes the linked repository's resource
+        name and manages the triggers, their service accounts and the state
+        bucket. The deployment stack (`terraform/gcp/`) still manages no
+        triggers. See `docs/guides/gitops_cloud_build.md`.
 *   **Enforcing VPC/NAT by Default**:
     *   *Decision*: **Ruled Out**.
     *   *Rationale*: Serverless VPC Access Connectors carry a minimum monthly
@@ -122,9 +130,12 @@ graph TD
         without incurring network infra costs.
 *   **Using `roles/run.developer` for Workflows**:
     *   *Decision*: **Ruled Out**.
-    *   *Rationale*: Too broad. We use a Custom IAM Role with only
-        execution-related permissions (`run.jobs.run`, `run.executions.get`,
-        etc.) bound at the resource level.
+    *   *Rationale*: Too broad: it can also create, update and delete jobs and
+        services. The workflow service account gets
+        `roles/run.jobsExecutorWithOverrides` (run jobs, with overrides, and
+        cancel executions) and `roles/run.viewer` (read jobs, executions and
+        operations). These replaced an equivalent custom role, which needed
+        `roles/iam.roleAdmin` to manage from a pipeline.
 
 --------------------------------------------------------------------------------
 
@@ -199,14 +210,13 @@ We will create a new directory `terraform/gcp/` containing the following files:
 *   Creates SAs for runner (`${var.resource_prefix}-runner-sa`), workflow
     (`${var.resource_prefix}-workflows-sa`), and scheduler
     (`${var.resource_prefix}-scheduler-sa`).
-*   Creates custom `google_project_iam_custom_role` with permissions:
-    *   `run.jobs.run`
-    *   `run.jobs.runWithOverrides`
-    *   `run.jobs.get`
-    *   `run.operations.get` (Required for the manual polling loop using v2
-        operations API)
-    *   `run.executions.get`
-    *   `run.executions.list`
+*   Grants the workflow SA two predefined roles that cover running and
+    monitoring the jobs:
+    *   `roles/run.jobsExecutorWithOverrides`: `run.jobs.run`,
+        `run.jobs.runWithOverrides`, `run.executions.cancel`
+    *   `roles/run.viewer`: includes `run.jobs.get`, `run.operations.get`
+        (required for the manual polling loop using the v2 operations API),
+        `run.executions.get` and `run.executions.list`
 *   Binds bucket-level roles:
     *   Runner SA: `roles/storage.objectAdmin` on Reports bucket.
     *   Workflow SA: `roles/storage.objectViewer` on Reports bucket (required
@@ -215,8 +225,8 @@ We will create a new directory `terraform/gcp/` containing the following files:
     (required for `signBlob` / GCS signed URL generation).
 *   Binds `roles/secretmanager.secretAccessor` on the GitHub token secret to the
     Runner SA.
-*   Grants the custom job runner role to the workflow SA **at the project
-    level** (required to poll top-level regional Operations
+*   Grants those roles to the workflow SA **at the project level** (required
+    to poll top-level regional Operations
     `projects/.../locations/.../operations/*`).
 *   Grants `roles/iam.serviceAccountUser` on the runner SA to the workflow SA.
 *   Grants `roles/workflows.invoker` to the scheduler SA at project level.
