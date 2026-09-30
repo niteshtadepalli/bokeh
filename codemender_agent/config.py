@@ -19,17 +19,23 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
 import yaml
 
 from codemender_agent.utils import is_dry_run
 from codemender_agent.vcs.git import parse_repo_owner_and_name
 from codemender_agent.vcs.git import sanitize_git_url
+from codemender_agent.vcs.github import GitHubUnauthorizedError
+from codemender_agent.vcs.github import get_default_branch
+from codemender_agent.vcs.github_app import GitHubAppAuthError
 from codemender_agent.vcs.github_app import GitHubAppCredentials
 from codemender_agent.vcs.github_app import get_installation_token
+from codemender_agent.vcs.github_app import invalidate_installation_token
 
 logger = logging.getLogger("codemender-orchestrator")
+
+T = TypeVar("T")
 
 SENSITIVE_ENV_VARS = [
     "GITHUB_APP_TOKEN",
@@ -638,6 +644,102 @@ def refresh_github_token(config: OrchestratorConfig, token: str) -> str:
     return token
   _, fresh_token = get_github_credentials(config=config)
   return fresh_token
+
+
+def reset_github_token(
+    config: OrchestratorConfig, rejected_token: str
+) -> Optional[str]:
+  """Discards an installation token GitHub rejected and returns a new one.
+
+  Only the cached token equal to `rejected_token` is discarded, so several
+  callers reporting the same stale token cause one re-mint.
+
+  Returns:
+    A freshly minted installation token, or None when no GitHub App is
+    configured (a static token cannot be replaced).
+
+  Raises:
+    GitHubAppAuthError: A new token could not be minted.
+  """
+  if not github_app_configured(config):
+    return None
+  credentials = GitHubAppCredentials.from_values(
+      config.github_app_id,
+      config.github_app_private_key,
+      config.github_app_installation_id,
+  )
+  owner, repo = parse_repo_owner_and_name(
+      sanitize_git_url((config.repo_url or "").strip())
+  )
+  invalidate_installation_token(credentials, owner, repo, rejected_token)
+  return refresh_github_token(config, rejected_token)
+
+
+def call_with_github_token(
+    config: OrchestratorConfig,
+    token: str,
+    call: Callable[[str], T],
+) -> Tuple[T, str]:
+  """Runs `call(token)`, recovering once from a token GitHub rejects.
+
+  On `GitHubUnauthorizedError` (HTTP 401) the installation token is
+  discarded, a new one is minted and `call` runs once more with it. A second
+  401, a static token (which cannot be replaced) or a failed re-mint
+  propagates, so the caller fails closed instead of acting on a guess.
+
+  Returns:
+    Tuple of (call result, token that produced it). Callers should keep
+    using the returned token.
+  """
+  try:
+    return call(token), token
+  except GitHubUnauthorizedError as e:
+    fresh_token = reset_github_token(config, token)
+    if not fresh_token:
+      raise
+    logger.warning(
+        "GitHub rejected the installation token (%s); retrying once with a"
+        " newly minted token.",
+        e,
+    )
+    return call(fresh_token), fresh_token
+
+
+def read_default_branch(
+    config: OrchestratorConfig,
+    token: str,
+    owner: str,
+    repo: str,
+    lookup: Callable[..., str] = get_default_branch,
+) -> Tuple[Optional[str], str]:
+  """Reads the default branch, replacing a rejected App token once.
+
+  For uploads that must target the right branch (SARIF). When GitHub keeps
+  rejecting the token, or a new token cannot be minted, the error is logged
+  and None is returned so the caller skips the upload instead of guessing
+  "main". Other API failures keep `get_default_branch`'s "main" fallback.
+
+  Args:
+    lookup: `get_default_branch`, or a stand-in with the same signature.
+
+  Returns:
+    Tuple of (branch or None, token to keep using).
+  """
+  try:
+    return call_with_github_token(
+        config,
+        token,
+        lambda tok: lookup(tok, owner, repo, fail_on_unauthorized=True),
+    )
+  except (GitHubUnauthorizedError, GitHubAppAuthError) as e:
+    logger.error(
+        "Could not read the default branch of %s/%s because GitHub rejected"
+        " the token: %s",
+        owner,
+        repo,
+        e,
+    )
+    return None, token
 
 
 def detect_build_command(repo_dir: str) -> Optional[str]:

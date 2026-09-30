@@ -40,10 +40,12 @@ from codemender_agent.runners.aggregate import has_sarif_results
 from codemender_agent.runners.aggregate import transform_json_to_sarif
 # Configuration injection and credentials
 from codemender_agent.config import OrchestratorConfig
+from codemender_agent.config import call_with_github_token
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import github_app_configured
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import read_default_branch
 from codemender_agent.config import refresh_github_token
 # Storage signed URL and upload utilities
 from codemender_agent.storage import generate_signed_url
@@ -612,6 +614,68 @@ def _scan_repository(
   return findings, scan_token_usage
 
 
+def _find_remote_duplicate(
+    clean_repo_url: str,
+    token: str,
+    repo_dir: str,
+    finding_id: str,
+    branch_name: str,
+    file_path: str,
+    vuln_type: str,
+    start_line: int,
+) -> any:
+  """Returns the open PR (URL or True) already covering a finding, else False.
+
+  A remote fix branch without an open PR is a dead branch and is pruned so the
+  finding can be remediated afresh.
+
+  Raises:
+    GitHubUnauthorizedError: GitHub rejected the token.
+  """
+  if check_remote_branch_exists(clean_repo_url, token, branch_name, cwd=repo_dir):
+    has_active_pr = is_duplicate_pr(
+        clean_repo_url,
+        token,
+        file_path,
+        vuln_type,
+        start_line,
+        head_branch=branch_name,
+    )
+    if has_active_pr:
+      logger.info(
+          "Skipping finding %s as active PR exists for branch %s.",
+          finding_id,
+          branch_name,
+      )
+      return has_active_pr
+    logger.info(
+        "Dead branch detected: %s exists on remote but has no active open PR."
+        " Pruning dead branch to allow fresh remediation.",
+        branch_name,
+    )
+    delete_remote_branch(clean_repo_url, token, branch_name, cwd=repo_dir)
+    return False
+
+  dup_pr = is_duplicate_pr(
+      clean_repo_url,
+      token,
+      file_path,
+      vuln_type,
+      start_line,
+      head_branch=branch_name,
+  )
+  if dup_pr:
+    logger.info(
+        "An open PR covering %s in %s near line %d already exists. Skipping"
+        " finding %s.",
+        vuln_type,
+        file_path,
+        start_line,
+        finding_id,
+    )
+  return dup_pr
+
+
 def _filter_findings(
     findings: list[dict[str, any]],
     repo_url: str,
@@ -621,11 +685,17 @@ def _filter_findings(
     is_pr_scan: bool = False,
     pr_base_ref: Optional[str] = None,
     dry_run: bool = False,
+    config: Optional[OrchestratorConfig] = None,
 ) -> tuple[list[dict[str, any]], list[str], list[str]]:
   """Filters findings against PR modified hunks (if PR scan) and remote duplicates.
 
   A dry run skips the remote duplicate checks (and never prunes a dead remote
   branch), so every run against the same commit keeps the same findings.
+
+  With `config`, the GitHub token is re-read before each finding's remote
+  checks (a GitHub App token is re-minted when close to expiry), and a token
+  GitHub rejects with 401 is replaced once. A second rejection raises
+  `GitHubUnauthorizedError` rather than guessing that no duplicate exists.
   """
   active_findings = []
   skipped_finding_ids = []
@@ -720,55 +790,25 @@ def _filter_findings(
     branch_name = get_finding_branch_name(file_path, vuln_type, start_line)
 
     check_remote = not force_overwrite and not dry_run
-    if check_remote and check_remote_branch_exists(
-        clean_repo_url, token, branch_name, cwd=repo_dir
-    ):
-      has_active_pr = is_duplicate_pr(
-          clean_repo_url,
-          token,
-          file_path,
-          vuln_type,
-          start_line,
-          head_branch=branch_name,
-      )
-      if has_active_pr:
-        logger.info(
-            "Skipping finding %s as active PR exists for branch %s.",
+    if check_remote:
+      def find_duplicate(tok: str) -> any:
+        return _find_remote_duplicate(
+            clean_repo_url,
+            tok,
+            repo_dir,
             finding_id,
             branch_name,
-        )
-        finding["Status"] = "SKIPPED_DUPLICATE"
-        finding["status"] = "SKIPPED_DUPLICATE"
-        if isinstance(has_active_pr, str) and has_active_pr.startswith("http"):
-          finding["pr_url"] = has_active_pr
-        skipped_finding_ids.append(finding_id)
-        continue
-      else:
-        logger.info(
-            "Dead branch detected: %s exists on remote but has no active open PR."
-            " Pruning dead branch to allow fresh remediation.",
-            branch_name,
-        )
-        delete_remote_branch(clean_repo_url, token, branch_name, cwd=repo_dir)
-
-    elif check_remote:
-      dup_pr = is_duplicate_pr(
-          clean_repo_url,
-          token,
-          file_path,
-          vuln_type,
-          start_line,
-          head_branch=branch_name,
-      )
-      if dup_pr:
-        logger.info(
-            "An open PR covering %s in %s near line %d already exists. Skipping"
-            " finding %s.",
-            vuln_type,
             file_path,
+            vuln_type,
             start_line,
-            finding_id,
         )
+
+      if config is not None:
+        token = refresh_github_token(config, token)
+        dup_pr, token = call_with_github_token(config, token, find_duplicate)
+      else:
+        dup_pr = find_duplicate(token)
+      if dup_pr:
         finding["Status"] = "SKIPPED_DUPLICATE"
         finding["status"] = "SKIPPED_DUPLICATE"
         if isinstance(dup_pr, str) and dup_pr.startswith("http"):
@@ -878,6 +918,80 @@ def _partition_findings(
     start += size
 
   return partitions
+
+
+FIND_CHECKPOINT_DIR = "checkpoint"
+
+
+def _upload_find_checkpoint(
+    findings: list[dict[str, any]],
+    workspace_dir: str,
+    bucket_name: str,
+    scan_id: str,
+    target_sha: Optional[str],
+    scan_token_usage: dict[str, dict[str, int]],
+    wiz_metadata: Optional[dict] = None,
+    deep_summaries: Optional[list[dict]] = None,
+) -> bool:
+  """Saves the raw find results to GCS before Stage 1 talks to GitHub again.
+
+  After `cm find`, which can run for hours, Stage 1 needs a freshly minted
+  GitHub token for duplicate checks and statuses. If minting or a GitHub call
+  fails there, the stage exits before the normal state upload. This writes
+  the unfiltered findings and the scanner's state.db to
+  `scans/<scan_id>/checkpoint/` first so the scan's results are not lost.
+
+  Best effort: a failure is logged and never fails the scan. The normal
+  manifest and workspace upload later in the stage is unchanged.
+
+  Returns:
+    True if every checkpoint file was uploaded.
+  """
+  prefix = f"scans/{scan_id}/{FIND_CHECKPOINT_DIR}"
+  try:
+    findings_path = os.path.join(workspace_dir, "find_checkpoint.json")
+    with open(findings_path, "w", encoding="utf-8") as f:
+      json.dump(
+          {
+              "scan_id": scan_id,
+              "target_sha": target_sha,
+              "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "findings_count": len(findings),
+              "token_usage": scan_token_usage or {},
+              "wiz": wiz_metadata or {},
+              "deep_scan": deep_summaries or [],
+              "findings": findings,
+          },
+          f,
+          indent=2,
+          default=str,
+      )
+    saved = upload_file_to_gcs(
+        findings_path, bucket_name, f"{prefix}/findings.json"
+    )
+    state_db_path = os.path.expanduser("~/.codemender/state.db")
+    if os.path.exists(state_db_path):
+      saved = (
+          upload_file_to_gcs(state_db_path, bucket_name, f"{prefix}/state.db")
+          and saved
+      )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning("Could not save the find checkpoint (non-fatal): %s", e)
+    return False
+  if saved:
+    logger.info(
+        "Saved %d finding(s) to gs://%s/%s/ before the GitHub phase.",
+        len(findings),
+        bucket_name,
+        prefix,
+    )
+  else:
+    logger.warning(
+        "Could not upload the find checkpoint to gs://%s/%s/ (non-fatal).",
+        bucket_name,
+        prefix,
+    )
+  return bool(saved)
 
 
 def _save_and_upload_state(
@@ -1239,10 +1353,41 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   ctx.apply_wiz(wiz_metadata)
   wiz_note = wiz_summary_line(wiz_metadata)
 
+  # Save the find results before any GitHub call. Everything from here on
+  # needs a GitHub token re-read after a scan that may have run for hours; if
+  # that or a later GitHub call fails, the findings are still in GCS.
+  checkpoint_saved = False
+  if findings and config.storage_mode == "gcs":
+    checkpoint_saved = _upload_find_checkpoint(
+        findings,
+        workspace_dir,
+        bucket_name,
+        scan_id,
+        target_sha,
+        scan_token_usage,
+        wiz_metadata=wiz_metadata,
+        deep_summaries=deep_summaries,
+    )
+
   # The scan can run for hours, longer than a GitHub App installation token
   # lives. Re-read the token before the GitHub calls below; a static token is
   # returned unchanged.
-  token = refresh_github_token(config, token)
+  try:
+    token = refresh_github_token(config, token)
+  except Exception:
+    if checkpoint_saved:
+      saved_note = (
+          f"The find results were saved to gs://{bucket_name}/scans/"
+          f"{scan_id}/{FIND_CHECKPOINT_DIR}/."
+      )
+    elif findings:
+      saved_note = "The find results could not be saved."
+    else:
+      saved_note = "The scan found nothing, so no results are lost."
+    logger.critical(
+        "Could not obtain a GitHub token after the scan. %s", saved_note
+    )
+    raise
 
   # 7. Handle case where repository scan returns zero findings
   if not findings:
@@ -1321,19 +1466,26 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
       )
       if sarif_path and os.path.exists(sarif_path):
         if has_sarif_results(sarif_path) or config.upload_empty_sarif:
-          scan_ref = (
-              f"refs/heads/{config.target_branch}"
-              if config.target_branch
-              else f"refs/heads/{get_default_branch(token, owner, repo_name)}"
-          )
-          upload_sarif_to_code_scanning(
-              token=token,
-              owner=owner,
-              repo=repo_name,
-              sarif_path=sarif_path,
-              commit_sha=target_sha,
-              ref=scan_ref,
-          )
+          if config.target_branch:
+            scan_ref = f"refs/heads/{config.target_branch}"
+          else:
+            default_br, token = read_default_branch(
+                config, token, owner, repo_name, lookup=get_default_branch
+            )
+            scan_ref = f"refs/heads/{default_br}" if default_br else None
+          if scan_ref:
+            upload_sarif_to_code_scanning(
+                token=token,
+                owner=owner,
+                repo=repo_name,
+                sarif_path=sarif_path,
+                commit_sha=target_sha,
+                ref=scan_ref,
+            )
+          else:
+            logger.error(
+                "Not uploading report.sarif: the target branch is unknown."
+            )
         else:
           logger.info(
               "Skipping GitHub Code Scanning SARIF upload because report.sarif contains 0 results "
@@ -1363,6 +1515,7 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
       is_pr_scan=config.is_pr_scan,
       pr_base_ref=config.pr_base_ref,
       dry_run=config.dry_run,
+      config=config,
   )
 
   # 9. Soft-delete skipped & ignored findings in local state.db for telemetry before archiving
@@ -1532,19 +1685,26 @@ def _run_scan_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
       )
       if sarif_path and os.path.exists(sarif_path):
         if has_sarif_results(sarif_path) or config.upload_empty_sarif:
-          scan_ref = (
-              f"refs/heads/{config.target_branch}"
-              if config.target_branch
-              else f"refs/heads/{get_default_branch(token, owner, repo_name)}"
-          )
-          upload_sarif_to_code_scanning(
-              token=token,
-              owner=owner,
-              repo=repo_name,
-              sarif_path=sarif_path,
-              commit_sha=target_sha,
-              ref=scan_ref,
-          )
+          if config.target_branch:
+            scan_ref = f"refs/heads/{config.target_branch}"
+          else:
+            default_br, token = read_default_branch(
+                config, token, owner, repo_name, lookup=get_default_branch
+            )
+            scan_ref = f"refs/heads/{default_br}" if default_br else None
+          if scan_ref:
+            upload_sarif_to_code_scanning(
+                token=token,
+                owner=owner,
+                repo=repo_name,
+                sarif_path=sarif_path,
+                commit_sha=target_sha,
+                ref=scan_ref,
+            )
+          else:
+            logger.error(
+                "Not uploading report.sarif: the target branch is unknown."
+            )
         else:
           logger.info(
               "Skipping GitHub Code Scanning SARIF upload because report.sarif contains 0 results "

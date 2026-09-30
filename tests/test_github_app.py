@@ -391,13 +391,22 @@ class TestInstallationTokenProvider(unittest.TestCase):
     self.assertEqual(self.mock_sleep.call_count, 2)
 
   def test_persistent_server_errors_raise_auth_error(self):
+    # Retries back off until the retry budget is spent; the fake sleep
+    # advances the clock so the budget runs out.
+    self.mock_sleep.side_effect = lambda seconds: setattr(
+        self.clock, "now", self.clock.now + seconds
+    )
+    started = self.clock.now
     provider, session = self._provider(
-        [_FakeResponse(503, {"message": "Unavailable"})] * 3,
+        [_FakeResponse(503, {"message": "Unavailable"})] * 50,
         installation_id=77,
     )
     with self.assertRaisesRegex(GitHubAppAuthError, "octo-org/octo-repo"):
       provider.get_token()
-    self.assertEqual(len(session.calls), 3)
+    self.assertGreater(len(session.calls), 3)
+    self.assertAlmostEqual(
+        self.clock.now - started, github_app.MINT_RETRY_BUDGET_SECONDS
+    )
 
   def test_response_without_token_raises(self):
     provider, _ = self._provider(

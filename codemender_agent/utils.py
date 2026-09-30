@@ -445,8 +445,21 @@ def build_cm_command(
   return [arg for arg in cmd if arg is not None]
 
 
+def is_unauthorized_http_error(error: BaseException) -> bool:
+  """Whether `error` is an HTTP 401 response from `raise_for_status`."""
+  response = getattr(error, "response", None)
+  return (
+      isinstance(error, requests.HTTPError)
+      and getattr(response, "status_code", None) == 401
+  )
+
+
 def retry_on_exception(max_tries=3, initial_delay=1, backoff_factor=2):
-  """Decorator to retry transient network/command errors with exponential backoff."""
+  """Decorator to retry transient network/command errors with exponential backoff.
+
+  HTTP 401 is not retried: the credential was rejected, and sending the same
+  one again cannot succeed. The caller has to obtain a new token instead.
+  """
 
   def decorator(func):
     @wraps(func)
@@ -456,7 +469,7 @@ def retry_on_exception(max_tries=3, initial_delay=1, backoff_factor=2):
         try:
           return func(*args, **kwargs)
         except (requests.RequestException, subprocess.CalledProcessError) as e:
-          if attempt == max_tries:
+          if attempt == max_tries or is_unauthorized_http_error(e):
             raise
           logger.warning(
               "Attempt %d failed for %s: %s. Retrying in %d seconds...",

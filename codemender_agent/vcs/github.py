@@ -23,7 +23,7 @@ import time
 from typing import Any, Dict, List, Optional, Set
 
 import requests
-from codemender_agent.utils import is_dry_run, retry_on_exception, run_command
+from codemender_agent.utils import is_dry_run, is_unauthorized_http_error, retry_on_exception, run_command
 from codemender_agent.vcs.git import (
     get_git_auth_header,
     normalize_repo_relative_path,
@@ -36,6 +36,16 @@ logger = logging.getLogger("codemender-orchestrator")
 
 STATUS_CONTEXT_PR = "CodeMender / Security Gate"
 STATUS_CONTEXT_SCHEDULED = "CodeMender / Nightly Scan"
+
+
+class GitHubUnauthorizedError(RuntimeError):
+  """GitHub rejected the token with HTTP 401 (expired, revoked or invalid).
+
+  Raised by the lookups whose fallback would otherwise silently produce a
+  wrong answer (no duplicate pull request, a "main" default branch). Callers
+  holding a GitHub App installation token can discard it, mint a new one and
+  retry once; see `config.call_with_github_token`.
+  """
 
 
 def _skip_for_dry_run(action: str) -> bool:
@@ -85,6 +95,10 @@ def check_remote_branch_exists(
   """Checks if a branch already exists on the remote repository.
 
   Always False in a dry run, which skips remote duplicate checks.
+
+  Raises:
+    GitHubUnauthorizedError: GitHub rejected the token. The git fallback
+      would send the same token, so it is not attempted.
   """
   if _skip_for_dry_run(f"remote branch check for {branch_name}"):
     return False
@@ -96,6 +110,10 @@ def check_remote_branch_exists(
     if res is not None:
       return res
   except Exception as e:
+    if is_unauthorized_http_error(e):
+      raise GitHubUnauthorizedError(
+          f"GitHub rejected the token while checking branch {branch_name}: {e}"
+      ) from e
     logger.warning(
         "GitHub API branch check failed after retries (%s), falling back to"
         " git ls-remote",
@@ -243,11 +261,28 @@ def _fetch_default_branch_via_api(token: str, owner: str, repo: str) -> str:
   return resp.json().get("default_branch", "main")
 
 
-def get_default_branch(token: str, owner: str, repo: str) -> str:
-  """Gets the default branch name for a repository via GitHub API or defaults to main."""
+def get_default_branch(
+    token: str, owner: str, repo: str, fail_on_unauthorized: bool = False
+) -> str:
+  """Gets the default branch name for a repository via GitHub API or defaults to main.
+
+  Args:
+    fail_on_unauthorized: Raise instead of falling back to "main" when GitHub
+      rejects the token, so the caller can replace the token and retry
+      rather than silently target the wrong branch.
+
+  Raises:
+    GitHubUnauthorizedError: GitHub rejected the token and
+      `fail_on_unauthorized` is set.
+  """
   try:
     return _fetch_default_branch_via_api(token, owner, repo)
   except Exception as e:
+    if fail_on_unauthorized and is_unauthorized_http_error(e):
+      raise GitHubUnauthorizedError(
+          f"GitHub rejected the token while reading the default branch of"
+          f" {owner}/{repo}: {e}"
+      ) from e
     logger.warning(
         "Could not determine default branch via API after retries: %s", e
     )
@@ -283,8 +318,11 @@ def _check_duplicate_pr_api(
   if head_branch:
     target_url = f"https://api.github.com/repos/{owner}/{repo}/pulls?head={owner}:{head_branch}&state=open"
     resp = requests.get(target_url, headers=headers, timeout=15)
-    if resp.status_code == 403 and any(
-        msg in resp.text.lower() for msg in ["rate limit", "abuse detection"]
+    if resp.status_code == 401 or (
+        resp.status_code == 403
+        and any(
+            msg in resp.text.lower() for msg in ["rate limit", "abuse detection"]
+        )
     ):
       resp.raise_for_status()
     # Check if a pull request exists matching this exact head branch
@@ -357,6 +395,10 @@ def is_duplicate_pr(
   """Checks if an open PR already exists for the same vulnerability near the same line.
 
   Always False in a dry run, which skips remote duplicate checks.
+
+  Raises:
+    GitHubUnauthorizedError: GitHub rejected the token. Assuming "no
+      duplicate" here could open a second pull request for the same finding.
   """
   if _skip_for_dry_run(f"open pull request check for {file_path}"):
     return False
@@ -365,6 +407,11 @@ def is_duplicate_pr(
         repo_url, token, file_path, vuln_type, start_line, head_branch=head_branch
     )
   except Exception as e:
+    if is_unauthorized_http_error(e):
+      raise GitHubUnauthorizedError(
+          f"GitHub rejected the token while checking for an open pull request"
+          f" covering {file_path}: {e}"
+      ) from e
     logger.warning(
         "GitHub API check for duplicate PR failed after retries (%s), assuming no duplicate PR.",
         e,
