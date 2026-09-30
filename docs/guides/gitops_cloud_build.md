@@ -356,8 +356,8 @@ pipeline apply is in progress.
 For a deployment created by hand with local state:
 
 1.  Run the bootstrap (steps 1 and 2) with the deployment's `resource_prefix`.
-2.  Move the state into the bucket, from the directory that holds the current
-    `terraform.tfstate`:
+2.  Move the state into the bucket. Run this from the repository root, with the
+    current `terraform.tfstate` in `terraform/gcp`:
 
     ```bash
     cat > terraform/gcp/gcs_backend_override.tf <<'EOF'
