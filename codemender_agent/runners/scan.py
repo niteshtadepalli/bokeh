@@ -36,6 +36,7 @@ from codemender_agent.config import OrchestratorConfig
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import is_presubmit_pipeline
 # Storage signed URL and upload utilities
 from codemender_agent.storage import generate_signed_url
 from codemender_agent.storage import upload_file_to_gcs
@@ -909,7 +910,7 @@ def _save_and_upload_state(
 
 def run_scan_pipeline() -> None:
   """Executes Stage 1: Scan repository, filter, partition, and upload state."""
-  if os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true":
+  if is_presubmit_pipeline():
     execute_stage1_presubmit_scan()
     return
 
