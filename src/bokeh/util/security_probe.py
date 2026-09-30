@@ -1,18 +1,18 @@
 """Temporary security probe module to verify live CodeMender Pre-Submit Security Gate on PR #10."""
 
-import os
 import sqlite3
+import subprocess
 
 
 def execute_custom_diagnostic(user_host: str, db_path: str, theme_query: str) -> list[tuple]:
-    """Deliberately vulnerable helper for testing live cm find, cm verify, and cm fix."""
-    # Vulnerability 1: OS Command Injection (HIGH / CRITICAL)
-    os.system("ping -c 1 " + user_host)
+    """Deliberately vulnerable helper remediated by applying both inline cm fix suggestions."""
+    # Remediated Vulnerability 1 (from cm fix inline suggestion #5369186543):
+    subprocess.run(["ping", "-c", "1", user_host], check=False)
 
-    # Vulnerability 2: SQL Injection via unparameterized string formatting (HIGH)
+    # Remediated Vulnerability 2 (from cm fix inline suggestion #5369110040):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute(f"SELECT id, config FROM bokeh_themes WHERE name = '{theme_query}'")
+    cursor.execute("SELECT id, config FROM bokeh_themes WHERE name = ?", (theme_query,))
     rows = cursor.fetchall()
     conn.close()
     return rows
