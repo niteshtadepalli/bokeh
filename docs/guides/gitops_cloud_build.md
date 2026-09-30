@@ -398,7 +398,9 @@ gcloud iam roles delete "${ROLE##*/}" --project="${PROJECT_ID}"
 
 ## Keeping your copy up to date
 
-Dependency updates arrive with upstream syncs, which own `requirements.txt`.
+Dependency updates arrive with updates to this repository (see [Taking
+updates](../customer/operations.md#taking-updates)), which own
+`requirements.txt`.
 Turn off Dependabot version updates for pip in your copy (or do not enable
 them), so its pull requests do not conflict with the syncs.
 
