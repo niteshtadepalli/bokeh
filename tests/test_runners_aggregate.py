@@ -456,7 +456,7 @@ class TestAggregateRunner(unittest.TestCase):
       f.write("<!DOCTYPE html><html><head><title>Report</title></head><body><h1>Scan Summary</h1></body></html>")
 
     token_totals = {
-        "gemini-2.5-flash": {
+        "test-model-a": {
             "in_tokens": 12500,
             "out_tokens": 800,
             "total_tokens": 13300,
@@ -472,7 +472,7 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertIn("12,500", content)
     self.assertIn("800", content)
     self.assertIn("13,300", content)
-    self.assertIn("(Model: <code>gemini-2.5-flash</code>)", content)
+    self.assertIn("(Model: <code>test-model-a</code>)", content)
     self.assertNotIn("Per-Model Breakdown", content)
 
   def test_inject_token_metrics_into_html_default_model(self):
@@ -505,12 +505,12 @@ class TestAggregateRunner(unittest.TestCase):
       f.write("<!DOCTYPE html><html><head><title>Report</title></head><body><h1>Scan Summary</h1></body></html>")
 
     token_totals = {
-        "gemini-2.5-flash": {
+        "test-model-a": {
             "in_tokens": 10000,
             "out_tokens": 500,
             "total_tokens": 10500,
         },
-        "gemini-2.5-pro": {
+        "test-model-b": {
             "in_tokens": 5000,
             "out_tokens": 300,
             "total_tokens": 5300,
@@ -529,9 +529,9 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertIn("15,800", content)
     # Table breakdown
     self.assertIn("Per-Model Breakdown", content)
-    self.assertIn("gemini-2.5-flash", content)
+    self.assertIn("test-model-a", content)
     self.assertIn("10,000", content)
-    self.assertIn("gemini-2.5-pro", content)
+    self.assertIn("test-model-b", content)
     self.assertIn("5,000", content)
 
   @patch("codemender_agent.runners.aggregate._generate_and_upload_report")
@@ -567,7 +567,7 @@ class TestAggregateRunner(unittest.TestCase):
         "scans/test-scan-123/worker_1_state.db",
     ]
     mock_aggregate_tokens.return_value = {
-        "gemini-2.5-flash": {
+        "test-model-a": {
             "in_tokens": 15000,
             "out_tokens": 900,
             "total_tokens": 15900,
@@ -590,7 +590,7 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertEqual(
         mock_generate_report.call_args.kwargs.get("token_totals"),
         {
-            "gemini-2.5-flash": {
+            "test-model-a": {
                 "in_tokens": 15000,
                 "out_tokens": 900,
                 "total_tokens": 15900,
@@ -652,7 +652,7 @@ class TestAggregateRunner(unittest.TestCase):
           owner="my-org",
           repo_name="my-repo",
           target_sha="abc123456789",
-          token_totals={"gemini-2.5-flash": {"in_tokens": 100, "out_tokens": 50, "total_tokens": 150}},
+          token_totals={"test-model-a": {"in_tokens": 100, "out_tokens": 50, "total_tokens": 150}},
           finding_prs={"fid-1": "https://github.com/my-org/my-repo/pull/42"},
       )
 
@@ -670,7 +670,7 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertIn("SKIPPED_DUPLICATE", summary_md)
     self.assertIn("Interactive Security Report & Export Artifacts", summary_md)
     self.assertIn("150", summary_md)
-    self.assertIn("| `gemini-2.5-flash` | 100 | 50 | 150 |", summary_md)
+    self.assertIn("| `test-model-a` | 100 | 50 | 150 |", summary_md)
     self.assertTrue(os.path.exists(summary_file))
 
   def test_render_step_summary_truncation(self):
@@ -1015,7 +1015,7 @@ class TestAggregateRunner(unittest.TestCase):
     summary_md, count = _render_step_summary(
         base_db,
         cfg,
-        owner="ilbzzz",
+        owner="example-org",
         repo_name="juice-shop-local",
         target_sha="1e677199",
     )
@@ -1117,7 +1117,7 @@ class TestAggregateRunner(unittest.TestCase):
         json_path=json_path,
         repo_dir=repo_dir,
         skipped_finding_ids={"fid-dup-2"},
-        finding_prs={"fid-xss-1": "https://github.com/carloschulo/cm-test/pull/5"},
+        finding_prs={"fid-xss-1": "https://github.com/example-org/example-repo/pull/5"},
         is_pr_scan=False,
     )
     self.assertTrue(ok)
@@ -1135,7 +1135,7 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertTrue(rules[0]["id"].startswith("CWE-79/"))
     self.assertEqual(rules[0]["properties"]["security-severity"], "8.0")
     self.assertIn("external/cwe/cwe-79", rules[0]["properties"]["tags"])
-    self.assertIn("https://github.com/carloschulo/cm-test/pull/5", rules[0]["help"]["markdown"])
+    self.assertIn("https://github.com/example-org/example-repo/pull/5", rules[0]["help"]["markdown"])
     self.assertIn("Fix PR #5", rules[0]["help"]["markdown"])
 
     # Check exact region startLine=42, endLine=45 and concise message
@@ -1156,13 +1156,13 @@ class TestAggregateRunner(unittest.TestCase):
     _inject_token_metrics_into_html(
         html_path,
         {
-            "gemini-3.1-pro-preview": {"in_tokens": 25000, "out_tokens": 1500, "total_tokens": 26500},
-            "gemini-3.8-flash": {"in_tokens": 40000, "out_tokens": 2000, "total_tokens": 42000},
+            "test-model-c": {"in_tokens": 25000, "out_tokens": 1500, "total_tokens": 26500},
+            "test-model-d": {"in_tokens": 40000, "out_tokens": 2000, "total_tokens": 42000},
         },
     )
     with open(html_path, "r", encoding="utf-8") as f:
       html_out = f.read()
-    self.assertIn("Models: <code>gemini-3.1-pro-preview</code>, <code>gemini-3.8-flash</code>", html_out)
+    self.assertIn("Models: <code>test-model-c</code>, <code>test-model-d</code>", html_out)
 
     # 4. Verify rules: null with results: [] is rejected by is_sarif_complete and enriched when report.json has findings
     null_rules_sarif = {
@@ -1188,7 +1188,7 @@ class TestAggregateRunner(unittest.TestCase):
             "vuln_type": "Cross-Site Scripting (XSS)",
             "vuln_id": "CWE-79",
             "status": "OPEN",
-            "pr_url": "https://github.com/carloschulo/cm-test/pull/9",
+            "pr_url": "https://github.com/example-org/example-repo/pull/9",
             "start_line": 97,
             "end_line": 121,
             "snippet": "js = AUTOLOAD_JS.render(bundle=bundle, elementid=element_id)",
@@ -1236,7 +1236,7 @@ class TestAggregateRunner(unittest.TestCase):
     self.assertIn("into a generated JavaScript response.", rules2[0]["fullDescription"]["text"])
     # Verify fid-dup-open in skipped_finding_ids has status normalized to SKIPPED_DUPLICATE and links Fix PR #9 from finding.pr_url
     self.assertEqual(results2[0]["properties"]["status"], "SKIPPED_DUPLICATE")
-    self.assertEqual(results2[0]["properties"]["pr_url"], "https://github.com/carloschulo/cm-test/pull/9")
+    self.assertEqual(results2[0]["properties"]["pr_url"], "https://github.com/example-org/example-repo/pull/9")
     self.assertIn("Fix PR #9", rules2[0]["help"]["markdown"])
 
   def test_transform_json_to_sarif_cross_run_stable_rule_id_and_automation_id(self):
@@ -1487,7 +1487,7 @@ class TestAggregateRunner(unittest.TestCase):
     summary_md, count = _render_step_summary(
         base_db,
         cfg,
-        owner="ilbzzz",
+        owner="example-org",
         repo_name="juice-shop-local",
         target_sha="1e677199",
     )

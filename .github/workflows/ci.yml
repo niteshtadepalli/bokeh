@@ -16,7 +16,7 @@ permissions:
 jobs:
   python-tests:
     name: Python tests (3.12)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,9 +36,24 @@ jobs:
       - name: Run pytest
         run: python -m pytest -q
 
+  markdown-links:
+    name: Markdown links
+    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # Relative links and #anchors in every tracked *.md file must resolve.
+      - name: Check relative links
+        run: python scripts/ci/check_md_links.py
+
   terraform:
     name: Terraform (${{ matrix.module }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false

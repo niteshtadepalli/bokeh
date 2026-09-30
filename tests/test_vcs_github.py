@@ -445,8 +445,8 @@ class TestVcsGithub(unittest.TestCase):
       tmp.flush()
       sarif_id = upload_sarif_to_code_scanning(
           token="valid-token",
-          owner="carloschulo",
-          repo="cm-test",
+          owner="example-org",
+          repo="example-repo",
           sarif_path=tmp.name,
           commit_sha="abcdef1234567890",
           ref="refs/heads/branch-4.0",
@@ -465,8 +465,8 @@ class TestVcsGithub(unittest.TestCase):
 
     res = upload_sarif_to_code_scanning(
         token="valid-token",
-        owner="carloschulo",
-        repo="cm-test",
+        owner="example-org",
+        repo="example-repo",
         sarif_path="/nonexistent/path/report.sarif",
         commit_sha="abcdef1234567890",
         ref="refs/heads/branch-4.0",

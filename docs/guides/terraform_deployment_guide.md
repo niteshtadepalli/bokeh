@@ -4,6 +4,13 @@ This guide provides step-by-step instructions to setup, deploy, and run the
 **CodeMender Orchestrator Parallel Scanning Pipeline** on Google Cloud Platform
 (GCP) using Terraform.
 
+> **Running Terraform from a pipeline instead:** to manage the deployment
+> through pull requests (a `terraform plan` check on every pull request, an
+> apply on merge, and automatic runner image rollouts), follow
+> [GitOps with Cloud Build](gitops_cloud_build.md) after reading the
+> architecture overview below. The settings are the same; they live in
+> `repos.yaml` and `deployment.yaml` instead of `terraform.tfvars`.
+
 --------------------------------------------------------------------------------
 
 ## 1. Architecture Overview
@@ -16,7 +23,7 @@ provision:
     (`codemender-runner`).
 *   **Secret Manager**: Secure storage for GitHub tokens
     (`${PREFIX}-github-token`).
-*   **Service Accounts & Custom IAM**: Ephemeral, least-privilege access for
+*   **Service Accounts & IAM**: Ephemeral, least-privilege access for
     Cloud Run, Cloud Workflows, and Cloud Build.
 *   **Cloud Run v2 Jobs**: Ephemeral orchestrator container pool (`runner`) for `scan` and `aggregate` modes, and a dedicated unprivileged `worker` container pool for executing untrusted tests.
 *   **Cloud Workflows**: Coordinator workflow orchestrating multi-stage parallel
@@ -37,8 +44,8 @@ If you deploy multiple pipelines in the same GCP project using different
         Workflow (`${prefix}-coordinator`).
     *   **Storage & Secret**: GCS Reports bucket, Artifact Registry
         repository, and Secret Manager GitHub secret (`${prefix}-github-token`).
-    *   **Security**: Service Accounts (`${prefix}-runner-sa`, `${prefix}-worker-sa`, etc.) and Custom
-        IAM Role bindings (suffixed with `random_id` to prevent 7-day GCP IAM soft-delete tombstone conflicts).
+    *   **Security**: Service Accounts (`${prefix}-runner-sa`, `${prefix}-worker-sa`, etc.) and their
+        IAM bindings.
     *   **VPC & Networking**: Dedicated VPC Connector (`${prefix}-vpc-conn`) and
         Router (requires setting distinct `vpc_connector_cidr` ranges).
 
@@ -62,7 +69,7 @@ graph TD
 Ensure you have the following before starting:
 
 1.  **GCP Project**: An active GCP project with billing enabled.
-2.  **Local Tooling**: Installed `gcloud` CLI, `terraform` (v1.3.0+), `git`, and
+2.  **Local Tooling**: Installed `gcloud` CLI, `terraform` (v1.7.0+), `git`, and
     `docker`.
 3.  **IAM Permissions**: User account with `Owner` or `Editor` + `Security
     Admin` privileges on the target GCP project.
@@ -196,6 +203,13 @@ export REGION="us-central1"
 gcloud builds submit --config=cloudbuild.yaml \
     --substitutions=_REPO_NAME="${REPO_NAME}",_REGION="${REGION}" .
 ```
+
+The last build step points the runner and worker jobs at the new image's
+digest, but only once no scan is running: while a scan is in progress it
+prints `waiting for N active scan(s)` every 5 minutes, for up to
+`_MAX_WAIT_HOURS` (default 12). On a fresh deployment nothing is running, so it
+completes immediately. See
+[How a new image rolls out](gitops_cloud_build.md#how-a-new-image-rolls-out).
 
 --------------------------------------------------------------------------------
 
