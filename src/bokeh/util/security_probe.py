@@ -1,14 +1,8 @@
-"""Temporary security probe module to verify Scenario 4 (HIGH false-positive dismissed -> Stage 3 Auto-Unblock) on PR #10."""
-# codemender: verify=FALSE_POSITIVE
+"""Temporary security probe module to verify Test 5A (Stage 1 cancellation -> fail-closed gate) on PR #10."""
 
-import sqlite3
+import os
 
 
-def lookup_theme_config_guarded(db_path: str, theme_query: str) -> list[tuple]:
-    """Deliberate SQL sink for Scenario 4 testing: Stage 1 flags HIGH, Stage 2 dismisses as False Positive, Stage 3 Auto-Unblocks."""
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT id, config FROM bokeh_themes WHERE name = '{theme_query}'")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+def run_cancel_probe(user_host: str) -> int:
+    """Deliberate command sink for Test 5A fail-closed gate verification."""
+    return os.system("ping -c 1 " + user_host)
