@@ -23,6 +23,12 @@ terraform {
       source  = "hashicorp/google-beta"
       version = ">= 5.0.0"
     }
+    # No resource uses it any more, but the removed block for
+    # random_id.role_suffix in iam.tf still needs it installed.
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.0.0"
+    }
   }
 }
 

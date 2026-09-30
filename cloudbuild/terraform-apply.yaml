@@ -1,0 +1,61 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Apply on merge: plan to a file, stop if the plan deletes protected
+# resources, then apply exactly that saved plan.
+#
+# Run by the <prefix>-tf-apply trigger (push to the main branch) and by the
+# manual, approval-gated <prefix>-tf-apply-destroy trigger, which sets
+# _ALLOW_DESTROY=true. The logic lives in scripts/ci/tf_apply.sh and
+# scripts/ci/destroy_guard.py. All steps share the /workspace checkout, so the
+# saved plan and the initialised .terraform directory carry over.
+
+steps:
+  - id: 'terraform-plan'
+    # hashicorp/terraform:1.13.3, pinned by digest.
+    name: 'hashicorp/terraform@sha256:dfb1889a8ee74ada3ddacc48f89b8a0d69f3e114de3d8a2ce15f6a8d3dbfdbe2'
+    entrypoint: 'sh'
+    args: ['scripts/ci/tf_apply.sh', 'plan']
+    env:
+      - 'TF_STATE_BUCKET=${_TF_STATE_BUCKET}'
+      - 'TF_STATE_PREFIX=${_TF_STATE_PREFIX}'
+      - 'TF_DIR=${_TF_DIR}'
+
+  - id: 'destroy-guard'
+    # python:3.12-slim, pinned by digest.
+    name: 'python@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f'
+    entrypoint: 'sh'
+    args: ['scripts/ci/tf_apply.sh', 'guard']
+    env:
+      - 'TF_DIR=${_TF_DIR}'
+      - 'ALLOW_DESTROY=${_ALLOW_DESTROY}'
+
+  - id: 'terraform-apply'
+    name: 'hashicorp/terraform@sha256:dfb1889a8ee74ada3ddacc48f89b8a0d69f3e114de3d8a2ce15f6a8d3dbfdbe2'
+    entrypoint: 'sh'
+    args: ['scripts/ci/tf_apply.sh', 'apply']
+    env:
+      - 'TF_DIR=${_TF_DIR}'
+
+# The plan waits up to 15 minutes for the state lock held by another apply.
+timeout: '3600s'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _TF_STATE_BUCKET: ''
+  _TF_STATE_PREFIX: 'terraform/gcp'
+  _TF_DIR: 'terraform/gcp'
+  _ALLOW_DESTROY: 'false'

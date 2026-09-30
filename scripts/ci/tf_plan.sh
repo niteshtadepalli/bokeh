@@ -1,3 +1,4 @@
+#!/bin/sh
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,26 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-terraform {
-  required_version = ">= 1.7.0"
-  required_providers {
-    google = {
-      source  = "hashicorp/google"
-      version = ">= 5.0.0"
-    }
-    github = {
-      source  = "integrations/github"
-      version = ">= 6.0.0"
-    }
-  }
-}
+# Pull request check: a read-only `terraform plan` against the shared state.
+#
+# Runs with -lock=false because the plan identity can only read the state
+# bucket; it never writes state and never saves a plan file. A failing plan
+# (including a YAML precondition) fails the check.
+#
+# Environment: see tf_init.sh.
 
-provider "google" {
-  project = var.gcp_project_id
-  region  = var.gcp_region
-}
+set -eu
 
-provider "github" {
-  owner = var.github_owner != "" ? var.github_owner : null
-  token = var.github_mgmt_token != "" ? var.github_mgmt_token : null
-}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TF_DIR="${TF_DIR:-terraform/gcp}"
+export TF_DIR
+export TF_IN_AUTOMATION="${TF_IN_AUTOMATION:-1}"
+
+sh "$SCRIPT_DIR/tf_init.sh"
+terraform -chdir="$TF_DIR" plan -input=false -lock=false -no-color

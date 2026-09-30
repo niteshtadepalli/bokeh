@@ -72,6 +72,12 @@ variable "initial_runner_image" {
   default     = "us-docker.pkg.dev/cloudrun/container/job:latest"
 }
 
+variable "cloudbuild_service_account_emails" {
+  type        = list(string)
+  description = "Service account emails that build the runner image (cloudbuild.yaml) and roll it out to the Cloud Run jobs. They get Artifact Registry write access, permission to update the jobs, and read access to workflow executions (to wait for running scans). Leave null to grant the project's default Cloud Build service accounts (<number>@cloudbuild.gserviceaccount.com and <number>-compute@developer.gserviceaccount.com). With the terraform/bootstrap pipeline, set it to the image-build service account; also list the default compute service account if you still run `gcloud builds submit` by hand."
+  default     = null
+}
+
 variable "create_vpc_and_nat" {
   type        = bool
   description = "Whether to create a dedicated VPC network, subnet, connector, and Cloud NAT for private egress."

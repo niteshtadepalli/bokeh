@@ -409,6 +409,32 @@ run "project_id_is_required_somewhere" {
   expect_failures = [terraform_data.config_checks]
 }
 
+run "deployment_yaml_sets_cloud_build_accounts" {
+  command = plan
+
+  variables {
+    deployment_file = "tests/fixtures/deployment_build_accounts.yaml"
+  }
+
+  assert {
+    condition = toset(keys(google_project_iam_member.cloudbuild_run_developer)) == toset([
+      "image-build@yaml-project.iam.gserviceaccount.com",
+      "123456789-compute@developer.gserviceaccount.com",
+    ])
+    error_message = "cloudbuild_service_account_emails from deployment.yaml must replace the default Cloud Build accounts."
+  }
+}
+
+run "cloud_build_accounts_must_be_a_list" {
+  command = plan
+
+  variables {
+    deployment_file = "tests/fixtures/deployment_build_accounts_scalar.yaml"
+  }
+
+  expect_failures = [terraform_data.config_checks]
+}
+
 # ---------------------------------------------------------------------------
 # The committed examples must stay valid.
 # ---------------------------------------------------------------------------

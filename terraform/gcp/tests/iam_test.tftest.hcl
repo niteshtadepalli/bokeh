@@ -47,7 +47,103 @@ run "iam_resources_created_correctly" {
   }
 
   assert {
-    condition     = google_project_iam_custom_role.workflow_job_runner.title == "CodeMender Workflow Job Runner (test-iam)" && random_id.role_suffix.keepers["resource_prefix"] == "test-iam"
-    error_message = "Workflow custom role title and suffix keepers do not match expected prefix."
+    condition = (
+      google_project_iam_member.workflow_jobs_executor.role == "roles/run.jobsExecutorWithOverrides" &&
+      google_project_iam_member.workflow_run_viewer.role == "roles/run.viewer"
+    )
+    error_message = "The workflow service account must hold the predefined Cloud Run roles that replace the old custom role."
   }
+
+  assert {
+    condition     = google_project_iam_member.workflow_jobs_executor.project == "test-project-123" && google_project_iam_member.workflow_run_viewer.project == "test-project-123"
+    error_message = "The Cloud Run role bindings must be in the deployment project."
+  }
+}
+
+run "workflow_run_roles_target_the_workflow_service_account" {
+  command = plan
+
+  override_resource {
+    target          = google_service_account.workflow_sa
+    override_during = plan
+    values = {
+      email = "test-iam-workflows-sa@test-project-123.iam.gserviceaccount.com"
+    }
+  }
+
+  assert {
+    condition = (
+      google_project_iam_member.workflow_jobs_executor.member == "serviceAccount:test-iam-workflows-sa@test-project-123.iam.gserviceaccount.com" &&
+      google_project_iam_member.workflow_run_viewer.member == "serviceAccount:test-iam-workflows-sa@test-project-123.iam.gserviceaccount.com"
+    )
+    error_message = "The Cloud Run role bindings must target the workflow service account."
+  }
+}
+
+run "cloudbuild_default_service_accounts" {
+  command = plan
+
+  assert {
+    condition     = toset(keys(google_project_iam_member.cloudbuild_run_developer)) == toset(["legacy", "compute"])
+    error_message = "By default the two default Cloud Build service accounts keep their existing keys."
+  }
+
+  assert {
+    condition = (
+      toset(keys(google_project_iam_member.cloudbuild_workflows_viewer)) == toset(["legacy", "compute"]) &&
+      google_project_iam_member.cloudbuild_workflows_viewer["legacy"].role == "roles/workflows.viewer"
+    )
+    error_message = "The Cloud Build service accounts must be able to list workflow executions."
+  }
+}
+
+run "cloudbuild_custom_service_accounts" {
+  command = plan
+
+  variables {
+    cloudbuild_service_account_emails = ["test-iam-image-build@test-project-123.iam.gserviceaccount.com"]
+  }
+
+  assert {
+    condition = (
+      keys(google_project_iam_member.cloudbuild_run_developer) == ["test-iam-image-build@test-project-123.iam.gserviceaccount.com"] &&
+      google_project_iam_member.cloudbuild_run_developer["test-iam-image-build@test-project-123.iam.gserviceaccount.com"].member == "serviceAccount:test-iam-image-build@test-project-123.iam.gserviceaccount.com"
+    )
+    error_message = "Configured Cloud Build service accounts replace the defaults."
+  }
+
+  assert {
+    condition = (
+      length(google_artifact_registry_repository_iam_member.cloudbuild_ar_writer) == 1 &&
+      length(google_project_iam_member.cloudbuild_storage_viewer) == 1 &&
+      length(google_project_iam_member.cloudbuild_log_writer) == 1 &&
+      length(google_service_account_iam_member.cloudbuild_runner_sa_user) == 1 &&
+      length(google_service_account_iam_member.cloudbuild_worker_sa_user) == 1 &&
+      length(google_project_iam_member.cloudbuild_workflows_viewer) == 1
+    )
+    error_message = "Every Cloud Build grant must follow the configured service accounts."
+  }
+}
+
+run "cloudbuild_empty_service_accounts" {
+  command = plan
+
+  variables {
+    cloudbuild_service_account_emails = []
+  }
+
+  assert {
+    condition     = length(google_project_iam_member.cloudbuild_run_developer) == 0
+    error_message = "An empty list grants no Cloud Build service account anything."
+  }
+}
+
+run "cloudbuild_service_account_with_prefix_rejected" {
+  command = plan
+
+  variables {
+    cloudbuild_service_account_emails = ["serviceAccount:builder@test-project-123.iam.gserviceaccount.com"]
+  }
+
+  expect_failures = [terraform_data.config_checks]
 }

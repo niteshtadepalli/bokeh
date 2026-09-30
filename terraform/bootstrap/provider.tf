@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# One-time setup for running terraform/gcp and the runner image build from
+# Cloud Build (see docs/guides/gitops_cloud_build.md). A project admin applies
+# this stack once, with local state; everything after that goes through pull
+# requests.
+
 terraform {
   required_version = ">= 1.7.0"
   required_providers {
@@ -19,19 +24,14 @@ terraform {
       source  = "hashicorp/google"
       version = ">= 5.0.0"
     }
-    github = {
-      source  = "integrations/github"
-      version = ">= 6.0.0"
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.0.0"
     }
   }
 }
 
 provider "google" {
-  project = var.gcp_project_id
-  region  = var.gcp_region
-}
-
-provider "github" {
-  owner = var.github_owner != "" ? var.github_owner : null
-  token = var.github_mgmt_token != "" ? var.github_mgmt_token : null
+  project = var.project_id
+  region  = var.region
 }

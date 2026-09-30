@@ -18,7 +18,8 @@ resource "time_sleep" "wait_for_apis_and_iam" {
   depends_on = [
     google_project_service.enabled_services,
     google_secret_manager_secret_iam_member.runner_secret_accessor,
-    google_project_iam_member.workflow_job_runner_binding,
+    google_project_iam_member.workflow_jobs_executor,
+    google_project_iam_member.workflow_run_viewer,
     google_service_account_iam_member.workflow_runner_sa_user,
     google_project_service_identity.workflows_sa
   ]

@@ -26,6 +26,13 @@ runner_memory: 16Gi
 # replaced. Point it at a known-good runner image digest once one exists.
 # initial_runner_image: us-docker.pkg.dev/cloudrun/container/job:latest
 
+# --- Image pipeline -------------------------------------------------------------
+# Service accounts that build and roll out the runner image. Default: the
+# project's default Cloud Build service accounts. With terraform/bootstrap,
+# list its image-build service account (see its deployment_yaml_snippet output).
+# cloudbuild_service_account_emails:
+#   - codemender-image-build@your-project-id.iam.gserviceaccount.com
+
 # --- Scheduling -----------------------------------------------------------------
 # Default schedule for repositories in repos.yaml that do not set one.
 scheduler_cron: "0 2 * * *"

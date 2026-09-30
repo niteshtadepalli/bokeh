@@ -40,30 +40,36 @@ resource "google_service_account" "scheduler_sa" {
   depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
-# Random ID suffix to prevent 409 Conflict errors when re-creating custom IAM roles.
-# GCP IAM custom roles enter a 7-day soft-delete tombstone state upon deletion.
-# Appending a random hex suffix ensures role recreations generate a fresh role ID.
-resource "random_id" "role_suffix" {
-  byte_length = 4
-  keepers = {
-    resource_prefix = local.cfg.resource_prefix
+# The workflow service account used to hold a per-deployment custom role
+# (run.jobs.run/runWithOverrides/get, run.operations.get,
+# run.executions.get/list). The predefined roles bound below cover the same
+# permissions: roles/run.jobsExecutorWithOverrides (run, runWithOverrides and
+# run.executions.cancel) and roles/run.viewer (read-only Cloud Run access).
+# Managing them needs no roles/iam.roleAdmin.
+#
+# Existing deployments forget the old role, its binding and the random role
+# suffix instead of destroying them, so a scan running during the apply never
+# loses access. Delete the leftover role and binding by hand afterwards; see
+# docs/guides/gitops_cloud_build.md.
+removed {
+  from = google_project_iam_custom_role.workflow_job_runner
+  lifecycle {
+    destroy = false
   }
 }
 
-resource "google_project_iam_custom_role" "workflow_job_runner" {
-  role_id     = "${replace(local.cfg.resource_prefix, "-", "")}WorkflowJobRunner_${random_id.role_suffix.hex}"
-  title       = "CodeMender Workflow Job Runner (${local.cfg.resource_prefix})"
-  description = "Allows Cloud Workflows to run and monitor Cloud Run Jobs for CodeMender (${local.cfg.resource_prefix})"
-  project     = local.cfg.project_id
-  depends_on  = [google_project_service.enabled_services["iam.googleapis.com"]]
-  permissions = [
-    "run.jobs.run",
-    "run.jobs.runWithOverrides",
-    "run.jobs.get",
-    "run.operations.get",
-    "run.executions.get",
-    "run.executions.list",
-  ]
+removed {
+  from = google_project_iam_member.workflow_job_runner_binding
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = random_id.role_suffix
+  lifecycle {
+    destroy = false
+  }
 }
 
 # Bucket-level IAM for Runner SA & Workflow SA
@@ -118,10 +124,17 @@ resource "google_project_iam_member" "runner_aiplatform_user" {
   member  = "serviceAccount:${google_service_account.runner_sa.email}"
 }
 
-# Project-level IAM binding for Workflow SA to run jobs, poll operations, and monitor executions
-resource "google_project_iam_member" "workflow_job_runner_binding" {
+# Project-level IAM for Workflow SA to run jobs with overrides, poll
+# operations, and monitor executions (see the removed blocks above).
+resource "google_project_iam_member" "workflow_jobs_executor" {
   project = local.cfg.project_id
-  role    = google_project_iam_custom_role.workflow_job_runner.id
+  role    = "roles/run.jobsExecutorWithOverrides"
+  member  = "serviceAccount:${google_service_account.workflow_sa.email}"
+}
+
+resource "google_project_iam_member" "workflow_run_viewer" {
+  project = local.cfg.project_id
+  role    = "roles/run.viewer"
   member  = "serviceAccount:${google_service_account.workflow_sa.email}"
 }
 
@@ -230,4 +243,14 @@ resource "google_service_account_iam_member" "cloudbuild_worker_sa_user" {
   service_account_id = google_service_account.worker_sa.name
   role               = "roles/iam.serviceAccountUser"
   member             = each.value
+}
+
+# Grant Workflows Viewer to Cloud Build SAs so the image rollout can wait
+# until the coordinator has no active executions (scripts/ci/image_rollout.sh).
+resource "google_project_iam_member" "cloudbuild_workflows_viewer" {
+  for_each   = local.cloudbuild_service_accounts
+  project    = local.cfg.project_id
+  role       = "roles/workflows.viewer"
+  member     = each.value
+  depends_on = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
