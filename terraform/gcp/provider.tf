@@ -13,7 +13,7 @@
 # limitations under the License.
 
 terraform {
-  required_version = ">= 1.3.0"
+  required_version = ">= 1.7.0"
   required_providers {
     google = {
       source  = "hashicorp/google"
@@ -23,15 +23,21 @@ terraform {
       source  = "hashicorp/google-beta"
       version = ">= 5.0.0"
     }
+    # No resource uses it any more, but the removed block for
+    # random_id.role_suffix in iam.tf still needs it installed.
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.0.0"
+    }
   }
 }
 
 provider "google" {
-  project = var.project_id
-  region  = var.region
+  project = local.cfg.project_id
+  region  = local.cfg.region
 }
 
 provider "google-beta" {
-  project = var.project_id
-  region  = var.region
+  project = local.cfg.project_id
+  region  = local.cfg.region
 }

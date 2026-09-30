@@ -42,12 +42,12 @@
 # ---------------------------------------------------------------------------
 
 resource "google_bigquery_dataset" "telemetry" {
-  count = var.enable_bigquery_telemetry ? 1 : 0
+  count = local.cfg.enable_bigquery_telemetry ? 1 : 0
 
-  dataset_id    = var.bigquery_dataset_id
-  project       = var.project_id
-  location      = var.bigquery_location != "" ? var.bigquery_location : var.region
-  friendly_name = "CodeMender Security Telemetry (${var.resource_prefix})"
+  dataset_id    = local.cfg.bigquery_dataset_id
+  project       = local.cfg.project_id
+  location      = local.cfg.bigquery_location != "" ? local.cfg.bigquery_location : local.cfg.region
+  friendly_name = "CodeMender Security Telemetry (${local.cfg.resource_prefix})"
   description   = <<-EOT
     Cross-repository CodeMender security scan telemetry. Contains one row per
     scan execution in `scan_runs` and one row per detected vulnerability in
@@ -58,18 +58,18 @@ resource "google_bigquery_dataset" "telemetry" {
 
   # Telemetry is the system of record for scan history, so it must survive a
   # `terraform destroy` of the compute stack unless explicitly overridden.
-  delete_contents_on_destroy = var.bigquery_delete_contents_on_destroy
+  delete_contents_on_destroy = local.cfg.bigquery_delete_contents_on_destroy
 
   depends_on = [google_project_service.enabled_services["bigquery.googleapis.com"]]
 }
 
 resource "google_bigquery_table" "scan_runs" {
-  count = var.enable_bigquery_telemetry ? 1 : 0
+  count = local.cfg.enable_bigquery_telemetry ? 1 : 0
 
   dataset_id          = google_bigquery_dataset.telemetry[0].dataset_id
   table_id            = "scan_runs"
-  project             = var.project_id
-  deletion_protection = var.bigquery_deletion_protection
+  project             = local.cfg.project_id
+  deletion_protection = local.cfg.bigquery_deletion_protection
 
   description = <<-EOT
     One row per CodeMender scan execution, including runs that found nothing
@@ -275,12 +275,12 @@ resource "google_bigquery_table" "scan_runs" {
 }
 
 resource "google_bigquery_table" "vulnerability_findings" {
-  count = var.enable_bigquery_telemetry ? 1 : 0
+  count = local.cfg.enable_bigquery_telemetry ? 1 : 0
 
   dataset_id          = google_bigquery_dataset.telemetry[0].dataset_id
   table_id            = "vulnerability_findings"
-  project             = var.project_id
-  deletion_protection = var.bigquery_deletion_protection
+  project             = local.cfg.project_id
+  deletion_protection = local.cfg.bigquery_deletion_protection
 
   description = <<-EOT
     One row per vulnerability detected by a CodeMender scan. Use this table to
@@ -425,7 +425,7 @@ resource "google_bigquery_table" "vulnerability_findings" {
     # runtime CODEMENDER_BQ_INCLUDE_SNIPPETS gate. Default is OFF, so a
     # deployment stays metadata-only unless source replication into the
     # warehouse has been explicitly approved.
-    var.bigquery_include_snippets ? [
+    local.cfg.bigquery_include_snippets ? [
       {
         name        = "analysis"
         type        = "STRING"
@@ -455,11 +455,11 @@ resource "google_bigquery_table" "vulnerability_findings" {
 # ---------------------------------------------------------------------------
 
 resource "google_bigquery_table" "v_findings_enriched" {
-  count = var.enable_bigquery_telemetry ? 1 : 0
+  count = local.cfg.enable_bigquery_telemetry ? 1 : 0
 
   dataset_id          = google_bigquery_dataset.telemetry[0].dataset_id
   table_id            = "v_findings_enriched"
-  project             = var.project_id
+  project             = local.cfg.project_id
   deletion_protection = false
 
   description = "One row per vulnerability finding, enriched with scan metadata (branch, SHA, scan_target, models, scan status). Use scan_timestamp for time filters."
@@ -501,19 +501,19 @@ resource "google_bigquery_table" "v_findings_enriched" {
         s.report_uri,
         s.execution_url,
         f.finding_source
-      FROM `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.vulnerability_findings[0].table_id}` AS f
-      LEFT JOIN `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s
+      FROM `${local.cfg.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.vulnerability_findings[0].table_id}` AS f
+      LEFT JOIN `${local.cfg.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s
         ON s.scan_id = f.scan_id
     EOT
   }
 }
 
 resource "google_bigquery_table" "v_scan_runs_flat" {
-  count = var.enable_bigquery_telemetry ? 1 : 0
+  count = local.cfg.enable_bigquery_telemetry ? 1 : 0
 
   dataset_id          = google_bigquery_dataset.telemetry[0].dataset_id
   table_id            = "v_scan_runs_flat"
-  project             = var.project_id
+  project             = local.cfg.project_id
   deletion_protection = false
 
   description = "One row per CodeMender scan with counts, auto-fix rates and token totals summed across models. Use scan_timestamp for time filters."
@@ -550,17 +550,17 @@ resource "google_bigquery_table" "v_scan_runs_flat" {
         s.wiz_status,
         s.wiz_reported_count,
         s.wiz_imported_count
-      FROM `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s
+      FROM `${local.cfg.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s
     EOT
   }
 }
 
 resource "google_bigquery_table" "v_token_usage" {
-  count = var.enable_bigquery_telemetry ? 1 : 0
+  count = local.cfg.enable_bigquery_telemetry ? 1 : 0
 
   dataset_id          = google_bigquery_dataset.telemetry[0].dataset_id
   table_id            = "v_token_usage"
-  project             = var.project_id
+  project             = local.cfg.project_id
   deletion_protection = false
 
   description = "One row per scan per model with input/output/total tokens. Use for token spend by model over time."
@@ -579,7 +579,7 @@ resource "google_bigquery_table" "v_token_usage" {
         SUM(t.in_tokens)        AS in_tokens,
         SUM(t.out_tokens)       AS out_tokens,
         SUM(t.total_tokens)     AS total_tokens
-      FROM `${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s,
+      FROM `${local.cfg.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}` AS s,
            UNNEST(s.token_totals) AS t
       GROUP BY 1, 2, 3, 4, 5, 6, 7
     EOT

@@ -68,6 +68,17 @@ variable "wif_allowed_repositories" {
   description = "List of allowed GitHub repositories in 'owner/repo' format. Defines the GCP IAM security perimeter (REQUIRED ONLY if github_scope_type is 'repositories')."
 }
 
+variable "github_oidc_issuer_uri" {
+  type        = string
+  default     = "https://token.actions.githubusercontent.com"
+  description = "OIDC issuer of the GitHub Actions tokens. The default is right for github.com; GitHub Enterprise Cloud with data residency (GHE.com) uses an enterprise-specific issuer, for example https://token.actions.<subdomain>.ghe.com."
+
+  validation {
+    condition     = can(regex("^https://[^\\s/]+(/[^\\s]*)?$", var.github_oidc_issuer_uri))
+    error_message = "github_oidc_issuer_uri must be an https:// URL."
+  }
+}
+
 # --- GitHub Platform Configuration ---
 
 variable "target_github_repositories" {

@@ -67,7 +67,7 @@ resource "google_iam_workload_identity_pool_provider" "github_provider" {
   attribute_condition = local.attribute_condition
 
   oidc {
-    issuer_uri = "https://token.actions.githubusercontent.com"
+    issuer_uri = var.github_oidc_issuer_uri
   }
 }
 

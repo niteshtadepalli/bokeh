@@ -13,57 +13,63 @@
 # limitations under the License.
 
 resource "google_service_account" "runner_sa" {
-  account_id   = "${var.resource_prefix}-runner-sa"
-  display_name = "CodeMender Orchestrator Service Account (${var.resource_prefix})"
-  project      = var.project_id
+  account_id   = "${local.cfg.resource_prefix}-runner-sa"
+  display_name = "CodeMender Orchestrator Service Account (${local.cfg.resource_prefix})"
+  project      = local.cfg.project_id
   depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
 resource "google_service_account" "worker_sa" {
-  account_id   = "${var.resource_prefix}-worker-sa"
-  display_name = "CodeMender Worker Service Account (${var.resource_prefix})"
-  project      = var.project_id
+  account_id   = "${local.cfg.resource_prefix}-worker-sa"
+  display_name = "CodeMender Worker Service Account (${local.cfg.resource_prefix})"
+  project      = local.cfg.project_id
   depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
 resource "google_service_account" "workflow_sa" {
-  account_id   = "${var.resource_prefix}-workflows-sa"
-  display_name = "CodeMender Workflows Service Account (${var.resource_prefix})"
-  project      = var.project_id
+  account_id   = "${local.cfg.resource_prefix}-workflows-sa"
+  display_name = "CodeMender Workflows Service Account (${local.cfg.resource_prefix})"
+  project      = local.cfg.project_id
   depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
 resource "google_service_account" "scheduler_sa" {
-  account_id   = "${var.resource_prefix}-scheduler-sa"
-  display_name = "CodeMender Scheduler Service Account (${var.resource_prefix})"
-  project      = var.project_id
+  account_id   = "${local.cfg.resource_prefix}-scheduler-sa"
+  display_name = "CodeMender Scheduler Service Account (${local.cfg.resource_prefix})"
+  project      = local.cfg.project_id
   depends_on   = [google_project_service.enabled_services["iam.googleapis.com"]]
 }
 
-# Random ID suffix to prevent 409 Conflict errors when re-creating custom IAM roles.
-# GCP IAM custom roles enter a 7-day soft-delete tombstone state upon deletion.
-# Appending a random hex suffix ensures role recreations generate a fresh role ID.
-resource "random_id" "role_suffix" {
-  byte_length = 4
-  keepers = {
-    resource_prefix = var.resource_prefix
+# The workflow service account used to hold a per-deployment custom role
+# (run.jobs.run/runWithOverrides/get, run.operations.get,
+# run.executions.get/list). The predefined roles bound below cover the same
+# permissions: roles/run.jobsExecutorWithOverrides (run, runWithOverrides and
+# run.executions.cancel) and roles/run.viewer (read-only Cloud Run access).
+# Managing them needs no roles/iam.roleAdmin.
+#
+# Existing deployments forget the old role, its binding and the random role
+# suffix instead of destroying them, so a scan running during the apply never
+# loses access. Delete the leftover role and binding by hand afterwards; see
+# docs/guides/gitops_cloud_build.md.
+removed {
+  from = google_project_iam_custom_role.workflow_job_runner
+  lifecycle {
+    destroy = false
   }
 }
 
-resource "google_project_iam_custom_role" "workflow_job_runner" {
-  role_id     = "${replace(var.resource_prefix, "-", "")}WorkflowJobRunner_${random_id.role_suffix.hex}"
-  title       = "CodeMender Workflow Job Runner (${var.resource_prefix})"
-  description = "Allows Cloud Workflows to run and monitor Cloud Run Jobs for CodeMender (${var.resource_prefix})"
-  project     = var.project_id
-  depends_on  = [google_project_service.enabled_services["iam.googleapis.com"]]
-  permissions = [
-    "run.jobs.run",
-    "run.jobs.runWithOverrides",
-    "run.jobs.get",
-    "run.operations.get",
-    "run.executions.get",
-    "run.executions.list",
-  ]
+removed {
+  from = google_project_iam_member.workflow_job_runner_binding
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = random_id.role_suffix
+  lifecycle {
+    destroy = false
+  }
 }
 
 # Bucket-level IAM for Runner SA & Workflow SA
@@ -106,22 +112,29 @@ locals {
 # Logging Writer IAM for Runner, Workflow, and Scheduler Service Accounts
 resource "google_project_iam_member" "service_accounts_log_writer" {
   for_each = local.log_writer_service_accounts
-  project  = var.project_id
+  project  = local.cfg.project_id
   role     = "roles/logging.logWriter"
   member   = each.value
 }
 
 # Agent Platform / Vertex AI IAM for Runner SA (required for CodeMender LLM interactions)
 resource "google_project_iam_member" "runner_aiplatform_user" {
-  project = var.project_id
+  project = local.cfg.project_id
   role    = "roles/aiplatform.user"
   member  = "serviceAccount:${google_service_account.runner_sa.email}"
 }
 
-# Project-level IAM binding for Workflow SA to run jobs, poll operations, and monitor executions
-resource "google_project_iam_member" "workflow_job_runner_binding" {
-  project = var.project_id
-  role    = google_project_iam_custom_role.workflow_job_runner.id
+# Project-level IAM for Workflow SA to run jobs with overrides, poll
+# operations, and monitor executions (see the removed blocks above).
+resource "google_project_iam_member" "workflow_jobs_executor" {
+  project = local.cfg.project_id
+  role    = "roles/run.jobsExecutorWithOverrides"
+  member  = "serviceAccount:${google_service_account.workflow_sa.email}"
+}
+
+resource "google_project_iam_member" "workflow_run_viewer" {
+  project = local.cfg.project_id
+  role    = "roles/run.viewer"
   member  = "serviceAccount:${google_service_account.workflow_sa.email}"
 }
 
@@ -141,7 +154,7 @@ resource "google_service_account_iam_member" "workflow_worker_sa_user" {
 
 # Workflow Invoker IAM for Scheduler SA at Project Level
 resource "google_project_iam_member" "scheduler_workflow_invoker" {
-  project = var.project_id
+  project = local.cfg.project_id
   role    = "roles/workflows.invoker"
   member  = "serviceAccount:${google_service_account.scheduler_sa.email}"
 }
@@ -156,20 +169,20 @@ resource "google_secret_manager_secret_iam_member" "worker_secret_accessor" {
 
 # Agent Platform / Vertex AI IAM for Worker SA (required for CodeMender LLM interactions)
 resource "google_project_iam_member" "worker_aiplatform_user" {
-  project = var.project_id
+  project = local.cfg.project_id
   role    = "roles/aiplatform.user"
   member  = "serviceAccount:${google_service_account.worker_sa.email}"
 }
 
 # Service Usage Consumer IAM for Runner & Worker SAs (required by cm v0.8.0 x-goog-user-project quota check)
 resource "google_project_iam_member" "runner_serviceusage_consumer" {
-  project = var.project_id
+  project = local.cfg.project_id
   role    = "roles/serviceusage.serviceUsageConsumer"
   member  = "serviceAccount:${google_service_account.runner_sa.email}"
 }
 
 resource "google_project_iam_member" "worker_serviceusage_consumer" {
-  project = var.project_id
+  project = local.cfg.project_id
   role    = "roles/serviceusage.serviceUsageConsumer"
   member  = "serviceAccount:${google_service_account.worker_sa.email}"
 }
@@ -189,18 +202,18 @@ resource "google_project_iam_member" "worker_serviceusage_consumer" {
 # ---------------------------------------------------------------------------
 
 resource "google_bigquery_dataset_iam_member" "runner_telemetry_editor" {
-  count = var.enable_bigquery_telemetry ? 1 : 0
+  count = local.cfg.enable_bigquery_telemetry ? 1 : 0
 
-  project    = var.project_id
+  project    = local.cfg.project_id
   dataset_id = google_bigquery_dataset.telemetry[0].dataset_id
   role       = "roles/bigquery.dataEditor"
   member     = "serviceAccount:${google_service_account.runner_sa.email}"
 }
 
 resource "google_project_iam_member" "runner_bigquery_job_user" {
-  count = var.enable_bigquery_telemetry ? 1 : 0
+  count = local.cfg.enable_bigquery_telemetry ? 1 : 0
 
-  project = var.project_id
+  project = local.cfg.project_id
   role    = "roles/bigquery.jobUser"
   member  = "serviceAccount:${google_service_account.runner_sa.email}"
 }
@@ -210,7 +223,7 @@ resource "google_project_iam_member" "runner_bigquery_job_user" {
 # Grant Cloud Run Developer to Cloud Build SAs so they can update the Cloud Run Job image
 resource "google_project_iam_member" "cloudbuild_run_developer" {
   for_each   = local.cloudbuild_service_accounts
-  project    = var.project_id
+  project    = local.cfg.project_id
   role       = "roles/run.developer"
   member     = each.value
   depends_on = [google_project_service.enabled_services["iam.googleapis.com"]]
@@ -230,4 +243,14 @@ resource "google_service_account_iam_member" "cloudbuild_worker_sa_user" {
   service_account_id = google_service_account.worker_sa.name
   role               = "roles/iam.serviceAccountUser"
   member             = each.value
+}
+
+# Grant Workflows Viewer to Cloud Build SAs so the image rollout can wait
+# until the coordinator has no active executions (scripts/ci/image_rollout.sh).
+resource "google_project_iam_member" "cloudbuild_workflows_viewer" {
+  for_each   = local.cloudbuild_service_accounts
+  project    = local.cfg.project_id
+  role       = "roles/workflows.viewer"
+  member     = each.value
+  depends_on = [google_project_service.enabled_services["iam.googleapis.com"]]
 }

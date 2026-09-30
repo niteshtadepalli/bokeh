@@ -14,12 +14,12 @@
 
 output "nat_ip" {
   description = "Static IP address allocated for Cloud NAT (if VPC/NAT was created)."
-  value       = var.create_vpc_and_nat ? google_compute_address.nat_ip[0].address : null
+  value       = local.cfg.create_vpc_and_nat ? google_compute_address.nat_ip[0].address : null
 }
 
 output "region" {
   description = "GCP Region for all resources."
-  value       = var.region
+  value       = local.cfg.region
 }
 
 output "reports_bucket_url" {
@@ -55,12 +55,12 @@ output "scheduler_job_names" {
 
 output "artifact_registry_repository" {
   description = "Artifact Registry Docker repository path."
-  value       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.docker_repo.repository_id}"
+  value       = "${local.cfg.region}-docker.pkg.dev/${local.cfg.project_id}/${google_artifact_registry_repository.docker_repo.repository_id}"
 }
 
 output "container_build_command" {
   description = "Copy-paste Cloud Build command to build, push, and update the runner and worker Cloud Run Jobs."
-  value       = "gcloud builds submit --config=cloudbuild.yaml --project=${var.project_id} --substitutions=_RESOURCE_PREFIX=${var.resource_prefix},_REGION=${var.region} ."
+  value       = "gcloud builds submit --config=cloudbuild.yaml --project=${local.cfg.project_id} --substitutions=_RESOURCE_PREFIX=${local.cfg.resource_prefix},_REGION=${local.cfg.region} ."
 }
 
 output "workflow_id" {
@@ -75,39 +75,39 @@ output "workflow_execution_url" {
 
 output "bigquery_telemetry_dataset_id" {
   description = "BigQuery dataset ID holding CodeMender scan telemetry, or null when telemetry is disabled."
-  value       = var.enable_bigquery_telemetry ? google_bigquery_dataset.telemetry[0].dataset_id : null
+  value       = local.cfg.enable_bigquery_telemetry ? google_bigquery_dataset.telemetry[0].dataset_id : null
 }
 
 output "bigquery_telemetry_tables" {
   description = "Fully qualified BigQuery table IDs for scan telemetry."
-  value = var.enable_bigquery_telemetry ? {
-    scan_runs              = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}"
-    vulnerability_findings = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.vulnerability_findings[0].table_id}"
+  value = local.cfg.enable_bigquery_telemetry ? {
+    scan_runs              = "${local.cfg.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.scan_runs[0].table_id}"
+    vulnerability_findings = "${local.cfg.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.vulnerability_findings[0].table_id}"
   } : null
 }
 
 output "bigquery_telemetry_views" {
   description = "Fully qualified BigQuery view IDs for enriched scan analytics."
-  value = var.enable_bigquery_telemetry ? {
-    v_findings_enriched = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.v_findings_enriched[0].table_id}"
-    v_scan_runs_flat    = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.v_scan_runs_flat[0].table_id}"
-    v_token_usage       = "${var.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.v_token_usage[0].table_id}"
+  value = local.cfg.enable_bigquery_telemetry ? {
+    v_findings_enriched = "${local.cfg.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.v_findings_enriched[0].table_id}"
+    v_scan_runs_flat    = "${local.cfg.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.v_scan_runs_flat[0].table_id}"
+    v_token_usage       = "${local.cfg.project_id}.${google_bigquery_dataset.telemetry[0].dataset_id}.${google_bigquery_table.v_token_usage[0].table_id}"
   } : null
 }
 
 output "bigquery_console_url" {
   description = "Console link to the telemetry dataset, the entry point for Gemini Conversational Analytics and Data Canvas."
-  value = var.enable_bigquery_telemetry ? format(
+  value = local.cfg.enable_bigquery_telemetry ? format(
     "https://console.cloud.google.com/bigquery?project=%s&ws=!1m4!1m3!3m2!1s%s!2s%s",
-    var.project_id,
-    var.project_id,
+    local.cfg.project_id,
+    local.cfg.project_id,
     google_bigquery_dataset.telemetry[0].dataset_id,
   ) : null
 }
 
 output "bigquery_snippet_export_notice" {
   description = "Whether source code snippets and LLM analysis prose are being replicated into BigQuery."
-  value = var.bigquery_include_snippets ? join("", [
+  value = local.cfg.bigquery_include_snippets ? join("", [
     "WARNING: bigquery_include_snippets is TRUE. The `analysis` and `snippet` ",
     "columns are being exported, which replicates verbatim application source ",
     "code and vulnerability detail into a queryable warehouse. Confirm this is ",
@@ -124,6 +124,6 @@ output "secret_manager_notice" {
   value       = local.github_app_enabled ? local.github_app_secret_notice : <<EOT
 The secret '${google_secret_manager_secret.github_app_token.secret_id}' has been created with placeholder data.
 Please update it with your actual GitHub App Token before running scans:
-  gcloud secrets versions add ${google_secret_manager_secret.github_app_token.secret_id} --data-file=/path/to/token.pem --project=${var.project_id}
+  gcloud secrets versions add ${google_secret_manager_secret.github_app_token.secret_id} --data-file=/path/to/token.pem --project=${local.cfg.project_id}
 EOT
 }

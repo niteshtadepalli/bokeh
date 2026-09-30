@@ -32,34 +32,34 @@ locals {
   # means bigquery.tf can depend on it by key, exactly like every other API.
   required_apis = concat(
     local.base_required_apis,
-    var.enable_bigquery_telemetry ? ["bigquery.googleapis.com"] : [],
+    local.cfg.enable_bigquery_telemetry ? ["bigquery.googleapis.com"] : [],
   )
 }
 
 resource "google_project_service" "enabled_services" {
   for_each           = toset(local.required_apis)
-  project            = var.project_id
+  project            = local.cfg.project_id
   service            = each.key
   disable_on_destroy = false
 }
 
 resource "google_project_service" "vpcaccess_api" {
-  count              = var.create_vpc_and_nat ? 1 : 0
-  project            = var.project_id
+  count              = local.cfg.create_vpc_and_nat ? 1 : 0
+  project            = local.cfg.project_id
   service            = "vpcaccess.googleapis.com"
   disable_on_destroy = false
 }
 
 resource "google_project_service" "compute_api" {
-  count              = var.create_vpc_and_nat ? 1 : 0
-  project            = var.project_id
+  count              = local.cfg.create_vpc_and_nat ? 1 : 0
+  project            = local.cfg.project_id
   service            = "compute.googleapis.com"
   disable_on_destroy = false
 }
 
 resource "google_project_service_identity" "workflows_sa" {
   provider   = google-beta
-  project    = var.project_id
+  project    = local.cfg.project_id
   service    = "workflows.googleapis.com"
   depends_on = [google_project_service.enabled_services["workflows.googleapis.com"]]
 }

@@ -28,6 +28,11 @@ mock_provider "google-beta" {}
 mock_provider "random" {}
 
 variables {
+  # Keep the tests independent of any repos.yaml / deployment.yaml in the
+  # module directory.
+  repos_file      = ""
+  deployment_file = ""
+
   project_id      = "test-project-123"
   region          = "us-central1"
   resource_prefix = "test-dry"

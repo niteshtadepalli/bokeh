@@ -16,7 +16,7 @@ locals {
   # Non-empty per-command cm flag strings for each repository. coalesce(v, " ")
   # maps both null and "" to a blank string that trimspace() then empties.
   repo_cm_flags = {
-    for key, repo in var.target_repositories : key => {
+    for key, repo in local.target_repositories : key => {
       for cmd, flags in {
         find   = repo.find_flags
         verify = repo.verify_flags
@@ -27,14 +27,14 @@ locals {
 }
 
 resource "google_cloud_scheduler_job" "repo_scans" {
-  for_each    = var.target_repositories
-  name        = "${var.resource_prefix}-scan-${each.key}"
+  for_each    = local.target_repositories
+  name        = "${local.cfg.resource_prefix}-scan-${each.key}"
   description = "Scheduled CodeMender scan for ${each.value.repo_url}"
-  schedule    = coalesce(each.value.schedule, var.scheduler_cron)
-  time_zone   = var.scheduler_timezone
-  paused      = var.scheduler_paused
-  region      = var.region
-  project     = var.project_id
+  schedule    = coalesce(each.value.schedule, local.cfg.scheduler_cron)
+  time_zone   = local.cfg.scheduler_timezone
+  paused      = local.cfg.scheduler_paused
+  region      = local.cfg.region
+  project     = local.cfg.project_id
 
   http_target {
     uri         = "https://workflowexecutions.googleapis.com/v1/${google_workflows_workflow.coordinator.id}/executions"
@@ -46,7 +46,7 @@ resource "google_cloud_scheduler_job" "repo_scans" {
           job_name        = google_cloud_run_v2_job.runner.name
           worker_job_name = google_cloud_run_v2_job.worker.name
           gcs_bucket      = google_storage_bucket.reports.name
-          region          = var.region
+          region          = local.cfg.region
           repo_url        = each.value.repo_url
           scan_target     = (each.value.scan_target != null && each.value.scan_target != "") ? each.value.scan_target : "."
           target_branch   = each.value.target_branch != null ? each.value.target_branch : ""
