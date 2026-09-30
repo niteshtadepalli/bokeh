@@ -1233,6 +1233,7 @@ def update_finding_in_sticky_comment(
     status_cell_md: str,
     min_sev: str = "MEDIUM",
     max_retries: int = 5,
+    fail_on_findings: Optional[bool] = None,
 ) -> bool:
   """Updates a single finding's row in the sticky PR comment with optimistic concurrency retries."""
   if _skip_for_dry_run(f"sticky comment row update on pull request #{pr_number}"):
@@ -1252,15 +1253,6 @@ def update_finding_in_sticky_comment(
   fpath = fields["file_path"]
   line_no = fields["line_number"]
   is_blocking = is_blocking_severity(sev, min_sev)
-  gate_badge = (
-      "⚪ Dismissed (FP)"
-      if "Dismissed" in status_cell_md
-      else ("🚫 **BLOCKING**" if is_blocking else "ℹ️ Advisory")
-  )
-  new_row = (
-      f"| `{sev}` | {gate_badge} | **{title}** (`{fid}`) | `{fpath}:{line_no}`"
-      f" | {status_cell_md} | <!-- cm-row:{fid} -->"
-  )
   headers = _github_api_headers(token)
 
   for attempt in range(max_retries):
@@ -1278,8 +1270,28 @@ def update_finding_in_sticky_comment(
       row_pattern = re.compile(
           rf"^\|[^\n]*<!-- cm-row:{re.escape(fid)} -->\s*$", re.MULTILINE
       )
-      if not row_pattern.search(body):
+      match_row = row_pattern.search(body)
+      if not match_row:
         return False
+
+      effective_fail = fail_on_findings
+      if effective_fail is None:
+        effective_fail = (
+            "PASSED (Non-Blocking Mode)" not in body
+            and "⚠️ **Non-Blocking**" not in match_row.group(0)
+        )
+      blocking_label = (
+          "🚫 **BLOCKING**" if effective_fail else "⚠️ **Non-Blocking**"
+      )
+      gate_badge = (
+          "⚪ Dismissed (FP)"
+          if "Dismissed" in status_cell_md
+          else (blocking_label if is_blocking else "ℹ️ Advisory")
+      )
+      new_row = (
+          f"| `{sev}` | {gate_badge} | **{title}** (`{fid}`) | `{fpath}:{line_no}`"
+          f" | {status_cell_md} | <!-- cm-row:{fid} -->"
+      )
       updated_body = row_pattern.sub(new_row, body)
 
       all_rows = re.findall(

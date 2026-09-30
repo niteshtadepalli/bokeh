@@ -132,7 +132,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  CODEMENDER_PRESUBMIT_GATE: "true"
+  CODEMENDER_PRESUBMIT_PIPELINE: "true"
   GH_APP_ID: ${{ secrets.github_app_id }}
   GH_APP_KEY: ${{ secrets.github_app_private_key }}
   WIF_PROVIDER: ${{ secrets.gcp_workload_identity_provider }}
@@ -363,6 +363,8 @@ jobs:
           CODEMENDER_IS_FORK_PR: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || false }}
           REPO_FULL: ${{ github.repository }}
           MIN_BLOCKING_SEVERITY: ${{ inputs.min_blocking_severity }}
+          BLOCK_PR_MERGE: ${{ inputs.block_pr_merge && inputs.fail_on_findings }}
+          FAIL_ON_FINDINGS: ${{ inputs.block_pr_merge && inputs.fail_on_findings }}
           CODEMENDER_SCAN_TARGET: ${{ inputs.scan_target }}
           CODEMENDER_MODEL: ${{ inputs.model }}
           VERIFY_MODEL: ${{ inputs.verify_model || inputs.model }}

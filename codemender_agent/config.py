@@ -66,6 +66,14 @@ PR_MODE_CHILD_PR = "child_pr"
 VALID_PR_REMEDIATION_MODES = (PR_MODE_REVIEW_SUGGESTION, PR_MODE_CHILD_PR)
 
 
+def is_presubmit_pipeline() -> bool:
+  """Returns True when the 4-stage PR pre-submit pipeline is active."""
+  return (
+      os.environ.get("CODEMENDER_PRESUBMIT_PIPELINE", "").strip().lower()
+      == "true"
+  )
+
+
 @dataclass(frozen=True)
 class OrchestratorConfig:
   """Centralized immutable configuration for the CodeMender Orchestrator."""
@@ -329,7 +337,7 @@ class OrchestratorConfig:
     elif (
         is_pr_scan
         or bool(pr_number)
-        or os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true"
+        or is_presubmit_pipeline()
         or os.environ.get("CODEMENDER_RUN_MODE", "").lower()
         in ("gate", "security_gate")
     ):

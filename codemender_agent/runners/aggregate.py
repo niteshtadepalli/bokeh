@@ -39,6 +39,7 @@ from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import github_app_configured
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import is_presubmit_pipeline
 from codemender_agent.config import read_default_branch
 from codemender_agent.config import refresh_github_token
 from codemender_agent.config import resolve_pr_remediation_mode
@@ -2287,7 +2288,7 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
   take_wiz_credentials()
   config = OrchestratorConfig.from_env()
   workspace_dir = config.workspace_dir or os.getcwd()
-  if os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true":
+  if is_presubmit_pipeline():
     repo_full = (
         os.environ.get("REPO_FULL") or os.environ.get("GITHUB_REPOSITORY") or ""
     ).strip()

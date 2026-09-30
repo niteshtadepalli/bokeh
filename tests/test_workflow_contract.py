@@ -199,7 +199,7 @@ class TestCodeMenderSecurityGate(unittest.TestCase):
             "GITHUB_WORKSPACE": str(self.workspace),
             "GITHUB_OUTPUT": str(self.github_output),
             "GITHUB_STEP_SUMMARY": str(self.step_summary),
-            "CODEMENDER_PRESUBMIT_GATE": "true",
+            "CODEMENDER_PRESUBMIT_PIPELINE": "true",
             "CODEMENDER_RUN_MODE": run_mode,
             "REPO_FULL": "niteshtadepalli/bokeh",
             "REPO_FULL_NAME": "niteshtadepalli/bokeh",
@@ -286,7 +286,7 @@ class TestCodeMenderSecurityGate(unittest.TestCase):
         with open(PARALLEL_WORKFLOW, "r", encoding="utf-8") as f:
             parallel_doc = yaml.safe_load(f)
         self.assertEqual(set(parallel_doc["jobs"].keys()), {"scan", "security-gate", "worker", "aggregate"})
-        self.assertEqual(parallel_doc.get("env", {}).get("CODEMENDER_PRESUBMIT_GATE"), "true")
+        self.assertEqual(parallel_doc.get("env", {}).get("CODEMENDER_PRESUBMIT_PIPELINE"), "true")
 
         found_modes = set()
         for job_name, job in parallel_doc["jobs"].items():
@@ -983,7 +983,7 @@ class TestCodeMenderSecurityGate(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         base_env = {
-            "CODEMENDER_PRESUBMIT_GATE": "true",
+            "CODEMENDER_PRESUBMIT_PIPELINE": "true",
             "WORKSPACE_DIR": str(self.workspace),
             "GITHUB_WORKSPACE": str(self.workspace),
             "GITHUB_OUTPUT": str(self.github_output),

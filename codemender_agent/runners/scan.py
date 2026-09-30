@@ -45,6 +45,7 @@ from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import github_app_configured
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import is_presubmit_pipeline
 from codemender_agent.config import read_default_branch
 from codemender_agent.config import refresh_github_token
 # Storage signed URL and upload utilities
@@ -1177,7 +1178,7 @@ def run_scan_pipeline() -> None:
   The guard re-raises whatever it caught, so exit codes are unchanged, and it
   is a hard no-op when telemetry is not configured.
   """
-  if os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true":
+  if is_presubmit_pipeline():
     execute_stage1_presubmit_scan()
     return
 

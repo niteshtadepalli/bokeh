@@ -232,6 +232,76 @@ class TestVcsSecurityGatePrimitives(unittest.TestCase):
     self.assertIn("*✅ **Stage 2 Complete: 2/2 Findings Processed**", state["body"])
 
   @patch("codemender_agent.vcs.github.requests")
+  def test_update_finding_in_sticky_comment_preserves_non_blocking_gate_badge(
+      self, mock_requests: MagicMock
+  ) -> None:
+    state = {
+        "body": (
+            f"{STICKY_SUMMARY_MARKER}\n"
+            "## 🛡️ CodeMender Pre-Submit Security Gate — ⚠️ **PASSED (Non-Blocking Mode)** (`1` finding(s) `>= MEDIUM` — merge not blocked)\n"
+            "*⏳ **Stage 1 Complete: 0/1 Findings Verified** (`cm verify` & `cm fix` running in background)*\n\n"
+            "| Severity | Gate | Finding | Location | Status |\n"
+            "| :--- | :--- | :--- | :--- | :--- |\n"
+            "| `CRITICAL` | ⚠️ **Non-Blocking** | **CmdInj** (`2e654391`) | `src/a.py:9` | ⏳ **Queued** | <!-- cm-row:2e654391 -->\n"
+        )
+    }
+
+    def fake_get(url: str, **kwargs):
+      resp = MagicMock()
+      resp.raise_for_status.return_value = None
+      if url.endswith("/comments?per_page=100"):
+        resp.json.return_value = [{"id": 99, "body": state["body"]}]
+      else:
+        resp.json.return_value = {"id": 99, "body": state["body"]}
+      return resp
+
+    def fake_patch(url: str, **kwargs):
+      state["body"] = kwargs["json"]["body"]
+      resp = MagicMock()
+      resp.raise_for_status.return_value = None
+      return resp
+
+    mock_requests.get.side_effect = fake_get
+    mock_requests.patch.side_effect = fake_patch
+
+    update_finding_in_sticky_comment(
+        token="ghs_token",
+        owner="org",
+        repo="repo",
+        pr_number=1,
+        finding={
+            "finding_id": "2e654391",
+            "severity": "CRITICAL",
+            "title": "CmdInj",
+            "file_path": "src/a.py",
+            "line_number": 9,
+        },
+        status_cell_md="⏳ **Verifying (`cm verify`)...**",
+        min_sev="MEDIUM",
+    )
+    self.assertIn("| `CRITICAL` | ⚠️ **Non-Blocking** |", state["body"])
+    self.assertNotIn("🚫 **BLOCKING**", state["body"])
+
+    update_finding_in_sticky_comment(
+        token="ghs_token",
+        owner="org",
+        repo="repo",
+        pr_number=1,
+        finding={
+            "finding_id": "2e654391",
+            "severity": "CRITICAL",
+            "title": "CmdInj",
+            "file_path": "src/a.py",
+            "line_number": 9,
+        },
+        status_cell_md="✅ **Patch Ready**",
+        min_sev="MEDIUM",
+        fail_on_findings=False,
+    )
+    self.assertIn("| `CRITICAL` | ⚠️ **Non-Blocking** |", state["body"])
+    self.assertNotIn("🚫 **BLOCKING**", state["body"])
+
+  @patch("codemender_agent.vcs.github.requests")
   def test_resolve_sticky_comment_refreshes_target_sha_on_new_clean_commit(
       self, mock_requests: MagicMock
   ) -> None:
