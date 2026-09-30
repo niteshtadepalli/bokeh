@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [ gcp, gha_wif ]
+        module: [ gcp, gha_wif, bootstrap ]
     defaults:
       run:
         working-directory: terraform/${{ matrix.module }}

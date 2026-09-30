@@ -24,10 +24,17 @@
 # the image without pointing the runner and worker Cloud Run jobs at it. To
 # trial a newer CLI release, override all four, for example:
 #   _CM_VERSION=<version>,_CM_SHA256=<sha256>,_IMAGE_TAG=cm-<version>,_UPDATE_JOBS=false
+#
+# With _UPDATE_JOBS=true the image is also tagged :latest (the build cache),
+# and the last step points both jobs at the new image's digest, but only once
+# no scan is running: it re-checks every 5 minutes for up to _MAX_WAIT_HOURS
+# and fails without changing anything if the scans outlast that. See
+# scripts/ci/image_rollout.sh. The build timeout leaves room for that wait.
 
 steps:
   # Step 1: Stage the cm binary and check that it is the pinned release
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  - id: 'stage-cm'
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
@@ -57,48 +64,61 @@ steps:
         ./cm --version
 
   # Step 2: Pull cached image and build the container image
-  - name: 'gcr.io/cloud-builders/docker'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        docker pull ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest || true
-        docker build \
-          --cache-from ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:latest \
-          -t ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:${_IMAGE_TAG} \
-          -t ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/codemender-runner:${_IMAGE_TAG} \
-          .
-
-  # Step 3: Push the container image to Artifact Registry
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'push'
-      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:${_IMAGE_TAG}'
-
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'push'
-      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/codemender-runner:${_IMAGE_TAG}'
-
-  # Step 4: Point the runner and worker Cloud Run jobs at the new image
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  - id: 'build'
+    name: 'gcr.io/cloud-builders/docker'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
         set -euo pipefail
-        if [ "${_UPDATE_JOBS}" != "true" ]; then
-          echo "_UPDATE_JOBS=${_UPDATE_JOBS}; leaving the Cloud Run jobs unchanged."
-          exit 0
+        BASE="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}"
+        TAGS=(-t "$${BASE}/orchestrator:${_IMAGE_TAG}" -t "$${BASE}/codemender-runner:${_IMAGE_TAG}")
+        if [ "${_UPDATE_JOBS}" = "true" ] && [ "${_IMAGE_TAG}" != "latest" ]; then
+          TAGS+=(-t "$${BASE}/orchestrator:latest" -t "$${BASE}/codemender-runner:latest")
         fi
-        IMAGE="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/orchestrator:${_IMAGE_TAG}"
-        REPO_NAME_VAL="${_REPO_NAME}"
-        WORKER_JOB="$${REPO_NAME_VAL/-runner/-worker}"
-        gcloud run jobs update "${_REPO_NAME}" --image "$${IMAGE}" --region "${_REGION}"
-        gcloud run jobs update "$${WORKER_JOB}" --image "$${IMAGE}" --region "${_REGION}"
+        docker pull "$${BASE}/orchestrator:latest" || true
+        docker build --cache-from "$${BASE}/orchestrator:latest" "$${TAGS[@]}" .
+
+  # Step 3: Push the container image to Artifact Registry. :latest moves only
+  # for builds that also roll out (_UPDATE_JOBS=true), so a trial build never
+  # changes it.
+  - id: 'push'
+    name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -euo pipefail
+        BASE="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}"
+        docker push "$${BASE}/orchestrator:${_IMAGE_TAG}"
+        docker push "$${BASE}/codemender-runner:${_IMAGE_TAG}"
+        if [ "${_UPDATE_JOBS}" = "true" ] && [ "${_IMAGE_TAG}" != "latest" ]; then
+          docker push "$${BASE}/orchestrator:latest"
+          docker push "$${BASE}/codemender-runner:latest"
+        fi
+
+  # Step 4: Once no scan is running, point the runner and worker Cloud Run
+  # jobs at the new image digest (skipped when _UPDATE_JOBS is not true).
+  - id: 'rollout'
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args: ['scripts/ci/image_rollout.sh']
+    env:
+      - 'PROJECT_ID=${PROJECT_ID}'
+      - 'REGION=${_REGION}'
+      - 'REPO_NAME=${_REPO_NAME}'
+      - 'IMAGE_TAG=${_IMAGE_TAG}'
+      - 'UPDATE_JOBS=${_UPDATE_JOBS}'
+      - 'MAX_WAIT_HOURS=${_MAX_WAIT_HOURS}'
+
+# 13 hours: the default 12-hour wait for running scans plus the build itself.
+# Raise it together with _MAX_WAIT_HOURS (Cloud Build allows up to 24 hours).
+timeout: '46800s'
 
 options:
   dynamicSubstitutions: true
+  # Required when a trigger runs the build as a user-managed service account.
+  logging: CLOUD_LOGGING_ONLY
 
 substitutions:
   _RESOURCE_PREFIX: 'codemender'
@@ -108,3 +128,4 @@ substitutions:
   _CM_SHA256: '2056b26908f683f35715487ed35597fee3a0bc6c86e00f23eedebff4da36f022'
   _IMAGE_TAG: 'latest'
   _UPDATE_JOBS: 'true'
+  _MAX_WAIT_HOURS: '12'

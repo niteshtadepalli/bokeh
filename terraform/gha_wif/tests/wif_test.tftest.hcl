@@ -102,3 +102,35 @@ run "repository_list_scoping" {
     error_message = "Labels must be created based on allowed_repositories fallback."
   }
 }
+
+run "default_oidc_issuer_is_github_com" {
+  command = plan
+
+  assert {
+    condition     = google_iam_workload_identity_pool_provider.github_provider.oidc[0].issuer_uri == "https://token.actions.githubusercontent.com"
+    error_message = "The default OIDC issuer must stay the github.com issuer."
+  }
+}
+
+run "custom_oidc_issuer" {
+  command = plan
+
+  variables {
+    github_oidc_issuer_uri = "https://token.actions.example.ghe.com"
+  }
+
+  assert {
+    condition     = google_iam_workload_identity_pool_provider.github_provider.oidc[0].issuer_uri == "https://token.actions.example.ghe.com"
+    error_message = "github_oidc_issuer_uri must reach the workload identity provider."
+  }
+}
+
+run "non_https_oidc_issuer_rejected" {
+  command = plan
+
+  variables {
+    github_oidc_issuer_uri = "http://token.actions.example.ghe.com"
+  }
+
+  expect_failures = [var.github_oidc_issuer_uri]
+}

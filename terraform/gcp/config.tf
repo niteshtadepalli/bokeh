@@ -193,7 +193,10 @@ locals {
     "bigquery_deletion_protection", "bigquery_delete_contents_on_destroy",
   ]
   deployment_number_keys = ["vpc_connector_min_instances", "vpc_connector_max_instances"]
-  deployment_known_keys  = concat(local.deployment_string_keys, local.deployment_bool_keys, local.deployment_number_keys)
+  deployment_list_keys   = ["cloudbuild_service_account_emails"]
+  deployment_known_keys = concat(
+    local.deployment_string_keys, local.deployment_bool_keys, local.deployment_number_keys, local.deployment_list_keys,
+  )
 
   dep_str = {
     for k in local.deployment_string_keys : k => tostring(local.deployment_doc[k])
@@ -206,6 +209,12 @@ locals {
   dep_num = {
     for k in local.deployment_number_keys : k => tonumber(local.deployment_doc[k])
     if can(tonumber(lookup(local.deployment_doc, k, null))) && lookup(local.deployment_doc, k, null) != null
+  }
+  # A YAML sequence of strings. yamldecode() returns a tuple, so each element
+  # is converted on its own; a scalar or mapping is rejected.
+  dep_list = {
+    for k in local.deployment_list_keys : k => [for v in local.deployment_doc[k] : tostring(v)]
+    if lookup(local.deployment_doc, k, null) != null && can([for v in local.deployment_doc[k] : tostring(v)]) && !can(tostring(lookup(local.deployment_doc, k, null))) && !can(keys(lookup(local.deployment_doc, k, null)))
   }
 
   deployment_errors = concat(
@@ -225,6 +234,10 @@ locals {
       for k in local.deployment_number_keys : "${k}: must be a number"
       if lookup(local.deployment_doc, k, null) != null && !contains(keys(local.dep_num), k)
     ],
+    [
+      for k in local.deployment_list_keys : "${k}: must be a list of strings"
+      if lookup(local.deployment_doc, k, null) != null && !contains(keys(local.dep_list), k)
+    ],
   )
 
   # Effective settings: deployment.yaml first, then the variable (tfvars,
@@ -237,6 +250,7 @@ locals {
     runner_cpu                          = lookup(local.dep_str, "runner_cpu", var.runner_cpu)
     runner_memory                       = lookup(local.dep_str, "runner_memory", var.runner_memory)
     initial_runner_image                = lookup(local.dep_str, "initial_runner_image", var.initial_runner_image)
+    cloudbuild_service_account_emails   = lookup(local.dep_list, "cloudbuild_service_account_emails", var.cloudbuild_service_account_emails)
     create_vpc_and_nat                  = lookup(local.dep_bool, "create_vpc_and_nat", var.create_vpc_and_nat)
     existing_vpc_connector_id           = lookup(local.dep_str, "existing_vpc_connector_id", var.existing_vpc_connector_id)
     vpc_connector_cidr                  = lookup(local.dep_str, "vpc_connector_cidr", var.vpc_connector_cidr)
@@ -324,6 +338,13 @@ resource "terraform_data" "config_checks" {
     precondition {
       condition     = can(regex("^[A-Za-z0-9_]+$", local.cfg.bigquery_dataset_id)) && length(local.cfg.bigquery_dataset_id) <= 1024
       error_message = "bigquery_dataset_id must be 1-1024 characters of letters, numbers, and underscores only."
+    }
+
+    precondition {
+      condition = local.cfg.cloudbuild_service_account_emails == null ? true : alltrue([
+        for e in local.cfg.cloudbuild_service_account_emails : can(regex("^[^@:\\s]+@[^@:\\s]+\\.[^@:\\s]+$", e))
+      ]) && length(distinct(local.cfg.cloudbuild_service_account_emails)) == length(local.cfg.cloudbuild_service_account_emails)
+      error_message = "cloudbuild_service_account_emails must be a list of distinct service account emails, without a \"serviceAccount:\" prefix."
     }
   }
 }

@@ -54,13 +54,19 @@ resource "google_artifact_registry_repository" "docker_repo" {
 }
 
 locals {
-  cloudbuild_service_accounts = {
+  # The identities that run cloudbuild.yaml. By default the project's two
+  # default Cloud Build service accounts, under the keys "legacy" and
+  # "compute" (kept so existing bindings keep their addresses); otherwise the
+  # configured emails, keyed by email.
+  cloudbuild_service_accounts = local.cfg.cloudbuild_service_account_emails == null ? tomap({
     "legacy"  = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
     "compute" = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
-  }
+    }) : tomap({
+    for email in distinct(local.cfg.cloudbuild_service_account_emails) : email => "serviceAccount:${email}"
+  })
 }
 
-# Grant Storage Object Viewer to both legacy & compute default Cloud Build service accounts (for source tarballs)
+# Grant Storage Object Viewer to the Cloud Build SAs (for source tarballs)
 resource "google_project_iam_member" "cloudbuild_storage_viewer" {
   for_each   = local.cloudbuild_service_accounts
   project    = local.cfg.project_id
