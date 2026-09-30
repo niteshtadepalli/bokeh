@@ -30,18 +30,18 @@
 # var.github_app_id restores the previous behaviour.
 
 locals {
-  github_app_enabled = var.github_app_id != ""
+  github_app_enabled = local.cfg.github_app_id != ""
 
   github_app_private_key_secret_id = (
-    var.github_app_private_key_secret_id != ""
-    ? var.github_app_private_key_secret_id
-    : "${var.resource_prefix}-github-app-private-key"
+    local.cfg.github_app_private_key_secret_id != ""
+    ? local.cfg.github_app_private_key_secret_id
+    : "${local.cfg.resource_prefix}-github-app-private-key"
   )
 
   # Environment variable name => value. Consumed by the runner and worker jobs.
   github_app_plain_env = local.github_app_enabled ? merge(
-    { GITHUB_APP_ID = var.github_app_id },
-    var.github_app_installation_id != "" ? { GITHUB_APP_INSTALLATION_ID = var.github_app_installation_id } : {},
+    { GITHUB_APP_ID = local.cfg.github_app_id },
+    local.cfg.github_app_installation_id != "" ? { GITHUB_APP_INSTALLATION_ID = local.cfg.github_app_installation_id } : {},
   ) : {}
 
   # Environment variable name => secret. Consumed by the runner and worker jobs.
@@ -57,11 +57,11 @@ locals {
   # Replaces the static-token instructions in the secret_manager_notice output
   # while an App is configured.
   github_app_secret_notice = join("\n", [
-    "GitHub App authentication is enabled (App ID ${var.github_app_id}). The runner and worker jobs",
+    "GitHub App authentication is enabled (App ID ${local.cfg.github_app_id}). The runner and worker jobs",
     "read the App's private key from the existing secret '${local.github_app_private_key_secret_id}'",
     "and mint installation tokens at runtime; '${google_secret_manager_secret.github_app_token.secret_id}' is not mounted.",
     "To rotate the key, add a new version (used by the next job execution):",
-    "  gcloud secrets versions add ${local.github_app_private_key_secret_id} --data-file=/path/to/app.private-key.pem --project=${var.project_id}",
+    "  gcloud secrets versions add ${local.github_app_private_key_secret_id} --data-file=/path/to/app.private-key.pem --project=${local.cfg.project_id}",
     "",
   ])
 }
@@ -69,7 +69,7 @@ locals {
 data "google_secret_manager_secret" "github_app_private_key" {
   count     = local.github_app_enabled ? 1 : 0
   secret_id = local.github_app_private_key_secret_id
-  project   = var.project_id
+  project   = local.cfg.project_id
 }
 
 # Non-authoritative accessor bindings: both jobs talk to GitHub (the runner
@@ -77,7 +77,7 @@ data "google_secret_manager_secret" "github_app_private_key" {
 # requests), so both service accounts need the key.
 resource "google_secret_manager_secret_iam_member" "runner_github_app_key_accessor" {
   count     = local.github_app_enabled ? 1 : 0
-  project   = var.project_id
+  project   = local.cfg.project_id
   secret_id = data.google_secret_manager_secret.github_app_private_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.runner_sa.email}"
@@ -85,7 +85,7 @@ resource "google_secret_manager_secret_iam_member" "runner_github_app_key_access
 
 resource "google_secret_manager_secret_iam_member" "worker_github_app_key_accessor" {
   count     = local.github_app_enabled ? 1 : 0
-  project   = var.project_id
+  project   = local.cfg.project_id
   secret_id = data.google_secret_manager_secret.github_app_private_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.worker_sa.email}"

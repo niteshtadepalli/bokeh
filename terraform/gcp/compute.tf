@@ -25,9 +25,9 @@ resource "time_sleep" "wait_for_apis_and_iam" {
 }
 
 resource "google_cloud_run_v2_job" "runner" {
-  name                = "${var.resource_prefix}-runner"
-  location            = var.region
-  project             = var.project_id
+  name                = "${local.cfg.resource_prefix}-runner"
+  location            = local.cfg.region
+  project             = local.cfg.project_id
   deletion_protection = false
 
   template {
@@ -37,20 +37,22 @@ resource "google_cloud_run_v2_job" "runner" {
       max_retries     = 0
 
       containers {
-        # Use a placeholder image initially so Terraform can provision the job before Cloud Build runs.
-        # The actual image is deployed out-of-band via Cloud Build (see cloudbuild.yaml).
-        image = "us-docker.pkg.dev/cloudrun/container/job:latest"
+        # The image the job is created with (a public placeholder by default,
+        # so Terraform can provision the job before Cloud Build runs). The
+        # actual image is deployed out-of-band via Cloud Build (see
+        # cloudbuild.yaml), which is why the image is in ignore_changes below.
+        image = local.cfg.initial_runner_image
 
         resources {
           limits = {
-            cpu    = var.runner_cpu
-            memory = var.runner_memory
+            cpu    = local.cfg.runner_cpu
+            memory = local.cfg.runner_memory
           }
         }
 
         env {
           name  = "GOOGLE_CLOUD_PROJECT"
-          value = var.project_id
+          value = local.cfg.project_id
         }
 
         env {
@@ -72,19 +74,19 @@ resource "google_cloud_run_v2_job" "runner" {
         # orchestrator then performs zero BigQuery calls.
         env {
           name  = "CODEMENDER_BQ_DATASET"
-          value = var.enable_bigquery_telemetry ? var.bigquery_dataset_id : ""
+          value = local.cfg.enable_bigquery_telemetry ? local.cfg.bigquery_dataset_id : ""
         }
 
         env {
           name  = "CODEMENDER_BQ_PROJECT"
-          value = var.enable_bigquery_telemetry ? var.project_id : ""
+          value = local.cfg.enable_bigquery_telemetry ? local.cfg.project_id : ""
         }
 
         # Off by default: gates export of LLM analysis prose and verbatim
         # source snippets into the warehouse.
         env {
           name  = "CODEMENDER_BQ_INCLUDE_SNIPPETS"
-          value = var.bigquery_include_snippets ? "true" : "false"
+          value = local.cfg.bigquery_include_snippets ? "true" : "false"
         }
 
         # Static GitHub token, mounted only while no GitHub App is configured
@@ -168,9 +170,9 @@ resource "google_cloud_run_v2_job" "runner" {
 }
 
 resource "google_cloud_run_v2_job" "worker" {
-  name                = "${var.resource_prefix}-worker"
-  location            = var.region
-  project             = var.project_id
+  name                = "${local.cfg.resource_prefix}-worker"
+  location            = local.cfg.region
+  project             = local.cfg.project_id
   deletion_protection = false
 
   template {
@@ -180,20 +182,22 @@ resource "google_cloud_run_v2_job" "worker" {
       max_retries     = 0
 
       containers {
-        # Use a placeholder image initially so Terraform can provision the job before Cloud Build runs.
-        # The actual image is deployed out-of-band via Cloud Build (see cloudbuild.yaml).
-        image = "us-docker.pkg.dev/cloudrun/container/job:latest"
+        # The image the job is created with (a public placeholder by default,
+        # so Terraform can provision the job before Cloud Build runs). The
+        # actual image is deployed out-of-band via Cloud Build (see
+        # cloudbuild.yaml), which is why the image is in ignore_changes below.
+        image = local.cfg.initial_runner_image
 
         resources {
           limits = {
-            cpu    = var.runner_cpu
-            memory = var.runner_memory
+            cpu    = local.cfg.runner_cpu
+            memory = local.cfg.runner_memory
           }
         }
 
         env {
           name  = "GOOGLE_CLOUD_PROJECT"
-          value = var.project_id
+          value = local.cfg.project_id
         }
 
         env {
@@ -267,9 +271,9 @@ resource "google_cloud_run_v2_job" "worker" {
 }
 
 resource "google_workflows_workflow" "coordinator" {
-  name                = "${var.resource_prefix}-coordinator"
-  region              = var.region
-  project             = var.project_id
+  name                = "${local.cfg.resource_prefix}-coordinator"
+  region              = local.cfg.region
+  project             = local.cfg.project_id
   deletion_protection = false
   description         = "Coordinates parallel CodeMender security scan and fix executions"
   service_account     = google_service_account.workflow_sa.id

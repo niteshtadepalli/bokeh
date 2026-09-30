@@ -14,9 +14,10 @@
 
 # Opt-in Wiz SAST bridge.
 #
-# Nothing in this file is created unless at least one entry in
-# var.target_repositories sets `wiz = { enabled = true }`. The Wiz service
-# account credentials live in two pre-existing Secret Manager secrets that are
+# Nothing in this file is created unless at least one repository (in
+# repos.yaml or var.target_repositories) sets `wiz = { enabled = true }`. The
+# Wiz service account credentials live in two pre-existing Secret Manager
+# secrets that are
 # *referenced* through data sources rather than managed here, so enabling or
 # disabling the bridge can never create, replace, or destroy the secrets or
 # their versions. The credentials are mounted on the runner job only (the
@@ -28,22 +29,22 @@
 
 locals {
   wiz_enabled_repositories = {
-    for name, repo in var.target_repositories : name => repo
+    for name, repo in local.target_repositories : name => repo
     if try(repo.wiz.enabled, false) == true
   }
 
   wiz_enabled = length(local.wiz_enabled_repositories) > 0
 
   wiz_client_id_secret_id = (
-    var.wiz_client_id_secret_id != ""
-    ? var.wiz_client_id_secret_id
-    : "${var.resource_prefix}-wiz-client-id"
+    local.cfg.wiz_client_id_secret_id != ""
+    ? local.cfg.wiz_client_id_secret_id
+    : "${local.cfg.resource_prefix}-wiz-client-id"
   )
 
   wiz_client_secret_secret_id = (
-    var.wiz_client_secret_secret_id != ""
-    ? var.wiz_client_secret_secret_id
-    : "${var.resource_prefix}-wiz-client-secret"
+    local.cfg.wiz_client_secret_secret_id != ""
+    ? local.cfg.wiz_client_secret_secret_id
+    : "${local.cfg.resource_prefix}-wiz-client-secret"
   )
 
   # Environment variable name => referenced secret. Consumed by the runner job.
@@ -56,13 +57,13 @@ locals {
 data "google_secret_manager_secret" "wiz_client_id" {
   count     = local.wiz_enabled ? 1 : 0
   secret_id = local.wiz_client_id_secret_id
-  project   = var.project_id
+  project   = local.cfg.project_id
 }
 
 data "google_secret_manager_secret" "wiz_client_secret" {
   count     = local.wiz_enabled ? 1 : 0
   secret_id = local.wiz_client_secret_secret_id
-  project   = var.project_id
+  project   = local.cfg.project_id
 }
 
 # Non-authoritative accessor bindings for the runner service account only.
@@ -70,7 +71,7 @@ data "google_secret_manager_secret" "wiz_client_secret" {
 # secret's policy untouched.
 resource "google_secret_manager_secret_iam_member" "runner_wiz_client_id_accessor" {
   count     = local.wiz_enabled ? 1 : 0
-  project   = var.project_id
+  project   = local.cfg.project_id
   secret_id = data.google_secret_manager_secret.wiz_client_id[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.runner_sa.email}"
@@ -78,7 +79,7 @@ resource "google_secret_manager_secret_iam_member" "runner_wiz_client_id_accesso
 
 resource "google_secret_manager_secret_iam_member" "runner_wiz_client_secret_accessor" {
   count     = local.wiz_enabled ? 1 : 0
-  project   = var.project_id
+  project   = local.cfg.project_id
   secret_id = data.google_secret_manager_secret.wiz_client_secret[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.runner_sa.email}"

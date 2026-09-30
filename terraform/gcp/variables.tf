@@ -12,9 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ---------------------------------------------------------------------------
+# YAML configuration (see config.tf). Every setting below can also be set in
+# deployment.yaml, which takes precedence over tfvars and -var values.
+# ---------------------------------------------------------------------------
+
+variable "repos_file" {
+  type        = string
+  description = "Path to the repository list YAML, relative to the Terraform working directory. Leave null to read repos.yaml in this directory when it exists; set to \"\" to ignore YAML and use target_repositories only. Any other value must name an existing file. See repos.example.yaml."
+  default     = null
+}
+
+variable "deployment_file" {
+  type        = string
+  description = "Path to the deployment settings YAML, relative to the Terraform working directory. Leave null to read deployment.yaml in this directory when it exists; set to \"\" to ignore it. Any other value must name an existing file. See deployment.example.yaml."
+  default     = null
+}
+
 variable "project_id" {
   type        = string
-  description = "The GCP Project ID where resources will be deployed."
+  description = "The GCP Project ID where resources will be deployed. Required here or in deployment.yaml."
+  default     = ""
 }
 
 variable "region" {
@@ -46,6 +64,12 @@ variable "runner_memory" {
   type        = string
   description = "Memory limit for Cloud Run Job worker tasks (e.g. '2Gi', '4Gi', '8Gi', '16Gi')."
   default     = "16Gi"
+}
+
+variable "initial_runner_image" {
+  type        = string
+  description = "Container image the runner and worker Cloud Run jobs are created with. Terraform ignores later image changes (image rollouts happen through cloudbuild.yaml), so this only takes effect when a job is first created or replaced. Defaults to a public placeholder; set it to a known-good runner image digest so a replaced job comes back on a real image."
+  default     = "us-docker.pkg.dev/cloudrun/container/job:latest"
 }
 
 variable "create_vpc_and_nat" {
@@ -137,7 +161,7 @@ variable "target_repositories" {
       min_severity = optional(string, "HIGH")
     }))
   }))
-  description = "Map of repositories to schedule for automated CodeMender security scans."
+  description = "Map of repositories to schedule for automated CodeMender security scans. Merged with the repositories in repos.yaml (see repos_file); a repository defined in both takes the repos.yaml definition."
   default     = {}
 
   validation {

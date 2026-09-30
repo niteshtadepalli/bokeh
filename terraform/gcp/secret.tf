@@ -13,8 +13,8 @@
 # limitations under the License.
 
 resource "google_secret_manager_secret" "github_app_token" {
-  secret_id = "${var.resource_prefix}-github-token"
-  project   = var.project_id
+  secret_id = "${local.cfg.resource_prefix}-github-token"
+  project   = local.cfg.project_id
 
   replication {
     auto {}
