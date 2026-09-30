@@ -4,6 +4,8 @@
 # branch ruleset.
 #
 # The last matching rule wins, so specific paths come after general ones.
+# When a rule lists several owners, an approval from any one of them is
+# enough. To make a particular team's review mandatory, list only that team.
 
 # Default owners for everything.
 *                               @your-org/codemender-maintainers
@@ -16,6 +18,6 @@
 /.github/                       @your-org/platform-team @your-org/security-team
 
 # What gets scanned and how the deployment is set up. repos.yaml can run code
-# in the scan jobs (build_command), so the security team reviews it too.
-/terraform/gcp/repos.yaml       @your-org/platform-team @your-org/security-team
+# in the scan jobs (build_command), so only the security team can approve it.
+/terraform/gcp/repos.yaml       @your-org/security-team
 /terraform/gcp/deployment.yaml  @your-org/platform-team

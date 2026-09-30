@@ -40,7 +40,7 @@ The one-time bootstrap stack (`terraform/bootstrap/`) creates:
 | `<prefix>-tf-plan` trigger | Every pull request into the deployed branch. No file filter, so the check always reports. |
 | `<prefix>-tf-apply` trigger | Every push to the deployed branch. Applies automatically unless `apply_requires_approval = true`. |
 | `<prefix>-tf-apply-destroy` trigger | Manual only, always needs approval. The only way to apply a change that deletes protected resources. |
-| `<prefix>-image` trigger | Pushes that change the image (`Dockerfile`, `codemender_agent/**`, `orchestrator.py`, `requirements.txt`, `cloudbuild.yaml`). Builds without approval unless `image_requires_approval = true`. |
+| `<prefix>-image` trigger | Pushes that change the image or its rollout (`Dockerfile`, `codemender_agent/**`, `orchestrator.py`, `requirements.txt`, `cloudbuild.yaml`, `scripts/ci/image_rollout.sh`). Builds without approval unless `image_requires_approval = true`. |
 
 The pipeline logic lives in plain scripts under `scripts/ci/`, so the same
 steps can run from another CI system (see [GitHub Actions
@@ -273,9 +273,10 @@ through immediately.
 
 Things worth knowing:
 
-*   If another code change is merged while a rollout is waiting, the older
-    build notices the newer image and stops without changing anything; the
-    newer build rolls out instead.
+*   If another code change is merged while a rollout is waiting, the newer
+    build moves the `:latest` tag when it pushes its image. The older build
+    sees that at its next check and stops without changing anything, and the
+    newer build does the rollout instead.
 *   Cloud Build bills the minutes a build spends waiting (one small VM).
 *   The check and the job update are a few seconds apart. A scan that starts
     in exactly that window can still have stages on two versions.
