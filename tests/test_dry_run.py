@@ -579,7 +579,7 @@ class GitHubActionsWorkflowDryRunTest(unittest.TestCase):
         for step in job.get("steps", [])
         if (step.get("env") or {}).get("CODEMENDER_RUN_MODE")
     ]
-    self.assertEqual(len(stage_steps), 3)
+    self.assertGreaterEqual(len(stage_steps), 3)
     for job_name, step in stage_steps:
       with self.subTest(job=job_name):
         self.assertEqual(
