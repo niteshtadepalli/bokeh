@@ -1188,6 +1188,8 @@ def update_finding_in_sticky_comment(
     max_retries: int = 5,
 ) -> bool:
   """Updates a single finding's row in the sticky PR comment with optimistic concurrency retries."""
+  if _skip_for_dry_run(f"sticky comment row update on pull request #{pr_number}"):
+    return False
   if not (token and owner and repo and pr_number):
     return False
   if token == "fake-token":
@@ -1284,6 +1286,8 @@ def resolve_sticky_comment_if_present(
     min_sev: str = "MEDIUM",
 ) -> bool:
   """Transitions an existing sticky comment on the PR to All Findings Resolved when 0 active findings remain."""
+  if _skip_for_dry_run(f"sticky comment resolution on pull request #{pr_number}"):
+    return False
   if not (token and owner and repo and pr_number):
     return False
   if token == "fake-token":
@@ -1340,6 +1344,8 @@ def post_idempotent_inline_review(
   for compatibility with `list_reviewed_finding_ids`) and checks existing PR
   review comments before posting so subsequent commits never duplicate reviews.
   """
+  if _skip_for_dry_run(f"inline suggestion review on pull request #{pr_number}"):
+    return ""
   if not (token and owner and repo and pr_number):
     return ""
 

@@ -116,6 +116,26 @@ class GitHubHelpersDryRunTest(unittest.TestCase):
         github.post_or_update_sticky_comment(_TOKEN, "o", "r", 7, "body")
     )
 
+  def test_update_finding_in_sticky_comment(self):
+    self.assertFalse(
+        github.update_finding_in_sticky_comment(
+            _TOKEN, "o", "r", 7, "fid12345", "FIXED"
+        )
+    )
+
+  def test_resolve_sticky_comment_if_present(self):
+    self.assertFalse(
+        github.resolve_sticky_comment_if_present(_TOKEN, "o", "r", 7, "a" * 40)
+    )
+
+  def test_post_idempotent_inline_review(self):
+    comment = github.build_review_comment("a.py", 1, 1, "x")
+    self.assertFalse(
+        github.post_idempotent_inline_review(
+            _TOKEN, "o", "r", 7, "a" * 40, "fid12345", comment, "summary"
+        )
+    )
+
   def test_sarif_upload(self):
     with tempfile.NamedTemporaryFile("w", suffix=".sarif") as f:
       f.write('{"runs": []}')
