@@ -83,7 +83,7 @@ flowchart TD
   scan -- "findings" --> worker["Job worker, matrix up to max_tasks: optional cm verify, cm fix, inline suggestion or child pull request"]
   worker --> agg["Job aggregate: merge shards, reports, SARIF upload"]
   agg --> gate{"Actionable findings left and fail_on_findings?"}
-  gate -- "yes" --> fail["CodeMender / Security Gate: failure, aggregate job fails"]
+  gate -- "yes" --> fail["CodeMender / Security Gate: failure"]
   gate -- "no" --> ok["CodeMender / Security Gate: success"]
   scan -. "Vertex AI through Workload Identity Federation" .-> gcp[("Your Google Cloud project")]
   worker -.-> gcp

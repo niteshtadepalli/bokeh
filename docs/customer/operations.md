@@ -82,7 +82,7 @@ The keys you are most likely to change in `deployment.yaml`:
 | `project_id`, `region` | (required), `us-central1` | Where the deployment lives |
 | `resource_prefix` | `codemender` | Prefix for every resource name. Changing it replaces the whole deployment |
 | `scheduler_cron`, `scheduler_timezone` | `0 2 * * *`, `Etc/UTC` | Default schedule for entries without `schedule` |
-| `scheduler_paused` | `true` in the example | Pauses every scheduler job |
+| `scheduler_paused` | `false` (`true` in the example) | Pauses every scheduler job |
 | `runner_cpu`, `runner_memory` | `4`, `16Gi` | Size of each Cloud Run task (both jobs) |
 | `github_app_id`, `github_app_installation_id`, `github_app_private_key_secret_id` | unset | GitHub App authentication; see below |
 | `wiz_client_id_secret_id`, `wiz_client_secret_secret_id` | `<prefix>-wiz-client-id`, `<prefix>-wiz-client-secret` | Names of the Wiz credential secrets |
