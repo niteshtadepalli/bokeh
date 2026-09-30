@@ -43,9 +43,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  CODEMENDER_PRESUBMIT_GATE: "true"
+  CODEMENDER_PRESUBMIT_PIPELINE: "true"
   CODEMENDER_AGENT_REPO: "cloud-gtm/cm-agent-merck"
-  CODEMENDER_AGENT_REF: "feat/phase4-reusable-workflow-security-gate"
+  CODEMENDER_AGENT_REF: "fix/presubmit-pipeline-and-nonblocking-gate"
   MIN_BLOCKING_SEVERITY: ${{ inputs.min_blocking_severity || vars.CODEMENDER_MIN_BLOCKING_SEVERITY || 'MEDIUM' }}
   BLOCK_PR_MERGE: ${{ inputs.block_pr_merge || vars.CODEMENDER_BLOCK_PR_MERGE || vars.CODEMENDER_FAIL_ON_FINDINGS || 'true' }}
   FAIL_ON_FINDINGS: ${{ inputs.block_pr_merge || vars.CODEMENDER_BLOCK_PR_MERGE || vars.CODEMENDER_FAIL_ON_FINDINGS || 'true' }}
