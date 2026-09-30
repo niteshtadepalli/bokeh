@@ -6,7 +6,7 @@ on:
       runner_image:
         description: 'Universal runner image or custom Bring-Your-Own-Image (BYOI)'
         required: false
-        default: 'ghcr.io/ilbzzz/codemender-runner:latest'
+        default: 'ghcr.io/your-org/codemender-runner:latest'
         type: string
       runner_type:
         description: 'Runner label for job execution'

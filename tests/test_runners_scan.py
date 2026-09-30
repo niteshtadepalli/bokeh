@@ -517,7 +517,7 @@ class TestScanRunner(unittest.TestCase):
     summary_file = os.path.join(self.workspace_dir, "step_summary.md")
     with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_file}):
       _render_zero_findings_summary(
-          owner="ilbzzz",
+          owner="example-org",
           repo_name="juice-shop-local",
           target_sha="1e677199",
           is_pr_scan=True,
@@ -537,11 +537,11 @@ class TestScanRunner(unittest.TestCase):
     summary_file = os.path.join(self.workspace_dir, "step_summary_tokens.md")
     with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_file}):
       _render_zero_findings_summary(
-          owner="ilbzzz",
+          owner="example-org",
           repo_name="juice-shop-local",
           target_sha="1e677199",
           is_pr_scan=False,
-          token_totals={"gemini-2.5-flash": {"in_tokens": 1200, "out_tokens": 80, "total_tokens": 1280}},
+          token_totals={"test-model-a": {"in_tokens": 1200, "out_tokens": 80, "total_tokens": 1280}},
       )
 
     self.assertTrue(os.path.exists(summary_file))
@@ -550,7 +550,7 @@ class TestScanRunner(unittest.TestCase):
 
     self.assertIn("### ⚡ LLM Token Usage Summary", content)
     self.assertIn("- **Grand Total Tokens:** 1,280", content)
-    self.assertIn("| `gemini-2.5-flash` | 1,200 | 80 | 1,280 |", content)
+    self.assertIn("| `test-model-a` | 1,200 | 80 | 1,280 |", content)
 
   @patch("codemender_agent.runners.scan.delete_remote_branch")
   @patch("codemender_agent.runners.scan.is_duplicate_pr")
