@@ -268,12 +268,19 @@ class OrchestratorConfig:
         or os.environ.get("CODEMENDER_FAIL_ON_FINDINGS")
     )
     if fail_on_findings_env is not None and fail_on_findings_env.strip():
-      fail_on_findings = fail_on_findings_env.strip().lower() in (
-          "true",
-          "1",
-          "yes",
+      fail_on_findings = fail_on_findings_env.strip().lower() not in (
+          "false",
+          "0",
+          "no",
+          "off",
       )
-    elif is_pr_scan:
+    elif (
+        is_pr_scan
+        or bool(pr_number)
+        or os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true"
+        or os.environ.get("CODEMENDER_RUN_MODE", "").lower()
+        in ("gate", "security_gate")
+    ):
       # Default to True on PR scans (blocking security gate)
       fail_on_findings = True
     else:

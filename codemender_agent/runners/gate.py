@@ -165,26 +165,21 @@ def resolve_pr_diff_targets(
   return False, resolved
 
 
-def run_security_gate_pipeline() -> int:
+def run_security_gate_pipeline(
+    cfg: Optional[OrchestratorConfig] = None,
+) -> int:
   """Enforces the immediate Stage 1 Security Gate and publishes Commit Status.
 
   Returns:
     0 when the gate passes, 1 when blocked or when Stage 1 fails/cancels.
   """
-  cfg = OrchestratorConfig.from_env()
+  cfg = cfg or OrchestratorConfig.from_env()
   scan_result = os.environ.get("SCAN_RESULT", "success").strip().lower()
   findings_count = int(os.environ.get("FINDINGS_COUNT", "0") or "0")
   blocking_count = int(os.environ.get("BLOCKING_COUNT", "0") or "0")
   advisory_count = int(os.environ.get("ADVISORY_COUNT", "0") or "0")
   min_sev = cfg.min_blocking_severity
-  fail_raw = (
-      os.environ.get("BLOCK_PR_MERGE")
-      or os.environ.get("CODEMENDER_BLOCK_PR_MERGE")
-      or os.environ.get("FAIL_ON_FINDINGS")
-      or os.environ.get("CODEMENDER_FAIL_ON_FINDINGS")
-      or "true"
-  ).strip().lower()
-  fail_enabled = fail_raw not in ("false", "0", "no", "off")
+  fail_enabled = cfg.fail_on_findings
   pr_number = cfg.pr_number or 0
   repo_full = (
       os.environ.get("REPO_FULL_NAME")

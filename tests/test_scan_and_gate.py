@@ -682,6 +682,74 @@ class TestScanAndImmediateGate(unittest.TestCase):
         "Non-blocking audit mode", summary_file.read_text(encoding="utf-8")
     )
 
+  @patch("codemender_agent.runners.gate.post_commit_status")
+  @patch("subprocess.run")
+  def test_14_orchestrator_config_is_source_of_truth_for_is_pr_and_gate_policy(
+      self, mock_run: MagicMock, mock_status: MagicMock
+  ) -> None:
+    """Verifies is_pr defaults to False when IS_PR/BASE_REF are unset and gate uses cfg as source of truth."""
+    from codemender_agent.config import OrchestratorConfig
+
+    (self.workspace / "src").mkdir(parents=True, exist_ok=True)
+    (self.workspace / "src" / "app.py").write_text("eval(x)\n", encoding="utf-8")
+    (self.workspace / ".cm_project").write_text("project: test\n", encoding="utf-8")
+    recorded_cmds = []
+
+    def side_effect(cmd, **_kwargs):
+      recorded_cmds.append(cmd)
+      if cmd[:4] == ["cm", "report", "--format", "json"]:
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+      return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    mock_run.side_effect = side_effect
+    # 1. When IS_PR and BASE_REF are unset, cfg.is_pr_scan is False -> does NOT run git diff or PR context
+    with patch.dict(
+        os.environ,
+        {
+            "WORKSPACE_DIR": str(self.workspace),
+            "SCAN_TARGET": "src/app.py",
+        },
+        clear=True,
+    ):
+      cfg_non_pr = OrchestratorConfig.from_env()
+      self.assertFalse(cfg_non_pr.is_pr_scan)
+      execute_stage1_presubmit_scan(cfg=cfg_non_pr)
+
+    self.assertFalse(any("--name-only" in c for c in recorded_cmds))
+
+    # 2. When an explicit OrchestratorConfig sets fail_on_findings=False and min_blocking_severity="HIGH",
+    # run_security_gate_pipeline(cfg=...) honors cfg directly even if FAIL_ON_FINDINGS="true" in os.environ.
+    cfg_override = OrchestratorConfig(
+        workspace_dir=str(self.workspace),
+        github_token="tok",
+        pr_number=7,
+        target_sha="abcdef999999",
+        fail_on_findings=False,
+        min_blocking_severity="HIGH",
+    )
+    with patch.dict(
+        os.environ,
+        {
+            "SCAN_RESULT": "success",
+            "FINDINGS_COUNT": "1",
+            "BLOCKING_COUNT": "1",
+            "ADVISORY_COUNT": "0",
+            "FAIL_ON_FINDINGS": "true",
+            "MIN_SEVERITY": "MEDIUM",
+            "REPO_FULL_NAME": "owner/repo",
+        },
+        clear=True,
+    ):
+      rc = run_security_gate_pipeline(cfg=cfg_override)
+
+    self.assertEqual(rc, 0)
+    self.assertEqual(mock_status.call_args.kwargs["state"], "success")
+    self.assertIn(
+        "PASSED (Non-Blocking): 1 finding(s) >= HIGH",
+        mock_status.call_args.kwargs["description"],
+    )
+
 
 if __name__ == "__main__":
   unittest.main()
+

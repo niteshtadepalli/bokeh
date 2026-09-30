@@ -1427,31 +1427,21 @@ def classify_and_report_stage1_findings(
   return active_findings, blocking_count, advisory_count
 
 
-def execute_stage1_presubmit_scan() -> list[dict]:
+def execute_stage1_presubmit_scan(
+    cfg: Optional[OrchestratorConfig] = None,
+) -> list[dict]:
   """Executes Stage 1 local/GitHub Actions pre-submit scan, partitioning, and sticky report."""
   import subprocess
 
-  cfg = OrchestratorConfig.from_env()
+  cfg = cfg or OrchestratorConfig.from_env()
   workspace_dir = cfg.workspace_dir
   scan_target = cfg.scan_target.strip() or "."
-  is_pr_raw = os.environ.get("IS_PR") or os.environ.get("CODEMENDER_IS_PR_SCAN")
-  is_pr = (is_pr_raw or "true").strip().lower() == "true"
+  is_pr = cfg.is_pr_scan
   diff_scoped = cfg.diff_scoped_pr_scan
   base_ref = (cfg.pr_base_ref or "").strip()
   min_sev = cfg.min_blocking_severity
-  fail_on_findings_raw = (
-      os.environ.get("BLOCK_PR_MERGE")
-      or os.environ.get("CODEMENDER_BLOCK_PR_MERGE")
-      or os.environ.get("FAIL_ON_FINDINGS")
-      or os.environ.get("CODEMENDER_FAIL_ON_FINDINGS")
-      or "true"
-  ).strip().lower()
-  fail_on_findings = fail_on_findings_raw not in ("false", "0", "no", "off")
-  max_tasks = int(
-      os.environ.get("MAX_TASKS")
-      or os.environ.get("CODEMENDER_MAX_TASKS")
-      or "25"
-  )
+  fail_on_findings = cfg.fail_on_findings
+  max_tasks = cfg.max_tasks
   target_sha = (cfg.target_sha or "").strip()
   if not target_sha:
     sha_proc = subprocess.run(
