@@ -185,8 +185,9 @@ the plan runs code from the pull request.
 
 1.  Open a pull request with the files from step 3. Check the plan, then
     merge. The apply creates the deployment with the scheduler paused.
-2.  Store the GitHub credentials in Secret Manager, as described in the
-    [deployment guide](terraform_deployment_guide.md).
+2.  Set up the GitHub App: store its private key in Secret Manager and set
+    `github_app_id` in `deployment.yaml` in a pull request, as described in
+    [GitHub credentials](../customer/operations.md#github-credentials).
 3.  Build the first runner image:
 
     ```bash
