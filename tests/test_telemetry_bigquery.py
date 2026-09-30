@@ -71,13 +71,13 @@ class TestTokenFlattening(unittest.TestCase):
 
   def test_flattens_per_model_usage(self):
     rows = bq.flatten_token_totals({
-        "gemini-2.5-pro": {"in_tokens": 100, "out_tokens": 20, "total_tokens": 120},
-        "gemini-2.5-flash": {"in_tokens": 5, "out_tokens": 1, "total_tokens": 6},
+        "test-model-b": {"in_tokens": 100, "out_tokens": 20, "total_tokens": 120},
+        "test-model-a": {"in_tokens": 5, "out_tokens": 1, "total_tokens": 6},
     })
     self.assertEqual(len(rows), 2)
     # Sorted by model name for deterministic output.
-    self.assertEqual(rows[0]["model"], "gemini-2.5-flash")
-    self.assertEqual(rows[1]["model"], "gemini-2.5-pro")
+    self.assertEqual(rows[0]["model"], "test-model-a")
+    self.assertEqual(rows[1]["model"], "test-model-b")
     self.assertEqual(rows[1]["in_tokens"], 100)
     self.assertEqual(rows[1]["total_tokens"], 120)
 
@@ -206,7 +206,7 @@ class TestSchemaMapping(unittest.TestCase):
         target_sha="abc123",
         scan_target=".",
         cm_version="cm version 0.9.0",
-        find_model="gemini-2.5-pro",
+        find_model="test-model-b",
         active_findings_count=2,
         report_uri="gs://bucket/reports/x.html",
     )

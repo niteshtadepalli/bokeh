@@ -27,19 +27,19 @@ class TestCommandBuilder(unittest.TestCase):
 
   def test_accumulate_model_token_usage(self):
     usage = {}
-    accumulate_model_token_usage(usage, "gemini-flash", {"in_tokens": 100, "out_tokens": 20, "total_tokens": 120})
-    self.assertEqual(usage, {"gemini-flash": {"in_tokens": 100, "out_tokens": 20, "total_tokens": 120}})
+    accumulate_model_token_usage(usage, "test-model-flash", {"in_tokens": 100, "out_tokens": 20, "total_tokens": 120})
+    self.assertEqual(usage, {"test-model-flash": {"in_tokens": 100, "out_tokens": 20, "total_tokens": 120}})
 
-    accumulate_model_token_usage(usage, "gemini-flash", {"in_tokens": 50, "out_tokens": 10, "total_tokens": 60})
-    self.assertEqual(usage, {"gemini-flash": {"in_tokens": 150, "out_tokens": 30, "total_tokens": 180}})
+    accumulate_model_token_usage(usage, "test-model-flash", {"in_tokens": 50, "out_tokens": 10, "total_tokens": 60})
+    self.assertEqual(usage, {"test-model-flash": {"in_tokens": 150, "out_tokens": 30, "total_tokens": 180}})
 
-    accumulate_model_token_usage(usage, "gemini-pro", {"in_tokens": 200, "out_tokens": 40, "total_tokens": 240})
+    accumulate_model_token_usage(usage, "test-model-pro", {"in_tokens": 200, "out_tokens": 40, "total_tokens": 240})
     self.assertEqual(len(usage), 2)
-    self.assertEqual(usage["gemini-pro"], {"in_tokens": 200, "out_tokens": 40, "total_tokens": 240})
+    self.assertEqual(usage["test-model-pro"], {"in_tokens": 200, "out_tokens": 40, "total_tokens": 240})
 
     # None or non-dict handling
-    accumulate_model_token_usage(usage, "gemini-pro", None)
-    self.assertEqual(usage["gemini-pro"]["total_tokens"], 240)
+    accumulate_model_token_usage(usage, "test-model-pro", None)
+    self.assertEqual(usage["test-model-pro"]["total_tokens"], 240)
 
   def test_render_token_usage_markdown(self):
     # Empty / None handling
@@ -48,8 +48,8 @@ class TestCommandBuilder(unittest.TestCase):
 
     # Multi-model markdown table formatting
     totals = {
-        "gemini-2.5-flash": {"in_tokens": 12000, "out_tokens": 500, "total_tokens": 12500},
-        "gemini-2.5-pro": {"in_tokens": 45000, "out_tokens": 3200, "total_tokens": 48200},
+        "test-model-a": {"in_tokens": 12000, "out_tokens": 500, "total_tokens": 12500},
+        "test-model-b": {"in_tokens": 45000, "out_tokens": 3200, "total_tokens": 48200},
     }
     md = render_token_usage_markdown(totals)
     self.assertIn("### ⚡ LLM Token Usage Summary", md)
@@ -57,8 +57,8 @@ class TestCommandBuilder(unittest.TestCase):
     self.assertIn("- **Output Tokens:** 3,700", md)
     self.assertIn("- **Grand Total Tokens:** 60,700", md)
     self.assertIn("| Model | Input Tokens | Output Tokens | Total Tokens |", md)
-    self.assertIn("| `gemini-2.5-flash` | 12,000 | 500 | 12,500 |", md)
-    self.assertIn("| `gemini-2.5-pro` | 45,000 | 3,200 | 48,200 |", md)
+    self.assertIn("| `test-model-a` | 12,000 | 500 | 12,500 |", md)
+    self.assertIn("| `test-model-b` | 45,000 | 3,200 | 48,200 |", md)
 
   def test_parse_token_metric(self):
     self.assertEqual(parse_token_metric("41k"), 41000)
@@ -75,18 +75,18 @@ class TestCommandBuilder(unittest.TestCase):
   def test_resolve_command_model(self):
     self.assertIsNone(resolve_command_model("find"))
 
-    with patch.dict(os.environ, {"CODEMENDER_MODEL": "gemini-2.0-flash"}):
-      self.assertEqual(resolve_command_model("find"), "gemini-2.0-flash")
+    with patch.dict(os.environ, {"CODEMENDER_MODEL": "test-model-default"}):
+      self.assertEqual(resolve_command_model("find"), "test-model-default")
 
     with patch.dict(
         os.environ,
         {
-            "CODEMENDER_MODEL": "gemini-2.0-flash",
-            "CODEMENDER_FIND_MODEL": "gemini-2.0-pro",
+            "CODEMENDER_MODEL": "test-model-default",
+            "CODEMENDER_FIND_MODEL": "test-model-find",
         },
     ):
-      self.assertEqual(resolve_command_model("find"), "gemini-2.0-pro")
-      self.assertEqual(resolve_command_model("verify"), "gemini-2.0-flash")
+      self.assertEqual(resolve_command_model("find"), "test-model-find")
+      self.assertEqual(resolve_command_model("verify"), "test-model-default")
 
   def test_build_cm_command_validation(self):
     with self.assertRaises(ValueError):
@@ -103,9 +103,9 @@ class TestCommandBuilder(unittest.TestCase):
     self.assertEqual(cmd, ["cm", "find", "-y", "."])
 
     # find with model
-    with patch.dict(os.environ, {"CODEMENDER_FIND_MODEL": "gemini-pro"}):
+    with patch.dict(os.environ, {"CODEMENDER_FIND_MODEL": "test-model-pro"}):
       cmd = build_cm_command("cm", "find", ".")
-      self.assertEqual(cmd, ["cm", "find", "-y", "--model", "gemini-pro", "."])
+      self.assertEqual(cmd, ["cm", "find", "-y", "--model", "test-model-pro", "."])
 
     # verify
     cmd = build_cm_command("cm", "verify", "id-123")
