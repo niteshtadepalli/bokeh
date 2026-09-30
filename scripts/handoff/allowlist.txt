@@ -1,0 +1,54 @@
+# Files copied into the customer snapshot.
+#
+# One glob per line, matched against the whole path from the repository root.
+# '*' and '?' stay within one path segment; '**' matches any depth. The last
+# matching line wins, and a leading '!' excludes. Anything not listed is left
+# out, so files that upstream syncs add are excluded until they are added here.
+#
+# Files listed in renames.txt are always exported (under their new name).
+
+# Top level
+.dockerignore
+.gcloudignore
+.gitignore
+Dockerfile
+LICENSE
+cloudbuild.yaml
+orchestrator.py
+requirements.txt
+
+# GitHub configuration
+.github/CODEOWNERS.example
+.github/dependabot.yml
+.github/workflows/build_runner_image.yml
+.github/workflows/ci.yml
+.github/workflows/codemender_parallel.yml
+
+# Code, pipeline and tests
+cloudbuild/**
+codemender_agent/**
+scripts/ci/**
+tests/**
+workflows/**
+
+# Terraform
+terraform/bootstrap/**
+terraform/gcp/**
+terraform/gha_wif/**
+
+# Documentation (the customer README and docs come from renames.txt)
+docs/guides/gitops_cloud_build.md
+docs/examples/github-actions/terraform.yml
+
+# Never: local Terraform variables, state and provider caches
+!**/*.tfvars
+!**/*.tfvars.json
+!**/*.tfstate
+!**/*.tfstate.*
+!**/.terraform/**
+
+# Never: the live deployment configuration. Each copy owns its own
+# repos.yaml and deployment.yaml; snapshots ship only the *.example.yaml files,
+# so merging a new snapshot never conflicts with them.
+!terraform/gcp/repos.yaml
+!terraform/gcp/deployment.yaml

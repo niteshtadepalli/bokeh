@@ -1,0 +1,23 @@
+# Example CODEOWNERS for a copy of this repository managed with GitOps
+# (docs/guides/gitops_cloud_build.md). Copy to .github/CODEOWNERS, replace
+# the team names, and turn on "Require review from Code Owners" in the
+# branch ruleset.
+#
+# The last matching rule wins, so specific paths come after general ones.
+# When a rule lists several owners, an approval from any one of them is
+# enough. To make a particular team's review mandatory, list only that team.
+
+# Default owners for everything.
+*                               @your-org/codemender-maintainers
+
+# Infrastructure and the pipeline itself.
+/terraform/                     @your-org/platform-team
+/cloudbuild/                    @your-org/platform-team @your-org/security-team
+/cloudbuild.yaml                @your-org/platform-team
+/scripts/ci/                    @your-org/platform-team @your-org/security-team
+/.github/                       @your-org/platform-team @your-org/security-team
+
+# What gets scanned and how the deployment is set up. repos.yaml can run code
+# in the scan jobs (build_command), so only the security team can approve it.
+/terraform/gcp/repos.yaml       @your-org/security-team
+/terraform/gcp/deployment.yaml  @your-org/platform-team

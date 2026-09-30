@@ -326,6 +326,10 @@ dedicated guides in the `docs/` folder:
     Step-by-step instructions to provision GCP infrastructure (Cloud Run &
     Workflows) and GitHub Actions WIF modules (`terraform/gha_wif/`) using
     Terraform.
+*   🔁 **[GitOps with Cloud Build](docs/guides/gitops_cloud_build.md)**:
+    Manage the deployment from Git: repositories and settings in committed
+    YAML, Terraform plan on pull requests, approval-gated apply on merge, and
+    runner image builds that roll out to the Cloud Run jobs.
 *   ⚡
     **[GitHub Actions Orchestration Architecture](docs/architecture/github_actions_orchestration_design.md)**:
     Detailed architectural design for native GitHub Actions matrix
@@ -357,7 +361,9 @@ documentation:
 .
 ├── Dockerfile                          # Deployment container definition (Python 3.11 + cm CLI + Git)
 ├── README.md                           # High-level overview & setup documentation
-├── cloudbuild.yaml                     # GCP Cloud Build runner definition
+├── cloudbuild.yaml                     # GCP Cloud Build runner image build (and optional job rollout)
+├── cloudbuild/                         # Cloud Build configs for Terraform plan / apply
+├── scripts/ci/                         # Helper scripts used by the Cloud Build configs
 ├── orchestrator.py                     # CLI entrypoint script (config loader & runner dispatcher)
 ├── requirements.txt                    # Python package dependencies
 ├── .github/
@@ -402,12 +408,16 @@ documentation:
 ├── workflows/
 │   └── gcp_parallel_workflow.yaml      # GCP Cloud Workflows parallel orchestration YAML
 ├── terraform/                          # Automated infrastructure provisioning
+│   ├── bootstrap/                      # One-time Cloud Build GitOps setup (state bucket, build SAs, triggers)
 │   ├── gcp/                            # GCP Cloud Run & Workflows Terraform module
 │   │   ├── apis.tf                     # GCP API enablement
 │   │   ├── compute.tf                  # Cloud Run Jobs & Cloud Workflows definitions
-│   │   ├── iam.tf                      # Custom IAM roles and Service Accounts
+│   │   ├── config.tf                   # Loads repos.yaml / deployment.yaml into Terraform locals
+│   │   ├── deployment.example.yaml     # Template for deployment-wide settings
+│   │   ├── iam.tf                      # IAM roles and Service Accounts
 │   │   ├── outputs.tf                  # Deployment outputs and resource URLs
 │   │   ├── provider.tf                 # Terraform provider configuration
+│   │   ├── repos.example.yaml          # Template for the repositories to scan
 │   │   ├── scheduler.tf                # Cloud Scheduler cron triggers
 │   │   ├── secret.tf                   # Secret Manager configuration for tokens
 │   │   ├── storage.tf                  # GCS Buckets and Artifact Registry
@@ -434,6 +444,7 @@ documentation:
     └── guides/                         # User, deployment, and configuration guides
         ├── configuration_reference.md
         ├── github_actions_guide.md
+        ├── gitops_cloud_build.md
         ├── local_run.md
         ├── production_run.md
         └── terraform_deployment_guide.md
@@ -472,6 +483,9 @@ Unit tests and Terraform module tests are modular and automated:
 
     # Test GCP deployment module
     cd terraform/gcp && terraform init -backend=false && terraform test
+
+    # Test Cloud Build GitOps bootstrap module
+    cd terraform/bootstrap && terraform init -backend=false && terraform test
     ```
 
 --------------------------------------------------------------------------------
