@@ -32,6 +32,7 @@ from codemender_agent.vcs.github_app import GitHubAppAuthError
 from codemender_agent.vcs.github_app import GitHubAppCredentials
 from codemender_agent.vcs.github_app import get_installation_token
 from codemender_agent.vcs.github_app import invalidate_installation_token
+from codemender_agent.vcs.github_app import wait_for_installation_token
 
 logger = logging.getLogger("codemender-orchestrator")
 
@@ -652,7 +653,9 @@ def reset_github_token(
   """Discards an installation token GitHub rejected and returns a new one.
 
   Only the cached token equal to `rejected_token` is discarded, so several
-  callers reporting the same stale token cause one re-mint.
+  callers reporting the same stale token cause one re-mint. GitHub can reject
+  a token for a few seconds after minting it, so this returns only once the
+  new token is `NEW_TOKEN_SETTLE_SECONDS` old.
 
   Returns:
     A freshly minted installation token, or None when no GitHub App is
@@ -672,7 +675,9 @@ def reset_github_token(
       sanitize_git_url((config.repo_url or "").strip())
   )
   invalidate_installation_token(credentials, owner, repo, rejected_token)
-  return refresh_github_token(config, rejected_token)
+  fresh_token = refresh_github_token(config, rejected_token)
+  wait_for_installation_token(credentials, owner, repo, fresh_token)
+  return fresh_token
 
 
 def call_with_github_token(

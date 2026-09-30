@@ -361,21 +361,33 @@ class TestMintRetry(_ProviderTestBase):
     self.assertEqual(len(session.calls), 2)
 
 
-class TestRetryDecoratorSkipsUnauthorized(unittest.TestCase):
+class TestRetryDecoratorRetriesUnauthorized(unittest.TestCase):
+  """401 keeps its short retry: GitHub can reject a just-minted token."""
 
   def setUp(self):
     sleep_patcher = unittest.mock.patch.object(utils.time, "sleep")
     self.mock_sleep = sleep_patcher.start()
     self.addCleanup(sleep_patcher.stop)
 
-  def test_401_is_raised_without_retrying(self):
+  def test_401_is_retried_then_raised(self):
     func = unittest.mock.Mock(
         side_effect=_FakeResponse(401).raise_for_status, __name__="f"
     )
-    with self.assertRaises(requests.HTTPError):
+    with self.assertRaises(requests.HTTPError) as ctx:
       utils.retry_on_exception(max_tries=3)(func)()
-    self.assertEqual(func.call_count, 1)
-    self.mock_sleep.assert_not_called()
+    self.assertTrue(utils.is_unauthorized_http_error(ctx.exception))
+    self.assertEqual(func.call_count, 3)
+
+  def test_401_that_clears_succeeds(self):
+    func = unittest.mock.Mock(
+        side_effect=[
+            requests.HTTPError("HTTP 401", response=_FakeResponse(401)),
+            "ok",
+        ],
+        __name__="f",
+    )
+    self.assertEqual(utils.retry_on_exception(max_tries=3)(func)(), "ok")
+    self.assertEqual(func.call_count, 2)
 
   def test_server_errors_are_still_retried(self):
     func = unittest.mock.Mock(
@@ -406,15 +418,14 @@ class TestHelpersFailClosedOnUnauthorized(unittest.TestCase):
         github.get_default_branch(
             "ghs_stale", "org", "repo", fail_on_unauthorized=True
         )
-    # Not retried with the same rejected token.
-    self.assertEqual(mock_get.call_count, 1)
+    # Only the decorator's short retries; no "main" guess afterwards.
+    self.assertEqual(mock_get.call_count, 3)
 
   def test_default_branch_keeps_its_fallback_for_other_callers(self):
     with unittest.mock.patch.object(
         github.requests, "get", return_value=_FakeResponse(401)
-    ) as mock_get:
+    ):
       self.assertEqual(github.get_default_branch("tok", "org", "repo"), "main")
-    self.assertEqual(mock_get.call_count, 1)
 
   def test_default_branch_still_falls_back_on_other_errors(self):
     with unittest.mock.patch.object(
@@ -537,6 +548,130 @@ class TestCallWithGitHubToken(_ProviderTestBase):
         call_with_github_token(cfg, "ghp_static", lambda tok: tok + "!"),
         ("ghp_static!", "ghp_static"),
     )
+
+  def test_retry_waits_until_the_new_token_has_settled(self):
+    self._seed_provider([self._token("ghs_1"), self._token("ghs_2")])
+    cfg = self._app_config()
+    token = config_module.refresh_github_token(cfg, "")
+    retried_at = []
+
+    def call(tok):
+      if tok == "ghs_1":
+        raise GitHubUnauthorizedError("401 Bad credentials")
+      retried_at.append(self.clock.now)
+      return "ok"
+
+    minted_at = self.clock.now
+    call_with_github_token(cfg, token, call)
+    self.assertEqual(self.clock.slept, [github_app.NEW_TOKEN_SETTLE_SECONDS])
+    self.assertEqual(
+        retried_at, [minted_at + github_app.NEW_TOKEN_SETTLE_SECONDS]
+    )
+
+
+class TestNewTokenSettle(_ProviderTestBase):
+
+  def test_waits_only_for_a_just_minted_cached_token(self):
+    provider, _ = self._provider([self._token("ghs_1")])
+    provider.get_token()
+    self.clock.now += 2
+    self.assertEqual(provider.wait_until_settled("ghs_1"), 3)
+    self.assertEqual(provider.wait_until_settled("ghs_1"), 0)
+    self.assertEqual(provider.wait_until_settled("ghs_other"), 0)
+    self.assertEqual(provider.wait_until_settled(""), 0)
+    self.assertEqual(self.clock.slept, [3])
+
+
+class TestReplicationLag(_ProviderTestBase):
+  """GitHub answers 401 for a few seconds after a token is minted."""
+
+  _LAG_SECONDS = 4
+
+  def setUp(self):
+    super().setUp()
+    self.minted = {}
+    sleep_patcher = unittest.mock.patch.object(
+        utils.time, "sleep", side_effect=self.clock.sleep
+    )
+    sleep_patcher.start()
+    self.addCleanup(sleep_patcher.stop)
+    dry_patcher = unittest.mock.patch.object(
+        github, "is_dry_run", return_value=False
+    )
+    dry_patcher.start()
+    self.addCleanup(dry_patcher.stop)
+    self.cfg = OrchestratorConfig(
+        repo_url="https://github.com/octo-org/octo-repo.git",
+        github_app_id="12345",
+        github_app_private_key=_FAKE_KEY,
+        github_app_installation_id="77",
+    )
+
+  def _minting(self, count):
+    responses = []
+    for i in range(1, count + 1):
+
+      def mint(token=f"ghs_{i}"):
+        self.minted[token] = self.clock.now
+        return self._token(token)()
+
+      responses.append(mint)
+    provider, session = self._provider(responses)
+    github_app._providers[("12345", 77, "octo-org", "octo-repo")] = provider
+    return session
+
+  def _lagging(self, ok_response):
+    def get(url, headers=None, timeout=None, **_kwargs):
+      del url, timeout
+      token = headers["Authorization"].split()[-1]
+      if self.clock.now - self.minted[token] < self._LAG_SECONDS:
+        return _FakeResponse(401, {"message": "Bad credentials"})
+      return ok_response
+
+    return get
+
+  def test_duplicate_check_right_after_a_mint_is_not_failed_closed(self):
+    self._minting(3)
+    token = config_module.refresh_github_token(self.cfg, "")
+    ok = _FakeResponse(200, [])
+    ok.links = {}
+    get = self._lagging(ok)
+    with unittest.mock.patch.object(
+        github.requests, "get", side_effect=get
+    ), unittest.mock.patch.object(
+        github.requests.Session,
+        "get",
+        autospec=True,
+        side_effect=lambda _self, *a, **k: get(*a, **k),
+    ):
+      result, _ = call_with_github_token(
+          self.cfg,
+          token,
+          lambda tok: github.is_duplicate_pr(
+              "https://github.com/octo-org/octo-repo.git",
+              tok,
+              "app.py",
+              "XSS",
+              10,
+              head_branch="codemender/fix",
+          ),
+      )
+    self.assertFalse(result)
+
+  def test_default_branch_right_after_a_mint_is_read(self):
+    self._minting(3)
+    token = config_module.refresh_github_token(self.cfg, "")
+    with unittest.mock.patch.object(
+        github.requests,
+        "get",
+        side_effect=self._lagging(
+            _FakeResponse(200, {"default_branch": "trunk"})
+        ),
+    ):
+      branch, _ = config_module.read_default_branch(
+          self.cfg, token, "octo-org", "octo-repo"
+      )
+    self.assertEqual(branch, "trunk")
 
 
 class TestStage1(_ProviderTestBase):
@@ -903,6 +1038,20 @@ class TestWorkerGuards(unittest.TestCase):
     self.assertEqual(mock_process.call_count, 2)
     self.mocks["_mark_fix_failed"].assert_called_once()
     self.assertEqual(self.mocks["_mark_fix_failed"].call_args.args[1], "fid-1")
+    self.assertTrue(self._state_uploaded())
+
+  def test_token_refresh_outage_does_not_skip_the_upload(self):
+    with unittest.mock.patch.object(
+        worker,
+        "refresh_github_token",
+        side_effect=GitHubAppAuthError("Could not mint: HTTP 503"),
+    ):
+      worker.run_worker_pipeline()
+
+    # Routing needs a fresh token, so nothing reaches GitHub, but the
+    # partition state is still uploaded.
+    self.mocks["push_branch_to_remote"].assert_not_called()
+    self.mocks["create_pull_request"].assert_not_called()
     self.assertTrue(self._state_uploaded())
 
 

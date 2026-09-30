@@ -457,8 +457,10 @@ def is_unauthorized_http_error(error: BaseException) -> bool:
 def retry_on_exception(max_tries=3, initial_delay=1, backoff_factor=2):
   """Decorator to retry transient network/command errors with exponential backoff.
 
-  HTTP 401 is not retried: the credential was rejected, and sending the same
-  one again cannot succeed. The caller has to obtain a new token instead.
+  HTTP 401 is retried too, with the same short backoff: GitHub can reject an
+  installation token for a few seconds right after it is minted. A token that
+  is really expired or revoked still fails after `max_tries`; callers that
+  hold a GitHub App token then replace it with `config.call_with_github_token`.
   """
 
   def decorator(func):
@@ -469,7 +471,7 @@ def retry_on_exception(max_tries=3, initial_delay=1, backoff_factor=2):
         try:
           return func(*args, **kwargs)
         except (requests.RequestException, subprocess.CalledProcessError) as e:
-          if attempt == max_tries or is_unauthorized_http_error(e):
+          if attempt == max_tries:
             raise
           logger.warning(
               "Attempt %d failed for %s: %s. Retrying in %d seconds...",

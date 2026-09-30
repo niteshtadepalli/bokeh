@@ -103,6 +103,12 @@ MINT_RETRY_MAX_ATTEMPTS = 20
 # token read (the failure handlers and each Stage 2 finding read it too).
 MINT_RETRY_COOLDOWN_SECONDS = 15 * 60
 
+# GitHub can answer 401 for a few seconds after an installation token is
+# minted, until the token has replicated. A request that is retried with a
+# token minted to replace a rejected one first waits until the token is at
+# least this old, so replication lag is not mistaken for a bad token.
+NEW_TOKEN_SETTLE_SECONDS = 5
+
 # Fallback lifetime used only if GitHub omits or garbles `expires_at`. Kept
 # well under the documented 60 minutes so the token is refreshed early.
 _FALLBACK_TOKEN_LIFETIME_SECONDS = 30 * 60
@@ -450,6 +456,7 @@ class InstallationTokenProvider:
     self._installation_id: Optional[int] = credentials.installation_id
     self._token: Optional[str] = None
     self._expires_at: float = 0.0
+    self._minted_at: float = 0.0
     self._retry_exhausted_at: Optional[float] = None
     self._lock = threading.Lock()
 
@@ -492,6 +499,7 @@ class InstallationTokenProvider:
           self._token, self._expires_at = self._mint(now)
         else:
           self._token, self._expires_at = self._mint_with_retry()
+        self._minted_at = self._clock()
         self._retry_exhausted_at = None
       except Exception as e:  # pylint: disable=broad-exception-caught
         now = self._clock()
@@ -536,6 +544,25 @@ class InstallationTokenProvider:
       self._token = None
       self._expires_at = 0.0
       return True
+
+  def wait_until_settled(self, token: str) -> float:
+    """Waits until `token` is `NEW_TOKEN_SETTLE_SECONDS` old, if just minted.
+
+    GitHub can reject an installation token with 401 for a few seconds after
+    minting it. Only the currently cached token is waited on; any other token
+    returns immediately.
+
+    Returns:
+      The number of seconds waited.
+    """
+    with self._lock:
+      if not token or token != self._token:
+        return 0.0
+      delay = self._minted_at + NEW_TOKEN_SETTLE_SECONDS - self._clock()
+    if delay <= 0:
+      return 0.0
+    (self._sleep or time.sleep)(delay)
+    return delay
 
   def _mint_with_retry(self) -> Tuple[str, float]:
     """Mints a token, retrying transient failures within the retry budget."""
@@ -674,6 +701,19 @@ def invalidate_installation_token(
   `get_installation_token` call mints a new token.
   """
   return _provider_for(credentials, owner, repo).invalidate(token)
+
+
+def wait_for_installation_token(
+    credentials: GitHubAppCredentials, owner: str, repo: str, token: str
+) -> float:
+  """Waits out GitHub's replication lag for a just-minted `token`.
+
+  See `InstallationTokenProvider.wait_until_settled`.
+
+  Returns:
+    The number of seconds waited.
+  """
+  return _provider_for(credentials, owner, repo).wait_until_settled(token)
 
 
 def reset_token_cache() -> None:

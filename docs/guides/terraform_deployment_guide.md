@@ -266,7 +266,9 @@ With `github_app_id` set, both Cloud Run jobs receive `GITHUB_APP_ID`,
 `GITHUB_APP_PRIVATE_KEY` (and `GITHUB_APP_INSTALLATION_ID` if set) and no longer
 mount the static `${PREFIX}-github-token` secret. Unset `github_app_id` to
 return to the static token. A new key version is picked up by the next job
-execution; no redeploy is needed.
+execution; no redeploy is needed. Keep the old key active in GitHub until
+scans that were already running have finished; see
+[Rotating the GitHub App private key](configuration_reference.md#rotating-the-github-app-private-key).
 
 > [!IMPORTANT]
 > Build and deploy a runner image that includes GitHub App support **before**

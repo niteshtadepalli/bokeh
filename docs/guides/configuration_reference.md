@@ -56,11 +56,13 @@ when running in Docker or Cloud Run.
     runs out, later token requests in the same process try once for the next
     15 minutes instead of waiting another 8 minutes each. While the current
     token still has more than a minute left it is reused if a refresh fails.
-*   **Rejected tokens (HTTP 401)**: if GitHub rejects a token during the
-    duplicate checks or when resolving the default branch for SARIF upload,
-    the orchestrator discards the cached token, mints a new one and retries
-    once. If that also fails, the check fails closed: Stage 1 fails instead of
-    treating the finding as new, a worker records the finding as
+*   **Rejected tokens (HTTP 401)**: GitHub can reject a token for a few
+    seconds right after minting it, so API calls keep their short retry on a
+    401. If GitHub still rejects the token during the duplicate checks or when
+    resolving the default branch for SARIF upload, the orchestrator discards
+    the cached token, mints a new one, waits until it is 5 seconds old and
+    retries once. If that also fails, the check fails closed: Stage 1 fails
+    instead of treating the finding as new, a worker records the finding as
     `PR_CREATION_FAILED` instead of opening a possibly duplicate pull request,
     and SARIF upload is skipped rather than guessing `main` as the branch.
     A worker that hits an unexpected error on one finding records it as
