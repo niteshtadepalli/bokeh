@@ -33,6 +33,7 @@ from codemender_agent.config import PR_MODE_REVIEW_SUGGESTION
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import is_presubmit_pipeline
 from codemender_agent.config import resolve_pr_remediation_mode
 from codemender_agent.storage import download_file_from_gcs
 from codemender_agent.storage import get_storage_adapter
@@ -1128,7 +1129,7 @@ def run_aggregate_pipeline() -> None:
   """Executes Stage 3: Download all worker states, merge DBs, generate report, and upload."""
   config = OrchestratorConfig.from_env()
   workspace_dir = config.workspace_dir or os.getcwd()
-  if os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true":
+  if is_presubmit_pipeline():
     repo_full = (
         os.environ.get("REPO_FULL") or os.environ.get("GITHUB_REPOSITORY") or ""
     ).strip()

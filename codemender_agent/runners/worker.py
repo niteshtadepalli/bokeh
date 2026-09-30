@@ -38,6 +38,7 @@ from codemender_agent.config import get_cleanup_ports
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import is_presubmit_pipeline
 from codemender_agent.config import resolve_pr_remediation_mode
 from codemender_agent.storage import download_from_url
 from codemender_agent.storage import get_storage_adapter
@@ -1003,7 +1004,7 @@ def run_worker_pipeline() -> None:
   """Executes Stage 2: Download state, run verify/fix on partition, upload mutated state."""
   config = OrchestratorConfig.from_env()
   worker_index = config.worker_index if config.worker_index is not None else 0
-  if os.environ.get("CODEMENDER_PRESUBMIT_GATE", "").lower() == "true":
+  if is_presubmit_pipeline():
     repo_full = (
         os.environ.get("REPO_FULL") or os.environ.get("GITHUB_REPOSITORY") or ""
     ).strip()
@@ -1023,6 +1024,7 @@ def run_worker_pipeline() -> None:
         repo=repo,
         pr_number=config.pr_number or 0,
         target_sha=(config.target_sha or "").strip(),
+        fail_on_findings=config.fail_on_findings,
     )
     return
 
@@ -1298,6 +1300,7 @@ def verify_and_fix_worker_shard(
     repo: str = "",
     pr_number: int = 0,
     target_sha: str = "",
+    fail_on_findings: Optional[bool] = None,
 ) -> list[dict]:
   """Runs Stage 2.1 (cm verify), Stage 2.2 (cm fix), and Stage 2.3 (inline suggestions) on a worker shard."""
   import subprocess
@@ -1365,6 +1368,7 @@ def verify_and_fix_worker_shard(
         finding=finding,
         status_cell_md="⏳ **Verifying (`cm verify`)...**",
         min_sev=min_sev,
+        fail_on_findings=fail_on_findings,
     )
     v_cmd = ["cm", "verify", fid, "--yes", "--bypass-warning", *sandbox_flags]
     if skip_exploit_verification:
@@ -1433,6 +1437,7 @@ def verify_and_fix_worker_shard(
           finding=finding,
           status_cell_md="⚪ **Dismissed (False Positive)**",
           min_sev=min_sev,
+          fail_on_findings=fail_on_findings,
       )
       finding["patch_diff"] = ""
       finding["review_url"] = ""
@@ -1447,6 +1452,7 @@ def verify_and_fix_worker_shard(
         finding=finding,
         status_cell_md="🔨 **Generating Fix (`cm fix`)...**",
         min_sev=min_sev,
+        fail_on_findings=fail_on_findings,
     )
 
     # Stage 2.2: Patch Synthesis (cm fix)
@@ -1579,6 +1585,7 @@ def verify_and_fix_worker_shard(
         finding=finding,
         status_cell_md=final_status_md,
         min_sev=min_sev,
+        fail_on_findings=fail_on_findings,
     )
 
   with open(results_file, "w", encoding="utf-8") as rf:
