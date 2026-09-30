@@ -1,0 +1,8 @@
+# Files that move in the snapshot: "source -> destination".
+#
+# Relative Markdown links in every exported file are rewritten to follow these
+# moves. The upstream-shaped root README.md is not exported; the customer
+# README replaces it.
+docs/customer/README.md -> README.md
+docs/customer/how_it_works.md -> docs/how_it_works.md
+docs/customer/operations.md -> docs/operations.md

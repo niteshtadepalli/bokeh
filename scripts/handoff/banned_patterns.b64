@@ -1,0 +1,13 @@
+# Banned patterns for the snapshot check: one case-insensitive Python regex
+# per line, base64-encoded so the strings themselves never appear in this
+# repository in plain text. Add a line with:
+#   scripts/handoff/export_snapshot.py --encode 'REGEX'
+# and decode the list with: grep -v '^#' banned_patterns.b64 | while read l; do echo "$l" | base64 -d; echo; done
+bWVyY2s=
+Y20tcG9j
+Y29kZW1lbmRlci10ZXN0aW5n
+Y2FybG9zY2h1bG8=
+aWxienp6
+Y2xvdWQtYWktZmRl
+Y2xvdWQtZ3Rt
+Z2VtaW5pLVswLTld
