@@ -256,6 +256,8 @@ jobs:
           TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
           PR_NUMBER: ${{ github.event.pull_request.number || '0' }}
           REPO_FULL: ${{ github.repository }}
+          BLOCK_PR_MERGE: ${{ env.BLOCK_PR_MERGE }}
+          FAIL_ON_FINDINGS: ${{ env.FAIL_ON_FINDINGS }}
           GH_TOKEN: ${{ secrets.CUSTOM_GITHUB_TOKEN || github.token }}
         run: python3 .codemender_agent/orchestrator.py
 
