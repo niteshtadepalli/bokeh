@@ -140,8 +140,21 @@ class ImageRolloutTest(unittest.TestCase):
     result = self._run(MAX_WAIT_SECONDS="3600")
     self.assertEqual(result.returncode, 0, result.stderr)
     self.assertEqual(result.stdout.count("waiting for 1 active scan(s)"), 2)
-    self.assertEqual(self._read("wf_count").strip(), "3")
+    # 3 pre-update checks (2 active, 1 idle) + 1 post-update check.
+    self.assertEqual(self._read("wf_count").strip(), "4")
     self.assertEqual(len(self._read("updates").splitlines()), 2)
+
+  def test_warns_if_scan_starts_during_update(self):
+    # wf_1 (pre-update) is idle, wf_2 (post-update) has an active execution.
+    self._write("wf_2", "projects/p/locations/l/workflows/cm-coordinator/executions/e2")
+    result = self._run(MAX_WAIT_SECONDS="3600")
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(len(self._read("updates").splitlines()), 2)
+    self.assertIn("WARNING: 1 active scan(s) detected immediately after updating", result.stderr)
+
+  def test_cloudbuild_yaml_sets_60s_poll_interval(self):
+    cb_yaml = (_SCRIPT.parents[2] / "cloudbuild.yaml").read_text()
+    self.assertIn("POLL_SECONDS=60", cb_yaml)
 
   def test_gives_up_after_max_wait_without_changes(self):
     self._write("wf_default", "e1\ne2")

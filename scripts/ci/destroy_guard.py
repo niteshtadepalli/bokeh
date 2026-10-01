@@ -62,6 +62,16 @@ def _env_allows_destroy():
   return os.environ.get("ALLOW_DESTROY", "").strip().lower() in _TRUE_VALUES
 
 
+def _destroy_trigger_name():
+  trigger = os.environ.get("DESTROY_TRIGGER", "").strip()
+  if trigger:
+    return trigger
+  prefix = os.environ.get("RESOURCE_PREFIX", "").strip()
+  if prefix:
+    return f"{prefix}-tf-apply-destroy"
+  return "<prefix>-tf-apply-destroy"
+
+
 def main(argv=None):
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   parser.add_argument("plan_json", help="output of `terraform show -json tfplan`")
@@ -96,12 +106,15 @@ def main(argv=None):
     print("destroy guard: allowed for this run (ALLOW_DESTROY is set).")
     return 0
 
+  trigger_name = _destroy_trigger_name()
   print(
       "\ndestroy guard: stopping before apply. Nothing was changed.\n"
-      "If these deletions are intended, an approver can run the\n"
-      "<prefix>-tf-apply-destroy trigger for this commit, which applies the\n"
-      "same change after a manual approval. Otherwise, fix the change and\n"
-      "merge again.",
+      f"If these deletions are intended, an approver can run the {trigger_name}\n"
+      "trigger, which builds and applies the current tip of the deployed branch\n"
+      "after a manual approval. Before approving, verify that the build's commit\n"
+      "SHA is still the branch HEAD (if a newer commit has landed since the\n"
+      "trigger was started, reject the pending build and run the trigger again).\n"
+      "Otherwise, fix the change and merge again.",
       file=sys.stderr,
   )
   return 1

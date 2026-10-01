@@ -22,7 +22,7 @@ flowchart LR
   apply --> state[("GCS state and lock")]
   merge --> image["image trigger: build, push"]
   image --> wait{"Scan running?"}
-  wait -- "yes" --> sleep["Wait, check again in 5 min"]
+  wait -- "yes" --> sleep["Wait, check again in 60s"]
   sleep --> wait
   wait -- "no" --> roll["Point runner and worker jobs at the new image digest"]
 ```
@@ -48,12 +48,16 @@ fallback](#github-actions-fallback)).
 
 ## Before you start
 
-*   A **private** copy of this repository on github.com. `repos.yaml` can run
-    code in the scan jobs (a repository's `build_command`), so it must not be
-    editable or visible beyond the team that owns the deployment.
+*   A **private** copy of this repository on github.com. Never use a public
+    repository: `repos.yaml` can run code in the scan jobs (a repository's
+    `build_command`), and pull request plans read Terraform state, so the
+    repository must not be editable or visible beyond the team that owns the
+    deployment.
 *   Someone who can install a GitHub App on that repository (an organization
     owner, or the repository owner for a personal account).
-*   A Google Cloud project, and for the one-time bootstrap an account with
+*   A **dedicated** Google Cloud project for the deployment (the pipeline's plan
+    and apply service accounts hold project-wide roles; see [Security
+    model](#security-model)), and for the one-time bootstrap an account with
     Owner, or with Project IAM Admin, Service Account Admin, Service Usage
     Admin, Storage Admin, Role Administrator and Cloud Build Editor.
 *   `gcloud` and Terraform 1.7 or later on the machine that runs the bootstrap.
@@ -104,6 +108,15 @@ The bootstrap needs the linked repository's full resource name:
 
 ```text
 projects/your-project-id/locations/us-central1/connections/github/repositories/your-repository
+```
+
+If you linked the repository in the Cloud Console instead of with `gcloud builds
+repositories create`, Cloud Build typically names the link `<owner>-<repo>`
+rather than `<repo>`. Check the exact resource name before running the
+bootstrap:
+
+```bash
+gcloud builds repositories list --connection="${CONNECTION}" --region="${REGION}" --project="${PROJECT_ID}"
 ```
 
 Only 2nd-gen connections (`gcloud builds connections`) are supported, not
@@ -204,15 +217,22 @@ deployment](#moving-an-existing-deployment) first.
 
 *   **Add or change a repository:** edit `repos.yaml` in a pull request. A typo
     in a key, a missing `repo_url`, a bad cron expression or an unknown Wiz
-    severity fails the plan with a message that names the entry.
+    severity fails the plan with a message that names the entry. (When
+    `repos.yaml` fails validation, Terraform prints planned deletions of the
+    YAML-defined scheduler jobs above the `Error: Invalid value for variable`
+    message; ignore those planned deletions — a failed plan cannot be applied.)
 *   **Change a setting:** edit `deployment.yaml` the same way.
 *   **Change orchestrator code:** merge as usual; the image trigger builds and
     rolls it out (see below).
 
 Merging runs the apply straight away. Watch it in the Cloud Build history
-(`gcloud builds list --region="${REGION}"`). If `apply_requires_approval` or
+(`gcloud builds list --region="${REGION}"`). Each apply acquires a pipeline lock
+in the state bucket (`gs://<state-bucket>/<prefix>/pipeline.lock`) and checks
+that its commit is still the tip of the deployed branch before planning and
+applying, so overlapping merges run in order and an older or retried build
+never overwrites a newer commit. If `apply_requires_approval` or
 `image_requires_approval` is set, an approver approves the waiting build in
-the console or with `gcloud beta builds approve BUILD_ID --location="${REGION}"`.
+the console or with `gcloud alpha builds approve BUILD_ID --location="${REGION}"`.
 
 ### When the destroy guard stops an apply
 
@@ -222,15 +242,19 @@ or the Artifact Registry repository, the build stops and lists them. Nothing
 has been changed at that point.
 
 *   If the deletion is a mistake, fix it in a new pull request.
-*   If it is intended, an approver runs the destroy trigger, which applies the
-    current state of the deployed branch after a manual approval:
+*   If it is intended, an approver runs the destroy trigger, which builds and
+    applies the current tip of the deployed branch after a manual approval:
 
     ```bash
     gcloud builds triggers run codemender-tf-apply-destroy --region="${REGION}" --branch=main --project="${PROJECT_ID}"
     ```
 
-    Approve the build once you have checked the plan in its log. Deleting a
-    bucket or the dataset deletes the reports or scan history in it.
+    The build pauses for approval before running any steps. **Before approving,
+    verify that the pending build's commit SHA is still the branch HEAD.** If a
+    newer commit has landed on the branch since the trigger was started, reject
+    the pending build and run the trigger again so you review and approve the
+    current tip. Deleting a bucket or the dataset deletes the reports or scan
+    history in it.
 
 ## How a new image rolls out
 
@@ -248,10 +272,10 @@ later stages run a different version from its first stage. Waiting until the
 coordinator workflow and both jobs are idle avoids that.
 
 **How to tell what it is doing.** The build log (Cloud Build history, step
-`rollout`) prints a line like this every 5 minutes:
+`rollout`) prints a line like this every 60 seconds:
 
 ```text
-2026-01-01T02:05:00Z waiting for 1 active scan(s) to finish before rolling out (waited 300s of 43200s; next check in 300s)
+2026-01-01T02:01:00Z waiting for 1 active scan(s) to finish before rolling out (waited 60s of 43200s; next check in 60s)
 ```
 
 When the scans finish it updates both jobs and prints `Rolled out ...@sha256:...`.
@@ -280,7 +304,9 @@ Things worth knowing:
     newer build does the rollout instead.
 *   Cloud Build bills the minutes a build spends waiting (one small VM).
 *   The check and the job update are a few seconds apart. A scan that starts
-    in exactly that window can still have stages on two versions.
+    in that narrow window can still have stages on two versions; the rollout
+    re-checks immediately after updating the jobs and logs a `WARNING:` if a
+    scan started during the update.
 *   The build fails closed: if it cannot list workflow or job executions (for
     example, missing permissions), it does not roll out.
 
@@ -332,7 +358,8 @@ pipeline apply is in progress.
 
 *   **Pull request plans cannot apply.** Cloud Build runs a trigger's builds
     as the trigger's own service account, whatever the build file in the pull
-    request says. The plan account can only read.
+    request says (setting `serviceAccount:` in a pull request's YAML is ignored
+    by Cloud Build). The plan account can only read.
 *   **Pull request plans cannot read secrets or findings.** The plan runs code
     the pull request author controls, so its account gets narrow read roles
     and not `roles/viewer`: no Secret Manager payloads, no BigQuery data, no
@@ -344,7 +371,7 @@ pipeline apply is in progress.
     `terraform plan` needs.
 *   **The plan reads state.** Terraform state can hold sensitive values, and
     the plan account can read the state bucket. Treat pull request access as
-    access to the state.
+    access to the state, and always keep the repository **private**.
 *   **`repos.yaml` can execute code.** A repository's `build_command` runs in
     the scan jobs, which can read the GitHub credentials. Require code owner
     review from the platform or security team for it (see
@@ -352,6 +379,16 @@ pipeline apply is in progress.
 *   **The apply account is powerful.** It can grant project IAM roles. Protect
     the deployed branch as described in step 4; anyone who can push to it can
     change the deployment.
+*   **Use a dedicated Google Cloud project per deployment.** Because Terraform
+    manages project-level resources and IAM bindings, `<prefix>-tf-plan` holds
+    project-wide metadata/viewer roles and `<prefix>-tf-apply` holds
+    project-wide admin roles (`roles/resourcemanager.projectIamAdmin`,
+    `roles/secretmanager.admin`, `roles/storage.admin`, `roles/run.admin`, and
+    others). Running each deployment in its own project keeps those grants
+    isolated from unrelated workloads. (If two deployments ever share a project
+    for testing, also set a distinct `bigquery_dataset_id` in
+    `deployment.yaml`, since its default `codemender_telemetry` is not prefixed
+    with `resource_prefix`.)
 
 ## Moving an existing deployment
 
@@ -400,8 +437,16 @@ gcloud iam roles delete "${ROLE##*/}" --project="${PROJECT_ID}"
 
 Dependency updates (`requirements.txt`) arrive with updates to this repository;
 see [Taking updates](../customer/operations.md#taking-updates).
-Turn off Dependabot version updates for pip in your copy (or do not enable
-them), so its pull requests do not conflict with those updates.
+
+In your private configuration copy:
+
+*   **Turn off Dependabot version updates** (or review them with the same care
+    as any infrastructure change): merging *any* pull request into the deployed
+    branch triggers `<prefix>-tf-apply`, and changes to `requirements.txt` also
+    trigger `<prefix>-image`.
+*   **Disable GitHub Actions workflows** in the repository settings (or ignore
+    them) if your organization does not provide the runners they expect; the
+    Cloud Build triggers run independently of GitHub Actions.
 
 ## GitHub Actions fallback
 
@@ -412,12 +457,42 @@ example only and is not active where it is; see the comments in the file.
 `ci.yml` also reads the runner label from the `CI_RUNS_ON` repository
 variable, so the existing checks can run on self-hosted runners.
 
+## Teardown
+
+To remove a deployment and its GitOps pipeline:
+
+1.  Destroy `terraform/gcp` using the shared state bucket (or set
+    `bigquery_deletion_protection: false` and `bigquery_delete_contents_on_destroy: true`
+    first if you also want the BigQuery dataset removed), then destroy
+    `terraform/bootstrap`.
+2.  Delete the linked repository and the 2nd-gen Cloud Build connection:
+
+    ```bash
+    gcloud builds repositories delete "${REPO}" \
+        --connection="${CONNECTION}" --region="${REGION}" --project="${PROJECT_ID}" --quiet
+    gcloud builds connections delete "${CONNECTION}" \
+        --region="${REGION}" --project="${PROJECT_ID}" --quiet
+    ```
+
+3.  **Delete the regional OAuth token secret created by the Cloud Build
+    connection.** When a 2nd-gen GitHub connection is created, Cloud Build
+    stores its GitHub OAuth token in a **regional** Secret Manager secret named
+    `<connection>-github-oauthtoken-*` in `${REGION}`. A standard global
+    `gcloud secrets list` does not show regional secrets, and deleting the
+    connection leaves the secret behind. List and delete it with `--location`:
+
+    ```bash
+    gcloud secrets list --location="${REGION}" --project="${PROJECT_ID}"
+    gcloud secrets delete SECRET_NAME --location="${REGION}" --project="${PROJECT_ID}" --quiet
+    ```
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
 | --- | --- |
 | The plan check never appears on a pull request | The pull request is from a fork (comment `/gcbrun`), or the trigger's branch does not match the pull request's base branch. |
 | Plan fails with `Permission denied` reading a resource | A new resource type in `terraform/gcp` needs a read permission the plan account lacks. Add a read-only role or permission in `terraform/bootstrap/iam.tf`. Never add `roles/viewer`. |
-| Apply waits on `Acquiring state lock` | Another apply is running. The apply waits up to 15 minutes. |
+| Plan on a broken `repos.yaml` shows scheduler jobs being destroyed above the validation error | Expected when `repos.yaml` fails validation: the parsed repository map evaluates to empty before the variable precondition stops the plan. Ignore the planned destroys above the error; the failed plan cannot be applied. |
+| Apply waits on the pipeline lock or `Acquiring state lock`, or exits saying the commit was superseded | Another apply is running. `tf_apply.sh all` serializes builds with `pipeline.lock` in the state bucket (up to 15 minutes), skips the apply if a newer commit has already landed on the deployed branch (including when an old build is retried), and retries up to 3 times if a plan becomes stale or hits a transient state lock. |
 | Image build fails in step `stage-cm` with permission denied | The image build account cannot download the CodeMender CLI. It needs read access to the CLI's Artifact Registry repository; ask your Google contact. |
 | Rollout fails with `Could not check for running scans` | The image build account is not in `cloudbuild_service_account_emails`, or that change has not been applied yet. |

@@ -51,6 +51,8 @@ scheduler_paused: true
 
 # --- BigQuery telemetry ---------------------------------------------------------
 enable_bigquery_telemetry: true
+# Defaults to codemender_telemetry (not prefixed with resource_prefix). Set a
+# distinct dataset ID if another deployment already uses this project.
 # bigquery_dataset_id: codemender_telemetry
 # bigquery_location: ""  # default: region
 bigquery_include_snippets: false

@@ -137,15 +137,30 @@ run "apply_trigger_auto_applies_with_guard" {
       google_cloudbuild_trigger.tf_apply.filename == "cloudbuild/terraform-apply.yaml" &&
       google_cloudbuild_trigger.tf_apply.repository_event_config[0].push[0].branch == "^main$" &&
       google_cloudbuild_trigger.tf_apply.approval_config[0].approval_required == false &&
-      google_cloudbuild_trigger.tf_apply.substitutions["_ALLOW_DESTROY"] == "false"
+      google_cloudbuild_trigger.tf_apply.substitutions["_ALLOW_DESTROY"] == "false" &&
+      google_cloudbuild_trigger.tf_apply.substitutions["_CLOUDBUILD_REPO"] == var.cloudbuild_repository &&
+      google_cloudbuild_trigger.tf_apply.substitutions["_DEPLOY_BRANCH"] == "main" &&
+      google_cloudbuild_trigger.tf_apply.substitutions["_DESTROY_TRIGGER"] == "cmtest-tf-apply-destroy"
     )
     error_message = "By default the apply trigger applies pushes to main without approval and with the destroy guard on."
   }
 
   assert {
     condition = (
+      google_cloudbuildv2_connection_iam_member.apply_read_token.name == "github" &&
+      google_cloudbuildv2_connection_iam_member.apply_read_token.location == "us-central1" &&
+      google_cloudbuildv2_connection_iam_member.apply_read_token.role == "roles/cloudbuild.readTokenAccessor"
+    )
+    error_message = "The apply identity must get roles/cloudbuild.readTokenAccessor on the repository's Cloud Build connection."
+  }
+
+  assert {
+    condition = (
       google_cloudbuild_trigger.tf_apply_destroy.approval_config[0].approval_required == true &&
       google_cloudbuild_trigger.tf_apply_destroy.substitutions["_ALLOW_DESTROY"] == "true" &&
+      google_cloudbuild_trigger.tf_apply_destroy.substitutions["_CLOUDBUILD_REPO"] == var.cloudbuild_repository &&
+      google_cloudbuild_trigger.tf_apply_destroy.substitutions["_DEPLOY_BRANCH"] == "main" &&
+      google_cloudbuild_trigger.tf_apply_destroy.substitutions["_DESTROY_TRIGGER"] == "cmtest-tf-apply-destroy" &&
       google_cloudbuild_trigger.tf_apply_destroy.git_file_source[0].path == "cloudbuild/terraform-apply.yaml" &&
       google_cloudbuild_trigger.tf_apply_destroy.source_to_build[0].ref == "refs/heads/main" &&
       length(google_cloudbuild_trigger.tf_apply_destroy.repository_event_config) == 0
@@ -213,7 +228,9 @@ run "approvals_and_overrides" {
   assert {
     condition = (
       google_cloudbuild_trigger.tf_apply.repository_event_config[0].push[0].branch == "^release\\.1$" &&
-      google_cloudbuild_trigger.tf_apply_destroy.source_to_build[0].ref == "refs/heads/release.1"
+      google_cloudbuild_trigger.tf_apply.substitutions["_DEPLOY_BRANCH"] == "release.1" &&
+      google_cloudbuild_trigger.tf_apply_destroy.source_to_build[0].ref == "refs/heads/release.1" &&
+      google_cloudbuild_trigger.tf_apply_destroy.substitutions["_DEPLOY_BRANCH"] == "release.1"
     )
     error_message = "The branch must be matched literally."
   }

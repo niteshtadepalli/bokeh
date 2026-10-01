@@ -13,6 +13,9 @@ The settings live in two committed files in `terraform/gcp/`:
 
 An unknown key, a value of the wrong type, a missing `repo_url` or a malformed
 schedule fails the pull request's plan with a message that names the entry.
+(When `repos.yaml` fails validation, Terraform prints planned deletions of the
+YAML-defined scheduler jobs above the validation error; ignore those planned
+deletions — a failed plan cannot be applied.)
 
 In the commands below, set these first:
 
@@ -87,6 +90,7 @@ The keys you are most likely to change in `deployment.yaml`:
 | `github_app_id`, `github_app_installation_id`, `github_app_private_key_secret_id` | unset | GitHub App authentication; see below |
 | `wiz_client_id_secret_id`, `wiz_client_secret_secret_id` | `<prefix>-wiz-client-id`, `<prefix>-wiz-client-secret` | Names of the Wiz credential secrets |
 | `enable_bigquery_telemetry` | `true` | Write scan history and findings to BigQuery |
+| `bigquery_dataset_id` | `codemender_telemetry` | BigQuery dataset ID (not prefixed with `resource_prefix`; override if another deployment shares the project) |
 | `bigquery_include_snippets` | `false` | Also store source snippets and the model's analysis text in BigQuery |
 | `create_vpc_and_nat`, `existing_vpc_connector_id` | `false`, unset | Send the jobs' traffic through a VPC connector and Cloud NAT (fixed egress IP) |
 | `cloudbuild_service_account_emails` | the project's default Cloud Build accounts | Who may build and roll out the runner image; list the bootstrap's image build account |
@@ -290,6 +294,11 @@ git push origin update-codemender
 
 Open a pull request as usual. The plan shows what the update changes; code
 changes build a new image after the merge.
+
+In your private repository, turn off Dependabot version updates (or review them
+like any infrastructure change, since merging any pull request into the deployed
+branch triggers `<prefix>-tf-apply`), and disable GitHub Actions workflows if
+your organization does not provide the runners they expect.
 
 ## Troubleshooting
 

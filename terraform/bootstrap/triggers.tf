@@ -18,6 +18,12 @@ locals {
     _TF_STATE_PREFIX = var.state_prefix
     _TF_DIR          = var.terraform_dir
   }
+
+  apply_substitutions = merge(local.tf_substitutions, {
+    _CLOUDBUILD_REPO = var.cloudbuild_repository
+    _DEPLOY_BRANCH   = var.branch
+    _DESTROY_TRIGGER = "${var.resource_prefix}-tf-apply-destroy"
+  })
 }
 
 # Every pull request into the deployed branch. No file filter, so the check
@@ -76,9 +82,12 @@ resource "google_cloudbuild_trigger" "tf_apply" {
     approval_required = var.apply_requires_approval
   }
 
-  substitutions = merge(local.tf_substitutions, { _ALLOW_DESTROY = "false" })
+  substitutions = merge(local.apply_substitutions, { _ALLOW_DESTROY = "false" })
 
-  depends_on = [google_project_iam_member.apply_roles]
+  depends_on = [
+    google_project_iam_member.apply_roles,
+    google_cloudbuildv2_connection_iam_member.apply_read_token,
+  ]
 }
 
 # Manual only, always approval-gated: applies the deployed branch even when
@@ -108,9 +117,12 @@ resource "google_cloudbuild_trigger" "tf_apply_destroy" {
     approval_required = true
   }
 
-  substitutions = merge(local.tf_substitutions, { _ALLOW_DESTROY = "true" })
+  substitutions = merge(local.apply_substitutions, { _ALLOW_DESTROY = "true" })
 
-  depends_on = [google_project_iam_member.apply_roles]
+  depends_on = [
+    google_project_iam_member.apply_roles,
+    google_cloudbuildv2_connection_iam_member.apply_read_token,
+  ]
 }
 
 # Pushes to the deployed branch that touch the runner image: build, push and

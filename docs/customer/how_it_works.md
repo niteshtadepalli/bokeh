@@ -125,11 +125,11 @@ flowchart LR
   pr --> plan["tf-plan trigger: terraform plan, read-only service account"]
   plan --> review["Plan check and code owner review"]
   review --> merge["Merge to the deployed branch"]
-  merge --> apply["tf-apply trigger: plan, destroy guard, apply"]
+  merge --> apply["tf-apply trigger: lock, check HEAD, plan, destroy guard, apply"]
   apply -- "would delete protected data" --> stop["Stops. An approver runs tf-apply-destroy"]
   merge -- "image files changed" --> img["image trigger: stage cm, build, push"]
   img --> wait{"Scan running?"}
-  wait -- "yes: check again every 5 min, up to 12 h" --> wait
+  wait -- "yes: check again every 60s, up to 12 h" --> wait
   wait -- "no" --> roll["Point the runner and worker jobs at the new image digest"]
 ```
 
@@ -137,14 +137,17 @@ flowchart LR
     `<prefix>-tf-plan` service account, which can read but not change anything
     and cannot read secret values, BigQuery data or scan executions.
 *   **Apply** runs on every push to the deployed branch, as
-    `<prefix>-tf-apply`. It plans again, stops if the plan would delete or
-    replace a bucket, BigQuery dataset or table, secret, or the image
-    registry, and otherwise applies that plan.
+    `<prefix>-tf-apply`. It acquires a pipeline lock in the state bucket,
+    verifies that its commit is still the tip of the deployed branch (skipping
+    superseded commits), plans again, stops if the plan would delete or replace
+    a bucket, BigQuery dataset or table, secret, or the image registry, and
+    otherwise applies that plan.
 *   **Image** runs when a merge changes the runner image or its rollout
     (`Dockerfile`, `codemender_agent/`, `orchestrator.py`, `requirements.txt`,
     `cloudbuild.yaml`, `scripts/ci/image_rollout.sh`). It downloads the pinned
     CodeMender CLI, builds and pushes the image, and waits until no scan is
-    running before it switches both jobs to the new image.
+    running (re-checking every 60 seconds) before it switches both jobs to the
+    new image.
 
 The [GitOps guide](../guides/gitops_cloud_build.md) covers the bootstrap,
 approvals, the destroy guard and manual rollback.
@@ -155,7 +158,7 @@ approvals, the destroy guard and manual rollback.
 | --- | --- | --- |
 | Scan workspace, partitions, worker results, JSON and SARIF reports | Reports bucket, `scans/<scan-id>/` | Deleted after 90 days |
 | HTML report | Reports bucket, `reports/<owner>_<repo>/<scan-id>/` | Deleted after 90 days |
-| Scan history and findings | BigQuery dataset (`codemender_telemetry` by default) | Until you delete it |
+| Scan history and findings | BigQuery dataset (`codemender_telemetry` by default; set via `bigquery_dataset_id`, not prefixed with `resource_prefix`) | Until you delete it |
 | Findings | GitHub code scanning in each repository | GitHub's retention |
 | Fixes | Branches and pull requests in each repository | Until closed or deleted |
 | Logs | Cloud Logging for the jobs, the workflow and Cloud Build | Your Cloud Logging retention |
@@ -224,6 +227,8 @@ BigQuery does not store source code or the model's analysis text unless
     values. Treat pull request access to your copy as access to the state.
 *   The apply account can grant project IAM roles. Protect the deployed branch
     so that every change goes through a reviewed pull request.
+*   Because `<prefix>-tf-plan` and `<prefix>-tf-apply` hold project-wide roles,
+    run each deployment in its own dedicated Google Cloud project.
 
 ### Not provided
 

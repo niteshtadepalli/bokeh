@@ -17,8 +17,10 @@ locals {
   deployment_resource_prefix = coalesce(var.deployment_resource_prefix, var.resource_prefix)
   deployment_region          = coalesce(var.deployment_region, var.region)
 
-  # The region segment of the linked repository's resource name.
-  repository_region = try(regex("^projects/[^/]+/locations/([^/]+)/", var.cloudbuild_repository)[0], "")
+  # The project, region and connection segments of the linked repository's resource name.
+  repository_project    = try(regex("^projects/([^/]+)/", var.cloudbuild_repository)[0], var.project_id)
+  repository_region     = try(regex("^projects/[^/]+/locations/([^/]+)/", var.cloudbuild_repository)[0], "")
+  repository_connection = try(regex("^projects/[^/]+/locations/[^/]+/connections/([^/]+)/", var.cloudbuild_repository)[0], "")
 
   # Trigger branch filters are RE2 patterns; match the branch name exactly.
   branch_pattern = "^${replace(var.branch, ".", "\\.")}$"

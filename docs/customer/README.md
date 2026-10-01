@@ -60,7 +60,7 @@ where the data lives, and the full security model.
 | Cloud Storage bucket | `<prefix>-reports-<project>` | Scan workspaces and HTML reports; objects are deleted after 90 days |
 | Artifact Registry repository | `<prefix>-runner` | The runner container image |
 | Secret Manager secrets | See [Operations](operations.md#github-credentials) | GitHub App private key; optional Wiz credentials |
-| BigQuery dataset | `codemender_telemetry` (configurable) | Scan history and findings, if telemetry is on (the default) |
+| BigQuery dataset | `codemender_telemetry` (configurable via `bigquery_dataset_id`; not prefixed with `resource_prefix`) | Scan history and findings, if telemetry is on (the default) |
 | Service accounts | `<prefix>-runner-sa`, `<prefix>-worker-sa`, `<prefix>-workflows-sa`, `<prefix>-scheduler-sa` | One identity per component |
 | VPC connector and Cloud NAT | optional (`create_vpc_and_nat`) | Fixed egress IP, for example for a GitHub IP allow list |
 
@@ -75,9 +75,11 @@ You need:
 *   A **private** copy of this repository on github.com, owned by the team that
     runs the deployment. It holds `repos.yaml`, which can run code in the scan
     jobs.
-*   A Google Cloud project with Vertex AI available, and access to the
-    CodeMender CLI (your Google team arranges this; see the setup requirements
-    document they provided).
+*   A **dedicated** Google Cloud project with Vertex AI available, and access to
+    the CodeMender CLI (your Google team arranges this; see the setup
+    requirements document they provided). Use a dedicated project per deployment
+    because the GitOps pipeline's plan and apply service accounts hold
+    project-wide roles (see [Security model](how_it_works.md#deployment-changes)).
 *   Someone who can create and install a GitHub App in your GitHub
     organization.
 
