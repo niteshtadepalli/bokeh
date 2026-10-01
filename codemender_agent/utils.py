@@ -445,8 +445,23 @@ def build_cm_command(
   return [arg for arg in cmd if arg is not None]
 
 
+def is_unauthorized_http_error(error: BaseException) -> bool:
+  """Whether `error` is an HTTP 401 response from `raise_for_status`."""
+  response = getattr(error, "response", None)
+  return (
+      isinstance(error, requests.HTTPError)
+      and getattr(response, "status_code", None) == 401
+  )
+
+
 def retry_on_exception(max_tries=3, initial_delay=1, backoff_factor=2):
-  """Decorator to retry transient network/command errors with exponential backoff."""
+  """Decorator to retry transient network/command errors with exponential backoff.
+
+  HTTP 401 is retried too, with the same short backoff: GitHub can reject an
+  installation token for a few seconds right after it is minted. A token that
+  is really expired or revoked still fails after `max_tries`; callers that
+  hold a GitHub App token then replace it with `config.call_with_github_token`.
+  """
 
   def decorator(func):
     @wraps(func)

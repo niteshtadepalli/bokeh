@@ -39,6 +39,7 @@ from codemender_agent.config import get_cleanup_ports
 from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import call_with_github_token
 from codemender_agent.config import refresh_github_token
 from codemender_agent.config import resolve_pr_remediation_mode
 from codemender_agent.storage import download_from_url
@@ -161,6 +162,26 @@ def _mark_fix_failed(state_db_path: str, finding_id: str, reason: str) -> None:
       conn.commit()
   except Exception as e:  # pylint: disable=broad-exception-caught
     logger.warning("Failed to set %s in worker state.db: %s", FIX_FAILED_STATUS, e)
+
+
+def _mark_pr_creation_failed(
+    state_db_path: str, finding_id: str, reason: str
+) -> None:
+  """Records in the worker state database that GitHub delivery failed."""
+  if not os.path.exists(state_db_path):
+    return
+  try:
+    with closing(sqlite3.connect(state_db_path)) as conn:
+      conn.execute(
+          "UPDATE findings SET status = 'PR_CREATION_FAILED', mute_reason = ?"
+          " WHERE finding_id = ?",
+          (reason, finding_id),
+      )
+      conn.commit()
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.warning(
+        "Failed to set PR_CREATION_FAILED in worker state.db: %s", e
+    )
 
 
 def _read_force_verify_ids(partition_path: str) -> set[str]:
@@ -604,17 +625,37 @@ def _process_finding(
     # A dry run skips remote duplicate checks so that repeated runs against
     # the same commit (for example the arms of an A/B comparison) all process
     # the same findings.
-    if _skip_if_duplicate_branch_or_pr(
-        clean_repo_url,
-        token,
-        repo_dir,
-        branch_name,
-        file_path,
-        vuln_type,
-        start_line,
-        finding_id,
-        state_db_path,
-    ):
+    try:
+      is_duplicate, token = call_with_github_token(
+          config,
+          token,
+          lambda tok: _skip_if_duplicate_branch_or_pr(
+              clean_repo_url,
+              tok,
+              repo_dir,
+              branch_name,
+              file_path,
+              vuln_type,
+              start_line,
+              finding_id,
+              state_db_path,
+          ),
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      # Fail closed: without a duplicate check, remediating could clobber an
+      # existing fix branch or open a second pull request. Record the failure
+      # and return, so the worker moves on and still uploads its state.
+      logger.error(
+          "Could not check GitHub for an existing branch or pull request for"
+          " finding %s; not remediating it: %s",
+          finding_id,
+          e,
+      )
+      _mark_pr_creation_failed(
+          state_db_path, finding_id, f"GitHub duplicate check failed: {e}"
+      )
+      return None
+    if is_duplicate:
       return
 
   # 2. Verification Retry Loop (Executes 'cm verify' with port cleanup)
@@ -1430,26 +1471,45 @@ def run_worker_pipeline() -> None:
           e,
       )
 
-    # Execute verify, fix, staging, and remediation routing routine for finding
-    pr_url = _process_finding(
-        finding_id,
-        finding,
-        repo_dir,
-        cm_binary,
-        scrubbed_env,
-        clean_repo_url,
-        token,
-        owner,
-        repo_name,
-        default_branch,
-        working_base_ref,
-        state_db_path,
-        worker_token_usage,
-        config=config,
-        pr_diff_line_ranges=pr_diff_line_ranges,
-        already_suggested=already_suggested,
-        force_verify=_must_force_verify(finding_id, finding, force_verify_ids),
-    )
+    # Execute verify, fix, staging, and remediation routing routine for finding.
+    # One finding's unexpected failure must not stop the worker before it
+    # uploads the partition state below.
+    try:
+      pr_url = _process_finding(
+          finding_id,
+          finding,
+          repo_dir,
+          cm_binary,
+          scrubbed_env,
+          clean_repo_url,
+          token,
+          owner,
+          repo_name,
+          default_branch,
+          working_base_ref,
+          state_db_path,
+          worker_token_usage,
+          config=config,
+          pr_diff_line_ranges=pr_diff_line_ranges,
+          already_suggested=already_suggested,
+          force_verify=_must_force_verify(finding_id, finding, force_verify_ids),
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logger.error(
+          "Unexpected error while processing finding %s; continuing with the"
+          " next finding: %s",
+          finding_id,
+          e,
+      )
+      _mark_fix_failed(state_db_path, finding_id, f"Unexpected error: {e}")
+      try:
+        run_command(
+            ["git", "checkout", "-f", working_base_ref], cwd=repo_dir, check=False
+        )
+        clean_workspace(repo_dir)
+      except Exception as reset_err:  # pylint: disable=broad-exception-caught
+        logger.warning("Could not reset the workspace: %s", reset_err)
+      pr_url = None
     # Track generated Pull Request URL for Step Summary linking
     if pr_url and isinstance(pr_url, str) and pr_url.startswith("http"):
       worker_finding_prs[finding_id] = pr_url

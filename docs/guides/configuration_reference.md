@@ -25,7 +25,8 @@ when running in Docker or Cloud Run.
     set, the orchestrator signs an App JWT with the PEM private key, exchanges
     it for an installation access token scoped to the scanned repository, and
     re-mints the token when less than 10 minutes of its one-hour lifetime
-    remain, so multi-hour scans keep working. The static token variables above
+    remain (see `CODEMENDER_GITHUB_TOKEN_REFRESH_MARGIN_SECONDS` below), so
+    multi-hour scans keep working. The static token variables above
     are then ignored, and a partial or broken App configuration fails the run
     rather than falling back to a personal token. Without
     `GITHUB_APP_INSTALLATION_ID` the installation is looked up from the
@@ -33,6 +34,70 @@ when running in Docker or Cloud Run.
     Branch pushes, pull requests, comments and commit statuses are attributed
     to the App's bot account; fix commits keep the `CodeMender Agent` git
     author identity.
+*   `CODEMENDER_GITHUB_TOKEN_REFRESH_MARGIN_SECONDS`: How many seconds before
+    an installation token expires the orchestrator mints a new one. Values are
+    clamped to the range `300`–`3300`; an empty, non-numeric or non-finite
+    value uses the default.
+    *   *Default*: `600` (10 minutes).
+    *   Setting it to `3300` makes every token refresh after about 5 minutes,
+        which is a quick way to exercise the refresh path on a short scan. It
+        is not wired through Terraform: set it on the Cloud Run jobs directly
+        (for example `gcloud run jobs update <job> --update-env-vars ...`) and
+        remove it afterwards. The next `terraform apply` also resets the job
+        environment.
+
+### GitHub App Tokens on Scheduled Scans (Cloud Run)
+
+*   **Minting retries**: a failed installation-token request is retried with
+    exponential backoff (5 s doubling up to 2 minutes, with jitter, honouring
+    `Retry-After`) for up to about 8 minutes when GitHub answers with a 5xx,
+    a 429, or a 403 secondary rate limit, or when the request fails at the
+    network level. A 401 or a permission 403 is not retried. When the budget
+    runs out, later token requests in the same process try once for the next
+    15 minutes instead of waiting another 8 minutes each. While the current
+    token still has more than a minute left it is reused if a refresh fails.
+*   **Rejected tokens (HTTP 401)**: GitHub can reject a token for a few
+    seconds right after minting it, so API calls keep their short retry on a
+    401. If GitHub still rejects the token during the duplicate checks or when
+    resolving the default branch for SARIF upload, the orchestrator discards
+    the cached token, mints a new one, waits until it is 5 seconds old and
+    retries once. If that also fails, the check fails closed: Stage 1 fails
+    instead of treating the finding as new, a worker records the finding as
+    `PR_CREATION_FAILED` instead of opening a possibly duplicate pull request,
+    and SARIF upload is skipped rather than guessing `main` as the branch.
+    A worker that hits an unexpected error on one finding records it as
+    `FIX_FAILED`, moves on to the next finding and still uploads its state.
+*   **Stage 1 checkpoint**: in GCS mode, once `cm find` has produced findings
+    and before the first GitHub call after the scan, the scan stage uploads
+    `scans/<scan_id>/checkpoint/findings.json` and
+    `scans/<scan_id>/checkpoint/state.db` to `CODEMENDER_GCS_BUCKET`. If
+    GitHub authentication then fails, the log names this location so the
+    findings of a long scan are not lost. The checkpoint is for manual
+    recovery; a new scan does not resume from it.
+
+#### Rotating the GitHub App private key
+
+Each Cloud Run task reads `GITHUB_APP_PRIVATE_KEY` from Secret Manager once,
+when its container starts, and keeps using that key for its whole run. A scan
+job can run for up to its task timeout of 86400 seconds (24 hours). To rotate
+the key without breaking scans that are already running:
+
+1.  In the GitHub App settings, generate a new private key. Do not delete the
+    old one yet; GitHub accepts every active key of an App.
+2.  Add the new key as a new version of the private key secret (by default
+    `<resource_prefix>-github-app-private-key`):
+    `gcloud secrets versions add <secret> --data-file=<new-key.pem>`. Tasks
+    that start after this pick up the new key.
+3.  Keep the old key active in GitHub until every scan that started before
+    step 2 has finished, which can take up to 86400 seconds. Check the Cloud
+    Workflows executions and Cloud Run job executions for anything still
+    running.
+4.  Delete the old key in the GitHub App settings, then disable or destroy the
+    old secret version.
+
+Deleting the old key while a scan still uses it makes every later token mint in
+that scan fail with a 401, and the affected stages fail closed as described
+above.
 
 ### Pipeline Customization
 

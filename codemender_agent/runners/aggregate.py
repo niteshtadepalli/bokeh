@@ -39,6 +39,7 @@ from codemender_agent.config import get_github_credentials
 from codemender_agent.config import get_scrubbed_env
 from codemender_agent.config import github_app_configured
 from codemender_agent.config import inject_codemender_config
+from codemender_agent.config import read_default_branch
 from codemender_agent.config import refresh_github_token
 from codemender_agent.config import resolve_pr_remediation_mode
 from codemender_agent.storage import download_file_from_gcs
@@ -2818,16 +2819,23 @@ def _run_aggregate_pipeline(ctx: "bq_telemetry.ScanRunContext") -> None:
         elif config.target_branch:
           scan_ref = f"refs/heads/{config.target_branch}"
         else:
-          default_br = get_default_branch(token, owner, repo_name)
-          scan_ref = f"refs/heads/{default_br}"
-        upload_sarif_to_code_scanning(
-            token=token,
-            owner=owner,
-            repo=repo_name,
-            sarif_path=sarif_path,
-            commit_sha=target_commit_sha,
-            ref=scan_ref,
-        )
+          default_br, token = read_default_branch(
+              config, token, owner, repo_name, lookup=get_default_branch
+          )
+          scan_ref = f"refs/heads/{default_br}" if default_br else None
+        if scan_ref:
+          upload_sarif_to_code_scanning(
+              token=token,
+              owner=owner,
+              repo=repo_name,
+              sarif_path=sarif_path,
+              commit_sha=target_commit_sha,
+              ref=scan_ref,
+          )
+        else:
+          logger.error(
+              "Not uploading report.sarif: the target branch is unknown."
+          )
       else:
         logger.info(
             "Skipping GitHub Code Scanning SARIF upload because report.sarif contains 0 results "
