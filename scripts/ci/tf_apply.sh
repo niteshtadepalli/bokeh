@@ -86,18 +86,10 @@ is_transient_tf_error() {
 }
 
 do_all() {
-  python3 "$SCRIPT_DIR/pipeline_lock.py" acquire
   trap 'python3 "$SCRIPT_DIR/pipeline_lock.py" release || true' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-
-  _check_rc=0
-  python3 "$SCRIPT_DIR/pipeline_lock.py" check-commit || _check_rc=$?
-  if [ "$_check_rc" -eq 10 ]; then
-    exit 0
-  elif [ "$_check_rc" -ne 0 ]; then
-    exit "$_check_rc"
-  fi
+  python3 "$SCRIPT_DIR/pipeline_lock.py" acquire
 
   _max_attempts="${TF_APPLY_MAX_ATTEMPTS:-3}"
   _retry_sleep="${TF_APPLY_RETRY_SECONDS:-2}"
@@ -105,6 +97,16 @@ do_all() {
   _log_file="${TMPDIR:-/tmp}/tf_apply_$$.log"
 
   while :; do
+    _check_rc=0
+    python3 "$SCRIPT_DIR/pipeline_lock.py" check-commit || _check_rc=$?
+    if [ "$_check_rc" -eq 10 ]; then
+      rm -f "$_log_file"
+      exit 0
+    elif [ "$_check_rc" -ne 0 ]; then
+      rm -f "$_log_file"
+      exit "$_check_rc"
+    fi
+
     rm -f "$_log_file"
     _step_rc=0
     run_logged "$_log_file" do_plan || _step_rc=$?

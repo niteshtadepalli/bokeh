@@ -96,18 +96,25 @@ def _local_state_dir():
 
 def _use_gcs_backend():
   """Returns True when GCS HTTP locking should be used instead of local files."""
+  mode = _env("TF_LOCK_BACKEND").lower()
+  if mode == "local":
+    return False
+  if mode == "gcs":
+    return True
   for var in (
       "TF_APPLY_ACCESS_TOKEN",
       "GOOGLE_OAUTH_ACCESS_TOKEN",
       "TF_GCS_API_URL",
       "CLOUDBUILD_REPO",
       "BUILD_ID",
-      "GOOGLE_APPLICATION_CREDENTIALS",
-      "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
   ):
     if _env(var):
       return True
-  return _env("TF_REQUIRE_GCS_LOCK").lower() in ("1", "true", "yes")
+  if _env("STUB_DIR"):
+    return False
+  if _env("TF_REQUIRE_GCS_LOCK").lower() in ("1", "true", "yes"):
+    return True
+  return bool(_env("TF_STATE_BUCKET"))
 
 
 def get_access_token():
@@ -195,7 +202,7 @@ def _parse_rfc3339(ts_str):
   if not ts_str:
     return None
   try:
-    cleaned = ts_str.rstrip("Z")
+    cleaned = re.sub(r"(Z|[+-]\d{2}:\d{2})$", "", ts_str.strip())
     if "." in cleaned:
       head, frac = cleaned.split(".", 1)
       cleaned = f"{head}.{frac[:6]}"
@@ -218,7 +225,7 @@ def _holder_id():
 
 
 def _resolve_commit_sha(cwd=None):
-  for var in ("COMMIT_SHA", "GITHUB_SHA"):
+  for var in ("COMMIT_SHA", "REVISION_ID", "GITHUB_SHA"):
     val = _env(var)
     if val:
       return val
@@ -314,6 +321,7 @@ def _remove_lock_state():
 
 def acquire_lock():
   """Acquires the pipeline mutex (in GCS or local state directory)."""
+  _remove_lock_state()
   ttl = float(_env("TF_LOCK_TTL_SECONDS", str(_DEFAULT_LOCK_TTL_SECONDS)))
   timeout = float(
       _env("TF_LOCK_TIMEOUT_SECONDS", str(_DEFAULT_LOCK_TIMEOUT_SECONDS))
@@ -330,7 +338,6 @@ def acquire_lock():
     raise PipelineLockError("TF_STATE_BUCKET is required to acquire pipeline lock")
   obj_name = _lock_object_name()
   gcs_base = _env("TF_GCS_API_URL", _DEFAULT_GCS_API_URL).rstrip("/")
-  token = get_access_token()
 
   q_bucket = urllib.parse.quote(bucket, safe="")
   q_obj = urllib.parse.quote(obj_name, safe="")
@@ -343,6 +350,7 @@ def acquire_lock():
 
   deadline = time.monotonic() + timeout
   while True:
+    token = get_access_token()
     now = time.time()
     payload = {
         "holder": holder,
@@ -389,6 +397,9 @@ def acquire_lock():
     existing_ttl = ttl
 
     d_status, data = _http_json("GET", media_url, token)
+    if d_status == 404:
+      # Released between metadata GET and media GET; retry immediately.
+      continue
     if d_status == 200 and isinstance(data, dict):
       existing_holder = data.get("holder", existing_holder)
       if isinstance(data.get("acquired_at"), (int, float)):
@@ -642,7 +653,8 @@ def _ls_remote_head(remote_url, branch, gh_token):
   env["GIT_CONFIG_KEY_0"] = "http.extraheader"
   env["GIT_CONFIG_VALUE_0"] = f"AUTHORIZATION: basic {basic}"
 
-  ref = f"refs/heads/{branch}"
+  clean_branch = re.sub(r"^refs/heads/", "", branch.strip())
+  ref = f"refs/heads/{clean_branch}"
   proc = subprocess.run(
       ["git", "ls-remote", "--exit-code", remote_url, ref],
       env=env,
@@ -658,10 +670,17 @@ def _ls_remote_head(remote_url, branch, gh_token):
         f"git ls-remote {remote_url} {ref} failed "
         f"(exit {proc.returncode}): {safe_err.strip()}"
     )
-  first_line = (proc.stdout or "").strip().splitlines()
-  if not first_line:
+  lines = (proc.stdout or "").strip().splitlines()
+  if not lines:
     raise PipelineLockError(f"git ls-remote returned no ref for {ref}")
-  remote_sha = first_line[0].split()[0].strip()
+  remote_sha = ""
+  for line in lines:
+    parts = line.split()
+    if len(parts) >= 2 and parts[1] == ref:
+      remote_sha = parts[0].strip()
+      break
+  if not remote_sha:
+    remote_sha = lines[0].split()[0].strip()
   if not remote_sha:
     raise PipelineLockError(f"git ls-remote returned an empty SHA for {ref}")
   return remote_sha
@@ -749,6 +768,7 @@ def check_commit():
 
   branch = (
       _env("DEPLOY_BRANCH")
+      or _env("_BRANCH_NAME")
       or _env("BRANCH_NAME")
       or _env("GITHUB_REF_NAME")
       or "main"

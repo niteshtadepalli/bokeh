@@ -13,6 +13,9 @@ The settings live in two committed files in `terraform/gcp/`:
 
 An unknown key, a value of the wrong type, a missing `repo_url` or a malformed
 schedule fails the pull request's plan with a message that names the entry.
+(When `repos.yaml` fails validation, Terraform prints planned deletions of the
+YAML-defined scheduler jobs above the validation error; ignore those planned
+deletions — a failed plan cannot be applied.)
 
 In the commands below, set these first:
 
@@ -291,6 +294,11 @@ git push origin update-codemender
 
 Open a pull request as usual. The plan shows what the update changes; code
 changes build a new image after the merge.
+
+In your private repository, turn off Dependabot version updates (or review them
+like any infrastructure change, since merging any pull request into the deployed
+branch triggers `<prefix>-tf-apply`), and disable GitHub Actions workflows if
+your organization does not provide the runners they expect.
 
 ## Troubleshooting
 

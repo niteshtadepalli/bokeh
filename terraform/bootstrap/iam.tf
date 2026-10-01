@@ -151,7 +151,7 @@ resource "google_project_iam_member" "apply_roles" {
 # git ls-remote before applying, so an older or retried commit never overwrites
 # a newer one.
 resource "google_cloudbuildv2_connection_iam_member" "apply_read_token" {
-  project  = var.project_id
+  project  = local.repository_project
   location = var.region
   name     = local.repository_connection
   role     = "roles/cloudbuild.readTokenAccessor"

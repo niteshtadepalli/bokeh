@@ -30,7 +30,7 @@ steps:
     entrypoint: 'sh'
     args:
       - '-c'
-      - 'mkdir -p /workspace/.terraform-bin && cp /bin/terraform /workspace/.terraform-bin/terraform'
+      - 'mkdir -p /workspace/.terraform-bin && cp /bin/terraform /workspace/.terraform-bin/terraform && chmod +x /workspace/.terraform-bin/terraform'
 
   - id: 'terraform-apply'
     name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -40,6 +40,7 @@ steps:
       - 'PROJECT_ID=${PROJECT_ID}'
       - 'BUILD_ID=${BUILD_ID}'
       - 'COMMIT_SHA=${COMMIT_SHA}'
+      - 'REVISION_ID=${REVISION_ID}'
       - 'TF_STATE_BUCKET=${_TF_STATE_BUCKET}'
       - 'TF_STATE_PREFIX=${_TF_STATE_PREFIX}'
       - 'TF_DIR=${_TF_DIR}'

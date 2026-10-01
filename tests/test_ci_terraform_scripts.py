@@ -20,6 +20,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -30,7 +31,8 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
-_CI_DIR = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "ci"
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+_CI_DIR = _REPO_ROOT / "scripts" / "ci"
 _SH = shutil.which("sh")
 
 _lock_spec = importlib.util.spec_from_file_location("pipeline_lock", _CI_DIR / "pipeline_lock.py")
@@ -88,7 +90,7 @@ class TerraformScriptsTest(unittest.TestCase):
         "TF_STATE_BUCKET": "state-bucket",
         "TF_STATE_PREFIX": "cm/gcp",
         "TF_DIR": str(self.tf_dir),
-        "TF_APPLY_RETRY_SLEEP_SECONDS": "0",
+        "TF_APPLY_RETRY_SECONDS": "0",
     }
     self._plan([])
 
@@ -483,7 +485,88 @@ class PipelineLockGCSTest(unittest.TestCase):
       self.assertNotIn(secret, str(ctx.exception))
       self.assertIn("***", str(ctx.exception))
 
+  def test_use_gcs_backend_defaults_to_true_when_state_bucket_is_set(self):
+    clean_env = {"TF_STATE_BUCKET": "prod-tfstate-bucket"}
+    with mock.patch.dict(os.environ, clean_env, clear=True):
+      self.assertTrue(pipeline_lock._use_gcs_backend())
+
+  def test_gcs_fallback_marker_roundtrip_and_supersede(self):
+    stored = {}
+
+    def fake_http(method, url, token=None, body=None, headers=None):
+      if method == "POST" and "last-applied.json" in url:
+        stored["marker"] = dict(body)
+        return 200, {"generation": "5"}
+      if method == "GET" and "last-applied.json" in url:
+        if "marker" not in stored:
+          return 404, {}
+        return 200, dict(stored["marker"])
+      self.fail(f"Unexpected HTTP call: {method} {url}")
+
+    with mock.patch.object(pipeline_lock, "_http_json", side_effect=fake_http):
+      with mock.patch.dict(os.environ, {
+          "CLOUDBUILD_REPO": "",
+          "COMMIT_SHA": "new-sha-2222222",
+          "COMMIT_TIMESTAMP": "1700000200",
+      }, clear=False):
+        out = io.StringIO()
+        with redirect_stdout(out):
+          self.assertEqual(pipeline_lock.check_commit(), 0)
+          self.assertEqual(pipeline_lock.record_applied(), 0)
+
+      self.assertEqual(stored["marker"]["sha"], "new-sha-2222222")
+      self.assertEqual(stored["marker"]["commit_timestamp"], 1700000200)
+
+      with mock.patch.dict(os.environ, {
+          "CLOUDBUILD_REPO": "",
+          "COMMIT_SHA": "old-sha-1111111",
+          "COMMIT_TIMESTAMP": "1700000100",
+      }, clear=False):
+        out = io.StringIO()
+        with redirect_stdout(out):
+          self.assertEqual(
+              pipeline_lock.check_commit(),
+              pipeline_lock.SUPERSEDED_EXIT_CODE,
+          )
+        self.assertIn("superseded by new-sha-2222222", out.getvalue())
+
+  def test_compute_cloud_run_jobs_ignore_gcloud_client_drift(self):
+    compute_tf = (_REPO_ROOT / "terraform" / "gcp" / "compute.tf").read_text(
+        encoding="utf-8"
+    )
+    for job_name in ("runner", "worker"):
+      header = f'resource "google_cloud_run_v2_job" "{job_name}"'
+      start = compute_tf.find(header)
+      self.assertNotEqual(start, -1, f"Missing {header} in compute.tf")
+      next_resource = compute_tf.find('\nresource "', start + len(header))
+      block = (
+          compute_tf[start:]
+          if next_resource == -1
+          else compute_tf[start:next_resource]
+      )
+      match = re.search(
+          r"ignore_changes\s*=\s*\[(.*?)\n\s*\]", block, re.DOTALL
+      )
+      self.assertIsNotNone(
+          match, f"Missing lifecycle.ignore_changes on {job_name}"
+      )
+      entries = {
+          line.split("#", 1)[0].strip().rstrip(",")
+          for line in match.group(1).splitlines()
+          if line.split("#", 1)[0].strip()
+      }
+      self.assertEqual(
+          entries,
+          {
+              "client",
+              "client_version",
+              "template[0].template[0].containers[0].image",
+          },
+          f"Unexpected ignore_changes on {job_name}: {entries}",
+      )
+
 
 if __name__ == "__main__":
   unittest.main()
+
 
