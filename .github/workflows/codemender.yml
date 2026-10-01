@@ -24,6 +24,11 @@ on:
         required: false
         default: 'MEDIUM'
         type: string
+      block_pr_merge:
+        description: 'Block PR merge when vulnerabilities >= min_blocking_severity are detected (set false for non-blocking audit mode)'
+        required: false
+        default: 'true'
+        type: string
 
 permissions:
   id-token: write
@@ -38,10 +43,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  CODEMENDER_PRESUBMIT_GATE: "true"
+  CODEMENDER_PRESUBMIT_PIPELINE: "true"
   CODEMENDER_AGENT_REPO: "cloud-ai-fde/codemender-agent"
   CODEMENDER_AGENT_REF: "feat/phase4-reusable-workflow-security-gate"
   MIN_BLOCKING_SEVERITY: ${{ inputs.min_blocking_severity || vars.CODEMENDER_MIN_BLOCKING_SEVERITY || 'MEDIUM' }}
+  BLOCK_PR_MERGE: ${{ inputs.block_pr_merge || vars.CODEMENDER_BLOCK_PR_MERGE || vars.CODEMENDER_FAIL_ON_FINDINGS || 'true' }}
+  FAIL_ON_FINDINGS: ${{ inputs.block_pr_merge || vars.CODEMENDER_BLOCK_PR_MERGE || vars.CODEMENDER_FAIL_ON_FINDINGS || 'true' }}
 
 jobs:
   # ============================================================================
@@ -172,7 +179,8 @@ jobs:
           BLOCKING_COUNT: ${{ needs.scan.outputs.blocking_count }}
           ADVISORY_COUNT: ${{ needs.scan.outputs.advisory_count }}
           MIN_SEVERITY: ${{ env.MIN_BLOCKING_SEVERITY }}
-          FAIL_ON_FINDINGS: "true"
+          BLOCK_PR_MERGE: ${{ env.BLOCK_PR_MERGE }}
+          FAIL_ON_FINDINGS: ${{ env.FAIL_ON_FINDINGS }}
           PR_NUMBER: ${{ github.event.pull_request.number || '0' }}
           REPO_FULL_NAME: ${{ github.repository }}
           TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
@@ -248,6 +256,8 @@ jobs:
           TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
           PR_NUMBER: ${{ github.event.pull_request.number || '0' }}
           REPO_FULL: ${{ github.repository }}
+          BLOCK_PR_MERGE: ${{ env.BLOCK_PR_MERGE }}
+          FAIL_ON_FINDINGS: ${{ env.FAIL_ON_FINDINGS }}
           GH_TOKEN: ${{ secrets.CUSTOM_GITHUB_TOKEN || github.token }}
         run: python3 .codemender_agent/orchestrator.py
 
@@ -326,7 +336,8 @@ jobs:
         env:
           PYTHONPATH: .codemender_agent
           CODEMENDER_RUN_MODE: aggregate
-          FAIL_ON_FINDINGS: "true"
+          BLOCK_PR_MERGE: ${{ env.BLOCK_PR_MERGE }}
+          FAIL_ON_FINDINGS: ${{ env.FAIL_ON_FINDINGS }}
           TARGET_SHA: ${{ needs.scan.outputs.target_sha }}
           PR_NUMBER: ${{ github.event.pull_request.number || '0' }}
           REPO_FULL: ${{ github.repository }}
