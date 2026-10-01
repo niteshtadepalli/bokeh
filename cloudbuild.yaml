@@ -27,7 +27,7 @@
 #
 # With _UPDATE_JOBS=true the image is also tagged :latest (the build cache),
 # and the last step points both jobs at the new image's digest, but only once
-# no scan is running: it re-checks every 5 minutes for up to _MAX_WAIT_HOURS
+# no scan is running: it re-checks every 60 seconds for up to _MAX_WAIT_HOURS
 # and fails without changing anything if the scans outlast that. See
 # scripts/ci/image_rollout.sh. The build timeout leaves room for that wait.
 
@@ -110,6 +110,7 @@ steps:
       - 'IMAGE_TAG=${_IMAGE_TAG}'
       - 'UPDATE_JOBS=${_UPDATE_JOBS}'
       - 'MAX_WAIT_HOURS=${_MAX_WAIT_HOURS}'
+      - 'POLL_SECONDS=60'
 
 # 13 hours: the default 12-hour wait for running scans plus the build itself.
 # Raise it together with _MAX_WAIT_HOURS (Cloud Build allows up to 24 hours).

@@ -147,6 +147,17 @@ resource "google_project_iam_member" "apply_roles" {
   member   = local.apply_member
 }
 
+# Used by scripts/ci/pipeline_lock.py to check the live remote branch HEAD via
+# git ls-remote before applying, so an older or retried commit never overwrites
+# a newer one.
+resource "google_cloudbuildv2_connection_iam_member" "apply_read_token" {
+  project  = var.project_id
+  location = var.region
+  name     = local.repository_connection
+  role     = "roles/cloudbuild.readTokenAccessor"
+  member   = local.apply_member
+}
+
 # ---------------------------------------------------------------------------
 # Image build identity. terraform/gcp grants it the registry, Cloud Run and
 # workflow access the build and rollout need, once deployment.yaml lists it

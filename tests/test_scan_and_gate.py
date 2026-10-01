@@ -474,7 +474,7 @@ class TestScanAndImmediateGate(unittest.TestCase):
             "IS_PR": "true",
             "DIFF_SCOPED": "true",
             "BASE_REF": "main",
-            "FIND_MODEL": "gemini-2.5-pro",
+            "FIND_MODEL": "test-model-pro",
         },
         clear=False,
     ):
@@ -486,7 +486,7 @@ class TestScanAndImmediateGate(unittest.TestCase):
     self.assertEqual(by_id["crit-0001"], "CRITICAL")
     self.assertEqual(by_id["low-0002"], "LOW")
     self.assertIn("--model", recorded_find_cmd[0])
-    self.assertIn("gemini-2.5-pro", recorded_find_cmd[0])
+    self.assertIn("test-model-pro", recorded_find_cmd[0])
 
   @patch("subprocess.run")
   def test_12_native_diff_flag_auto_detection_and_fallback(

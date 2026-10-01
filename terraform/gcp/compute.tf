@@ -157,8 +157,12 @@ resource "google_cloud_run_v2_job" "runner" {
   }
 
   lifecycle {
+    # gcloud run jobs update (used by scripts/ci/image_rollout.sh) stamps
+    # client = "gcloud" and client_version on the job alongside the new image.
     ignore_changes = [
-      template[0].template[0].containers[0].image
+      client,
+      client_version,
+      template[0].template[0].containers[0].image,
     ]
   }
 
@@ -261,7 +265,9 @@ resource "google_cloud_run_v2_job" "worker" {
 
   lifecycle {
     ignore_changes = [
-      template[0].template[0].containers[0].image
+      client,
+      client_version,
+      template[0].template[0].containers[0].image,
     ]
   }
 

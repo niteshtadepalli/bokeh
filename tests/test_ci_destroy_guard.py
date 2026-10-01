@@ -51,6 +51,8 @@ class DestroyGuardTest(unittest.TestCase):
     env.start()
     self.addCleanup(env.stop)
     os.environ.pop("ALLOW_DESTROY", None)
+    os.environ.pop("DESTROY_TRIGGER", None)
+    os.environ.pop("RESOURCE_PREFIX", None)
 
   def _write_plan(self, changes):
     path = pathlib.Path(self._tmp.name) / "tfplan.json"
@@ -80,7 +82,22 @@ class DestroyGuardTest(unittest.TestCase):
     code, out, err = self._run(plan)
     self.assertEqual(code, 1)
     self.assertIn("google_storage_bucket.reports (delete)", out)
-    self.assertIn("tf-apply-destroy", err)
+    self.assertIn("<prefix>-tf-apply-destroy", err)
+    self.assertIn("verify that the build's commit", err)
+
+  def test_destroy_trigger_name_from_environment(self):
+    plan = self._write_plan([
+        _change("google_storage_bucket.reports", "google_storage_bucket", ["delete"]),
+    ])
+    os.environ["RESOURCE_PREFIX"] = "cm-prod"
+    code, _, err = self._run(plan)
+    self.assertEqual(code, 1)
+    self.assertIn("cm-prod-tf-apply-destroy", err)
+
+    os.environ["DESTROY_TRIGGER"] = "custom-destroy-trigger"
+    code, _, err = self._run(plan)
+    self.assertEqual(code, 1)
+    self.assertIn("custom-destroy-trigger", err)
 
   def test_replacing_a_protected_resource_fails(self):
     for actions in (["delete", "create"], ["create", "delete"]):

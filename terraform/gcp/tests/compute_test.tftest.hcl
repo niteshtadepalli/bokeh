@@ -41,6 +41,11 @@ run "compute_resources_created_correctly" {
   }
 
   assert {
+    condition     = google_cloud_run_v2_job.worker.name == "test-compute-worker" && google_cloud_run_v2_job.worker.location == "us-central1"
+    error_message = "Worker Cloud Run job name and location must match the expected resource_prefix and region."
+  }
+
+  assert {
     condition     = google_workflows_workflow.coordinator.name == "test-compute-coordinator"
     error_message = "Workflow name does not match the expected resource_prefix pattern."
   }

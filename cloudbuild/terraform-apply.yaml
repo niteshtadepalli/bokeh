@@ -12,43 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Apply on merge: plan to a file, stop if the plan deletes protected
-# resources, then apply exactly that saved plan.
+# Apply on merge: acquire the pipeline mutex in the state bucket, verify that
+# COMMIT_SHA is still the tip of the deployed branch, then plan to a file, stop
+# if the plan deletes protected resources, and apply that saved plan.
 #
 # Run by the <prefix>-tf-apply trigger (push to the main branch) and by the
 # manual, approval-gated <prefix>-tf-apply-destroy trigger, which sets
-# _ALLOW_DESTROY=true. The logic lives in scripts/ci/tf_apply.sh and
-# scripts/ci/destroy_guard.py. All steps share the /workspace checkout, so the
-# saved plan and the initialised .terraform directory carry over.
+# _ALLOW_DESTROY=true. The logic lives in scripts/ci/tf_apply.sh,
+# scripts/ci/pipeline_lock.py and scripts/ci/destroy_guard.py.
 
 steps:
-  - id: 'terraform-plan'
-    # hashicorp/terraform:1.13.3, pinned by digest.
+  - id: 'stage-terraform'
+    # hashicorp/terraform:1.13.3, pinned by digest. Copies the static binary
+    # into /workspace/.terraform-bin so the apply step has terraform, python3
+    # and git in a single container.
     name: 'hashicorp/terraform@sha256:dfb1889a8ee74ada3ddacc48f89b8a0d69f3e114de3d8a2ce15f6a8d3dbfdbe2'
     entrypoint: 'sh'
-    args: ['scripts/ci/tf_apply.sh', 'plan']
+    args:
+      - '-c'
+      - 'mkdir -p /workspace/.terraform-bin && cp /bin/terraform /workspace/.terraform-bin/terraform'
+
+  - id: 'terraform-apply'
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'sh'
+    args: ['scripts/ci/tf_apply.sh', 'all']
     env:
+      - 'PROJECT_ID=${PROJECT_ID}'
+      - 'BUILD_ID=${BUILD_ID}'
+      - 'COMMIT_SHA=${COMMIT_SHA}'
       - 'TF_STATE_BUCKET=${_TF_STATE_BUCKET}'
       - 'TF_STATE_PREFIX=${_TF_STATE_PREFIX}'
       - 'TF_DIR=${_TF_DIR}'
-
-  - id: 'destroy-guard'
-    # python:3.12-slim, pinned by digest.
-    name: 'python@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f'
-    entrypoint: 'sh'
-    args: ['scripts/ci/tf_apply.sh', 'guard']
-    env:
-      - 'TF_DIR=${_TF_DIR}'
       - 'ALLOW_DESTROY=${_ALLOW_DESTROY}'
+      - 'CLOUDBUILD_REPO=${_CLOUDBUILD_REPO}'
+      - 'DEPLOY_BRANCH=${_DEPLOY_BRANCH}'
+      - 'DESTROY_TRIGGER=${_DESTROY_TRIGGER}'
 
-  - id: 'terraform-apply'
-    name: 'hashicorp/terraform@sha256:dfb1889a8ee74ada3ddacc48f89b8a0d69f3e114de3d8a2ce15f6a8d3dbfdbe2'
-    entrypoint: 'sh'
-    args: ['scripts/ci/tf_apply.sh', 'apply']
-    env:
-      - 'TF_DIR=${_TF_DIR}'
-
-# The plan waits up to 15 minutes for the state lock held by another apply.
+# The apply waits up to 15 minutes for the pipeline mutex and state lock.
 timeout: '3600s'
 
 options:
@@ -59,3 +59,6 @@ substitutions:
   _TF_STATE_PREFIX: 'terraform/gcp'
   _TF_DIR: 'terraform/gcp'
   _ALLOW_DESTROY: 'false'
+  _CLOUDBUILD_REPO: ''
+  _DEPLOY_BRANCH: 'main'
+  _DESTROY_TRIGGER: 'codemender-tf-apply-destroy'

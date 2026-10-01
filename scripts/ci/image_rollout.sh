@@ -153,3 +153,10 @@ for job in "${RUNNER_JOB}" "${WORKER_JOB}"; do
     --project="${PROJECT_ID}" --region="${REGION}" --quiet
 done
 echo "Rolled out ${IMAGE}@${digest} to ${RUNNER_JOB} and ${WORKER_JOB}."
+
+if post_active="$(count_active 2>/dev/null)" && [[ "${post_active}" -gt 0 ]]; then
+  echo "WARNING: ${post_active} active scan(s) detected immediately after updating the" >&2
+  echo "Cloud Run jobs. A scan that started during the update window may run its" >&2
+  echo "later stages on ${IMAGE}@${digest}; check the active workflow execution." >&2
+fi
+

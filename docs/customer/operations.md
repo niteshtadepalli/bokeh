@@ -87,6 +87,7 @@ The keys you are most likely to change in `deployment.yaml`:
 | `github_app_id`, `github_app_installation_id`, `github_app_private_key_secret_id` | unset | GitHub App authentication; see below |
 | `wiz_client_id_secret_id`, `wiz_client_secret_secret_id` | `<prefix>-wiz-client-id`, `<prefix>-wiz-client-secret` | Names of the Wiz credential secrets |
 | `enable_bigquery_telemetry` | `true` | Write scan history and findings to BigQuery |
+| `bigquery_dataset_id` | `codemender_telemetry` | BigQuery dataset ID (not prefixed with `resource_prefix`; override if another deployment shares the project) |
 | `bigquery_include_snippets` | `false` | Also store source snippets and the model's analysis text in BigQuery |
 | `create_vpc_and_nat`, `existing_vpc_connector_id` | `false`, unset | Send the jobs' traffic through a VPC connector and Cloud NAT (fixed egress IP) |
 | `cloudbuild_service_account_emails` | the project's default Cloud Build accounts | Who may build and roll out the runner image; list the bootstrap's image build account |
